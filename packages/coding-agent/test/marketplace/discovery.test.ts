@@ -219,11 +219,11 @@ describe("GJC precedence contract (registry structure)", () => {
 		// The replacement logic: roots.filter(r => r.id !== pluginId) keyed by id.
 		// GJC entries must have installPath so they can be added to roots[].
 		const id = buildPluginId("shared-plugin", "common-mkt");
-		const ompEntry = makeEntry("/gjc/cached/path");
+		const gjcEntry = makeEntry("/gjc/cached/path");
 
 		// GJC registry entry has installPath (required by listClaudePluginRoots)
-		expect(ompEntry.installPath).toBeTruthy();
-		expect(typeof ompEntry.installPath).toBe("string");
+		expect(gjcEntry.installPath).toBeTruthy();
+		expect(typeof gjcEntry.installPath).toBe("string");
 		// ID parses correctly with lastIndexOf("@")
 		const atIndex = id.lastIndexOf("@");
 		expect(atIndex).toBeGreaterThan(0);

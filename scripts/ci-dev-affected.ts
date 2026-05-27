@@ -170,7 +170,8 @@ function readStringMap(value: unknown): Record<string, string> | undefined {
 function planTasks(paths: readonly string[], packages: readonly WorkspacePackage[]): Task[] {
 	const tasks = new Map<string, Task>();
 	const touchedPackages = findTouchedPackages(paths, packages);
-	const fullWorkspace = paths.some(isFullWorkspacePath);
+	const rootPackageReleaseHarnessOnly = isRootPackageReleaseHarnessOnly(paths);
+	const fullWorkspace = paths.some(isFullWorkspacePath) && !rootPackageReleaseHarnessOnly;
 	const pythonChanged = paths.some(isPythonPath);
 	const webChanged = paths.some(changedPath => changedPath.startsWith("python/robogjc/web/"));
 	const rustChanged = paths.some(isRustPath);
@@ -211,6 +212,7 @@ function planTasks(paths: readonly string[], packages: readonly WorkspacePackage
 		add(tasks, "wrapper-version", "Unscoped wrapper CLI version smoke", ["bun", "packages/gajae-code/bin/gjc.js", "--version"]);
 	}
 	if (publishChanged) {
+		add(tasks, "release-publish-contract", "Release publish contract tests", ["bun", "run", "test:release"]);
 		add(tasks, "release-publish-dry-run", "Release publish dry-run", ["bun", "scripts/ci-release-publish.ts", "--dry-run"]);
 	}
 
@@ -292,6 +294,28 @@ function isFullWorkspacePath(changedPath: string): boolean {
 		"tsconfig.json",
 		"tsconfig.base.json",
 		"tsconfig.tools.json",
+	].includes(changedPath);
+}
+
+function isRootPackageReleaseHarnessOnly(paths: readonly string[]): boolean {
+	return (
+		paths.includes("package.json") &&
+		paths.every(changedPath =>
+			changedPath === "package.json" ||
+			isReleasePublishPath(changedPath) ||
+			isReleaseHarnessScriptPath(changedPath) ||
+			isUnscopedWrapperPath(changedPath),
+		)
+	);
+}
+
+function isReleaseHarnessScriptPath(changedPath: string): boolean {
+	return [
+		"scripts/ci-dev-affected.ts",
+		"scripts/ci-release-publish.ts",
+		"scripts/install-tests/tarball.dockerfile",
+		"scripts/release-publish-order.test.ts",
+		"scripts/sync-versions.ts",
 	].includes(changedPath);
 }
 

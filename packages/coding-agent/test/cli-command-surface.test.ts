@@ -14,6 +14,7 @@ describe("GJC public CLI command surface", () => {
 	it("registers launch, setup, and retained workflow runtime endpoints", async () => {
 		const source = await Bun.file(cliEntry).text();
 		expect(extractRegisteredCommands(source)).toEqual([
+			"codex-native-hook",
 			"question",
 			"state",
 			"team",

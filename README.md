@@ -1,3 +1,5 @@
+> Disclaimer: Gajae-Code is an experimental, beta-stage early project. Expect rough edges and verify outputs before relying on it for important work.
+
 <p align="center">
   <img src="assets/hero.png" alt="Gajae-Code autonomous coding-agent hero illustration" width="100%" />
 </p>
@@ -117,11 +119,7 @@ For a package-by-package map, see [`docs/codebase-overview.md`](docs/codebase-ov
 
 ## Inspirations and lineage
 
-Gajae-Code builds on lessons from a small family of agent harnesses and keeps attribution visible:
-
-- [`oh-my-pi`](https://github.com/can1357/oh-my-pi) — the upstream red-claw lineage and implementation DNA.
-- [`oh-my-codex`](https://github.com/Yeachan-Heo/oh-my-codex) — Codex-focused orchestration experiments.
-- [`oh-my-claudecode`](https://github.com/Yeachan-Heo/oh-my-claudecode) — Claude Code workflow exploration.
+Gajae-Code builds on lessons from a small family of agent harnesses while keeping the public GJC surface intentionally focused. Historical attribution is kept in [`NOTICE.md`](NOTICE.md).
 
 ## License
 

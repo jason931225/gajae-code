@@ -1,10 +1,41 @@
 #!/usr/bin/env bun
 
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Glob } from "bun";
 
-const docsDir = path.resolve(import.meta.dir, "../../../docs");
+async function pathExists(candidate: string): Promise<boolean> {
+	try {
+		await fs.access(candidate);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function findDocsDir(): Promise<string | undefined> {
+	let current = path.resolve(import.meta.dir);
+	while (true) {
+		const docsDir = path.join(current, "docs");
+		if (await pathExists(docsDir)) return docsDir;
+		const parent = path.dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+const docsDir = await findDocsDir();
 const outputPath = path.resolve(import.meta.dir, "../src/internal-urls/docs-index.generated.ts");
+
+if (docsDir === undefined) {
+	const existingIndex = Bun.file(outputPath);
+	if (await existingIndex.exists()) {
+		process.stderr.write("Docs directory not found; keeping bundled docs index.\n");
+		process.exit(0);
+	}
+	process.stderr.write("Docs directory not found and no bundled docs index exists.\n");
+	process.exit(1);
+}
 
 const glob = new Glob("**/*.md");
 const entries: string[] = [];
@@ -37,4 +68,4 @@ const output = [
 ].join("\n");
 
 await Bun.write(outputPath, output);
-console.log(`Generated ${path.relative(process.cwd(), outputPath)} (${entries.length} docs)`);
+process.stderr.write(`Generated ${path.relative(process.cwd(), outputPath)} (${entries.length} docs)\n`);

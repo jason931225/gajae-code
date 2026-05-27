@@ -36,6 +36,7 @@ interface JsonObject {
 }
 interface PackageManifest extends JsonObject {
 	name?: string;
+	version?: string;
 	private?: boolean;
 }
 
@@ -56,11 +57,85 @@ const packages: PublishPackage[] = [
 	{ dir: "packages/agent", kind: "typescript" },
 	{ dir: "packages/coding-agent", kind: "typescript" },
 ];
+const dependencyFieldNames = [
+	"dependencies",
+	"devDependencies",
+	"peerDependencies",
+	"optionalDependencies",
+] as const;
+
+let rootCatalog: Readonly<Record<string, string>> | undefined;
+let workspaceVersions: Readonly<Record<string, string>> | undefined;
+
+function asStringRecord(value: JsonValue | undefined): Record<string, string> {
+	if (value === undefined || value === null || typeof value !== "object" || Array.isArray(value)) return {};
+	const record: Record<string, string> = {};
+	for (const key in value) {
+		const entry = (value as JsonObject)[key];
+		if (typeof entry === "string") record[key] = entry;
+	}
+	return record;
+}
+
+async function loadRootCatalog(): Promise<Readonly<Record<string, string>>> {
+	if (rootCatalog !== undefined) return rootCatalog;
+	const manifest = (await Bun.file(path.join(repoRoot, "package.json")).json()) as PackageManifest;
+	if (manifest.workspaces === null || typeof manifest.workspaces !== "object" || Array.isArray(manifest.workspaces)) {
+		rootCatalog = {};
+		return rootCatalog;
+	}
+	rootCatalog = asStringRecord((manifest.workspaces as JsonObject).catalog);
+	return rootCatalog;
+}
+
+async function loadWorkspaceVersions(): Promise<Readonly<Record<string, string>>> {
+	if (workspaceVersions !== undefined) return workspaceVersions;
+	const versions: Record<string, string> = {};
+	for (const pkg of packages) {
+		const manifest = (await Bun.file(path.join(repoRoot, pkg.dir, "package.json")).json()) as PackageManifest;
+		if (typeof manifest.name === "string" && typeof manifest.version === "string") {
+			versions[manifest.name] = manifest.version;
+		}
+	}
+	workspaceVersions = versions;
+	return workspaceVersions;
+}
 
 function rewriteSrcPath(value: string): string {
 	if (!value.startsWith("./src/")) return value;
 	const rel = value.slice("./src/".length).replace(/\.tsx?$/, "");
 	return `./dist/types/${rel}.d.ts`;
+}
+
+async function resolvePublishDependency(name: string, spec: string): Promise<string> {
+	let resolved = spec;
+	if (spec === "catalog:" || spec.startsWith("catalog:")) {
+		const catalog = await loadRootCatalog();
+		const catalogEntry = catalog[name];
+		if (catalogEntry === undefined) throw new Error(`Missing catalog version for ${name}`);
+		resolved = catalogEntry;
+	}
+	if (resolved === "workspace:*" || resolved.startsWith("workspace:")) {
+		const versions = await loadWorkspaceVersions();
+		const workspaceVersion = versions[name];
+		if (workspaceVersion === undefined) throw new Error(`Missing workspace package version for ${name}`);
+		return workspaceVersion;
+	}
+	return resolved;
+}
+
+async function rewriteDependencyFields(manifest: PackageManifest): Promise<void> {
+	for (const fieldName of dependencyFieldNames) {
+		const field = manifest[fieldName];
+		if (field === undefined || field === null || typeof field !== "object" || Array.isArray(field)) continue;
+		const dependencies = field as JsonObject;
+		for (const dependencyName in dependencies) {
+			const spec = dependencies[dependencyName];
+			if (typeof spec === "string") {
+				dependencies[dependencyName] = await resolvePublishDependency(dependencyName, spec);
+			}
+		}
+	}
 }
 
 function rewriteExports(exports: JsonValue): JsonValue {
@@ -89,6 +164,7 @@ function rewriteExports(exports: JsonValue): JsonValue {
 async function rewriteManifest(pkgDir: string, extraFiles: readonly string[]): Promise<PackageManifest> {
 	const manifestPath = path.join(pkgDir, "package.json");
 	const manifest = (await Bun.file(manifestPath).json()) as PackageManifest;
+	await rewriteDependencyFields(manifest);
 	if (typeof manifest.types === "string" && manifest.types.startsWith("./src/")) {
 		manifest.types = rewriteSrcPath(manifest.types);
 	}
@@ -104,10 +180,18 @@ async function rewriteManifest(pkgDir: string, extraFiles: readonly string[]): P
 	return manifest;
 }
 
+async function rewriteNativeManifest(pkgDir: string): Promise<PackageManifest> {
+	const manifestPath = path.join(pkgDir, "package.json");
+	const manifest = (await Bun.file(manifestPath).json()) as PackageManifest;
+	await rewriteDependencyFields(manifest);
+	await Bun.write(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
+	return manifest;
+}
+
 async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	if (pkg.kind === "native") {
-		return (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
+		return rewriteNativeManifest(pkgDir);
 	}
 	for (const argv of pkg.preBuild ?? []) {
 		await $`${argv}`.cwd(pkgDir);

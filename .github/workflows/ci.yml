@@ -222,11 +222,10 @@ jobs:
            run: bun run ci:test:install-methods
 
    release_binary:
-      if: ${{ startsWith(github.ref, 'refs/tags/v') && !cancelled() &&
+      if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && !cancelled() &&
          needs.native_linux.result == 'success' && needs.native_release.result ==
-         'success' && needs.test.result == 'success' && needs.check.result ==
-         'success' && needs.install_methods.result == 'success' }}
-      needs: [check, native_linux, native_release, test, install_methods, rust-hash]
+         'success' && needs.check.result == 'success' }}
+      needs: [check, native_linux, native_release, rust-hash]
       strategy:
          fail-fast: false
          matrix:

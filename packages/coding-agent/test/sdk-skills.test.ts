@@ -26,17 +26,17 @@ describe("createAgentSession skills option", () => {
 	let originalHome: string | undefined;
 
 	beforeEach(() => {
-		tempDir = path.join(os.tmpdir(), `pi-sdk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		// Create skill in .gjc/skills/ for native project-level discovery
+		tempDir = path.join(os.tmpdir(), `gjc-sdk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		// Create skill in .gjc/skills/ for native project-level discovery.
 		skillsDir = path.join(tempDir, ".gjc", "skills", "test-skill");
 		fs.mkdirSync(skillsDir, { recursive: true });
 		originalHome = process.env.HOME;
-		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-home-"));
+		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-home-"));
 		process.env.HOME = tempHomeDir;
 		const nativeUserSkillsDir = path.join(tempHomeDir, ".gjc", "agent", "skills");
 		fs.mkdirSync(nativeUserSkillsDir, { recursive: true });
 
-		// Create a test skill in the pi skills directory
+		// Create a test skill in the native GJC skills directory
 		fs.writeFileSync(
 			path.join(skillsDir, "SKILL.md"),
 			`---

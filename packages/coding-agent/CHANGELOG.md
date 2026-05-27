@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Fixed legacy Pi plugin import remapping and stale GJC config-path tests so rebranded `.gjc` discovery contracts pass while preserving legacy compatibility.
 - Fixed web search OAuth-backed providers (including Codex and Gemini) to use broker-managed token retrieval and account metadata, avoiding direct token-store refresh behavior that could cause search authentication failures
 - Updated Tavily missing-credential feedback to prompt users to configure an API-key provider setting instead of referencing `agent.db` directly
 - Refreshed expired OpenAI Codex OAuth tokens during `web_search` execution and persisted the updated credentials so searches continue working after token expiry

@@ -22,8 +22,8 @@ describe("SYSTEM.md prompt assembly", () => {
 	let originalHome: string | undefined;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-system-prompt-"));
-		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-system-home-"));
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-system-prompt-"));
+		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-system-home-"));
 		originalHome = process.env.HOME;
 		process.env.HOME = tempHomeDir;
 	});

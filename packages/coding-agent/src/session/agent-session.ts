@@ -78,7 +78,6 @@ import {
 import { MacOSPowerAssertion } from "@gajae-code/natives";
 import {
 	extractRetryHint,
-	getAgentDbPath,
 	isEnoent,
 	isUnexpectedSocketCloseMessage,
 	logger,
@@ -166,6 +165,7 @@ import {
 	selectDiscoverableMCPToolNamesByServer,
 } from "../runtime-mcp/discoverable-tool-metadata";
 import { deobfuscateSessionContext, type SecretObfuscator } from "../secrets/obfuscator";
+import { formatNoCredentialOnboardingError, formatNoModelOnboardingError } from "../setup/model-onboarding-guidance";
 import { isCanonicalGjcWorkflowSkill, syncSkillActiveState } from "../skill-state/active-state";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
 import { resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
@@ -4138,20 +4138,13 @@ export class AgentSession {
 
 			// Validate model
 			if (!this.model) {
-				throw new Error(
-					"No model selected.\n\n" +
-						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}\n\n` +
-						"Then use /model to select a model.",
-				);
+				throw new Error(formatNoModelOnboardingError());
 			}
 
 			// Validate API key
 			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId);
 			if (!apiKey) {
-				throw new Error(
-					`No API key found for ${this.model.provider}.\n\n` +
-						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
-				);
+				throw new Error(formatNoCredentialOnboardingError(this.model.provider));
 			}
 
 			// Check if we need to compact before sending (catches aborted responses)

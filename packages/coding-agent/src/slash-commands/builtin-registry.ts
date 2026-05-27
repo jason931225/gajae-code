@@ -5,6 +5,7 @@ import { setProjectDir } from "@gajae-code/utils";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../discovery/helpers.js";
 import { resolveMemoryBackend } from "../memory-backend";
 import type { InteractiveModeContext } from "../modes/types";
+import { formatModelOnboardingGuidance } from "../setup/model-onboarding-guidance";
 import {
 	addApiCompatibleProvider,
 	formatProviderSetupResult,
@@ -32,8 +33,8 @@ function parseProviderSetupSlashArgs(args: string): {
 	compat?: string;
 	provider?: string;
 	baseUrl?: string;
-	apiKey?: string;
 	apiKeyEnv?: string;
+	rejectedRawApiKey: boolean;
 	force: boolean;
 	models: string[];
 } {
@@ -42,13 +43,14 @@ function parseProviderSetupSlashArgs(args: string): {
 		compat?: string;
 		provider?: string;
 		baseUrl?: string;
-		apiKey?: string;
 		apiKeyEnv?: string;
+		rejectedRawApiKey: boolean;
 		force: boolean;
 		models: string[];
 	} = {
 		force: false,
 		models: [],
+		rejectedRawApiKey: false,
 	};
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
@@ -68,7 +70,7 @@ function parseProviderSetupSlashArgs(args: string): {
 			result.baseUrl = value;
 			i += 1;
 		} else if (token === "--api-key") {
-			result.apiKey = value;
+			result.rejectedRawApiKey = true;
 			i += 1;
 		} else if (token === "--api-key-env") {
 			result.apiKeyEnv = value;
@@ -88,6 +90,12 @@ function providerSetupUsage(): string {
 		"OAuth/subscription providers: /provider login [provider-id] or /login [provider-id]",
 		"Headless OAuth callbacks can be pasted with /login <redirect URL or code>.",
 	].join("\n");
+}
+
+function modelSelectionUsage(currentModelLine?: string): string {
+	return [currentModelLine, formatModelOnboardingGuidance()]
+		.filter((line): line is string => Boolean(line))
+		.join("\n\n");
 }
 
 function refreshStatusLine(ctx: InteractiveModeContext): void {
@@ -160,7 +168,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				);
 				if (!match) {
 					return usage(
-						`Unknown model: ${modelId}. Use ACP \`session/setModel\` for picker-driven selection or list available models with /model.`,
+						modelSelectionUsage(
+							`Unknown model: ${modelId}. Configure or login to a provider first, then list/select models with /model.`,
+						),
 						runtime,
 					);
 				}
@@ -177,7 +187,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 
 			const model = runtime.session.model;
 			await runtime.output(
-				model ? `Current model: ${model.provider}/${model.id}` : "No model is currently selected.",
+				modelSelectionUsage(
+					model ? `Current model: ${model.provider}/${model.id}` : "No model is currently selected.",
+				),
 			);
 			return commandConsumed();
 		},
@@ -464,7 +476,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (!parsed.compat) missing.push("--compat");
 			if (!parsed.provider) missing.push("--provider");
 			if (!parsed.baseUrl) missing.push("--base-url");
-			if (!parsed.apiKey && !parsed.apiKeyEnv) missing.push("--api-key or --api-key-env");
+			if (parsed.rejectedRawApiKey) {
+				return usage("Provider setup rejects raw --api-key values; use --api-key-env <ENV> instead.", runtime);
+			}
+			if (!parsed.apiKeyEnv) missing.push("--api-key-env");
 			if (parsed.models.length === 0) missing.push("--model");
 			if (missing.length > 0) return usage(`Missing required option(s): ${missing.join(", ")}`, runtime);
 			try {
@@ -472,7 +487,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					compatibility: parseProviderCompatibility(parsed.compat!),
 					providerId: parsed.provider!,
 					baseUrl: parsed.baseUrl!,
-					apiKey: parsed.apiKey,
 					apiKeyEnv: parsed.apiKeyEnv,
 					models: parsed.models,
 					force: parsed.force,
@@ -487,6 +501,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (command, runtime) => {
 			const args = command.args.trim();
+			if (!args) {
+				runtime.ctx.showProviderOnboarding();
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (args === "help") {
+				runtime.ctx.showStatus(providerSetupUsage());
+				runtime.ctx.editor.setText("");
+				return;
+			}
 			if (args === "login" || args.startsWith("login ")) {
 				const providerId = args.slice("login".length).trim() || undefined;
 				await runtime.ctx.showOAuthSelector("login", providerId);
@@ -496,11 +520,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (args.startsWith("add ")) {
 				const parsed = parseProviderSetupSlashArgs(args.slice(4));
 				try {
+					if (parsed.rejectedRawApiKey) {
+						throw new Error("Provider setup rejects raw --api-key values; use --api-key-env <ENV> instead.");
+					}
 					const result = await addApiCompatibleProvider({
 						compatibility: parseProviderCompatibility(parsed.compat ?? ""),
 						providerId: parsed.provider ?? "",
 						baseUrl: parsed.baseUrl ?? "",
-						apiKey: parsed.apiKey,
 						apiKeyEnv: parsed.apiKeyEnv,
 						models: parsed.models,
 						force: parsed.force,
@@ -568,8 +594,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "logout",
 		description: "Logout from OAuth provider",
-		handleTui: (_command, runtime) => {
-			void runtime.ctx.showOAuthSelector("logout");
+		inlineHint: "[provider]",
+		allowArgs: true,
+		handleTui: (command, runtime) => {
+			const providerId = command.args.trim() || undefined;
+			void runtime.ctx.showOAuthSelector("logout", providerId);
 			runtime.ctx.editor.setText("");
 		},
 	},

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -165,5 +165,36 @@ describe("provider onboarding setup core", () => {
 		expect(parsed?.flags.provider).toBe("local-openai");
 		expect(parsed?.flags.apiKeyEnv).toBe("GJC_TEST_PROVIDER_KEY");
 		expect(parsed?.flags.model).toEqual(["gpt-one", "gpt-two,gpt-three"]);
+	});
+
+	it("rejects raw API keys in setup provider arguments", () => {
+		const exitSpy = vi
+			.spyOn(process, "exit")
+			.mockImplementation((code?: string | number | null | undefined): never => {
+				throw new Error(`exit ${code}`);
+			});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		try {
+			expect(() =>
+				parseSetupArgs([
+					"setup",
+					"provider",
+					"--compat",
+					"openai",
+					"--provider",
+					"raw-key",
+					"--base-url",
+					"https://api.example.test/v1",
+					"--api-key",
+					"sk-secret",
+					"--model",
+					"gpt",
+				]),
+			).toThrow("exit 1");
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Provider setup rejects raw --api-key values"));
+		} finally {
+			errorSpy.mockRestore();
+			exitSpy.mockRestore();
+		}
 	});
 });

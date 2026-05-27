@@ -1458,6 +1458,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: toolRegistry,
 			getToolContext: () => toolContextStore.getContext(),
 			emitEvent: event => cursorEventEmitter?.(event),
+			createEventEmitter: () => agent.createExternalEventEmitterForCurrentRun(),
 		});
 
 		const repeatToolDescriptions = settings.get("repeatToolDescriptions");

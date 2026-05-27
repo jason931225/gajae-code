@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/hero.png" alt="Gajae-Code hero logo" width="780">
+  <img src="assets/hero.png" alt="Gajae-Code autonomous coding-agent hero illustration" width="100%" />
 </p>
 
 <h1 align="center">Gajae-Code</h1>
@@ -9,8 +9,11 @@
 </p>
 
 <p align="center">
-  <img src="assets/icon.svg" alt="Gaebal Gajae avatar" width="96" height="96">
+  <img src="assets/character.png" alt="Gajae-Code character mascot" width="360" />
 </p>
+
+## Story
+
 I created an earlier OpenAI code harness and `an earlier Anthropic-code harness`. After living with those harnesses, I felt the same thing kept happening: the harness got bloated, but the work still collapsed into one useful loop.
 
 ## Usage
@@ -42,6 +45,10 @@ gjc --tmux --worktree <path>
 ```
 
 Use a dedicated path for throwaway or branch-specific work so the main checkout stays clean.
+
+## Default TUI identity
+
+The default dark TUI identity is the GJC red-claw theme: a red/orange crustacean look for Gajae-Code terminals. Explicit user theme settings still win.
 
 ## Why Gajae-Code?
 

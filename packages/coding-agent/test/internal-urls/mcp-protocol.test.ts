@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { InternalUrlRouter } from "../../src/internal-urls";
+import { McpProtocolHandler } from "../../src/internal-urls/mcp-protocol";
 import { MCPManager } from "../../src/runtime-mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "../../src/runtime-mcp/types";
 
@@ -23,6 +24,7 @@ describe("McpProtocolHandler", () => {
 	beforeEach(() => {
 		MCPManager.resetForTests();
 		InternalUrlRouter.resetForTests();
+		InternalUrlRouter.instance().register(new McpProtocolHandler());
 	});
 
 	afterEach(() => {

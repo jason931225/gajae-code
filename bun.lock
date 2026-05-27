@@ -81,6 +81,16 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/gajae-code": {
+      "name": "gajae-code",
+      "version": "0.1.0",
+      "bin": {
+        "gjc": "bin/gjc.js",
+      },
+      "dependencies": {
+        "@gajae-code/coding-agent": "catalog:",
+      },
+    },
     "packages/natives": {
       "name": "@gajae-code/natives",
       "version": "0.1.0",
@@ -922,6 +932,8 @@
     "fn.name": ["fn.name@1.1.0", "", {}, "sha512-GRnmB5gPyJpAhTQdSZTSp9uaPSvl09KoYcMQtsB9rQoOmzs9dH6ffeccH+Z+cv6P68Hu5bC6JjRh4Ah/mHSNRw=="],
 
     "fsevents": ["fsevents@2.3.3", "", { "os": "darwin" }, "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=="],
+
+    "gajae-code": ["gajae-code@workspace:packages/gajae-code"],
 
     "gensync": ["gensync@1.0.0-beta.2", "", {}, "sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg=="],
 

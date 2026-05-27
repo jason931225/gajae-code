@@ -20,13 +20,13 @@ I created an earlier OpenAI code harness and `an earlier Anthropic-code harness`
 
 ## Usage
 
-Gajae-Code is published through the normal npm registry. Install it with Bun for the recommended runtime workflow:
+Gajae-Code is published through the normal npm registry. Install the one-line npm wrapper with Bun for the recommended runtime workflow:
 
 ```sh
-bun install -g @gajae-code/coding-agent
+bun install -g gajae-code
 ```
 
-For repository development, use the source checkout commands in [Development](#development).
+The scoped package is also available as `@gajae-code/coding-agent`. For repository development, use the source checkout commands in [Development](#development).
 
 Start the recommended tmux-backed experience:
 

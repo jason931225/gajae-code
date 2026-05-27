@@ -175,7 +175,15 @@ function planTasks(paths: readonly string[], packages: readonly WorkspacePackage
 	const webChanged = paths.some(changedPath => changedPath.startsWith("python/robogjc/web/"));
 	const rustChanged = paths.some(isRustPath);
 	const installChanged = paths.some(isInstallPath);
+	const publishChanged = paths.some(isReleasePublishPath);
+	const wrapperChanged = paths.some(isUnscopedWrapperPath);
+	const toolingScriptChanged = paths.some(isToolingScriptPath);
+	const needsNativeRuntime = paths.some(isCodingAgentRuntimePath) || wrapperChanged || fullWorkspace;
 	const ciOnly = paths.length > 0 && paths.every(changedPath => changedPath.startsWith(".github/"));
+
+	if (needsNativeRuntime) {
+		add(tasks, "native-build", "Build native addon for CLI/test smoke", ["bun", "run", "build:native"]);
+	}
 
 	if (fullWorkspace) {
 		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "check:ts"]);
@@ -189,6 +197,16 @@ function planTasks(paths: readonly string[], packages: readonly WorkspacePackage
 				add(tasks, `test:${workspacePackage.name}`, `Test ${workspacePackage.name}`, ["bun", "--cwd", workspacePackage.dir, "run", "test"]);
 			}
 		}
+	}
+
+	if (toolingScriptChanged && !fullWorkspace && !ciOnly) {
+		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "check:ts"]);
+	}
+	if (wrapperChanged) {
+		add(tasks, "wrapper-version", "Unscoped wrapper CLI version smoke", ["bun", "packages/gajae-code/bin/gjc.js", "--version"]);
+	}
+	if (publishChanged) {
+		add(tasks, "release-publish-dry-run", "Release publish dry-run", ["bun", "scripts/ci-release-publish.ts", "--dry-run"]);
 	}
 
 	if (pythonChanged) {
@@ -206,8 +224,7 @@ function planTasks(paths: readonly string[], packages: readonly WorkspacePackage
 	if (installChanged) {
 		add(tasks, "install-methods", "Install method smoke tests", ["bun", "run", "ci:test:install-methods"]);
 	}
-	if (paths.some(isCodingAgentRuntimePath) || fullWorkspace) {
-		add(tasks, "native-build", "Build native addon for CLI smoke test", ["bun", "run", "build:native"]);
+	if (needsNativeRuntime) {
 		add(tasks, "cli-smoke", "GJC CLI smoke test", ["bun", "run", "ci:test:smoke"]);
 	}
 	if (paths.some(isWorkflowOrScriptPath)) {
@@ -260,7 +277,6 @@ function dependsOnWorkspace(manifest: PackageManifest, dependencyName: string, w
 function isFullWorkspacePath(changedPath: string): boolean {
 	return [
 		"package.json",
-		"bun.lock",
 		"bunfig.toml",
 		"biome.json",
 		"tsconfig.json",
@@ -292,6 +308,18 @@ function isCodingAgentRuntimePath(changedPath: string): boolean {
 
 function isWorkflowOrScriptPath(changedPath: string): boolean {
 	return changedPath.startsWith(".github/workflows/") || changedPath === "scripts/ci-dev-affected.ts";
+}
+
+function isToolingScriptPath(changedPath: string): boolean {
+	return changedPath.startsWith("scripts/") || changedPath === "bun.lock";
+}
+
+function isReleasePublishPath(changedPath: string): boolean {
+	return changedPath === "scripts/ci-release-publish.ts" || changedPath.startsWith("packages/gajae-code/");
+}
+
+function isUnscopedWrapperPath(changedPath: string): boolean {
+	return changedPath.startsWith("packages/gajae-code/");
 }
 
 function isString(value: unknown): value is string {

@@ -21,7 +21,7 @@ import { $ } from "bun";
 
 interface PublishPackage {
 	dir: string;
-	kind: "typescript" | "native";
+	kind: "typescript" | "native" | "manifest";
 	/** Extra build steps before manifest rewrite (e.g. esbuild bundles). */
 	preBuild?: readonly (readonly string[])[];
 	/** Extra entries to splice into `files`. */
@@ -56,6 +56,7 @@ const packages: PublishPackage[] = [
 	},
 	{ dir: "packages/agent", kind: "typescript" },
 	{ dir: "packages/coding-agent", kind: "typescript" },
+	{ dir: "packages/gajae-code", kind: "manifest" },
 ];
 const dependencyFieldNames = [
 	"dependencies",
@@ -190,7 +191,7 @@ async function rewriteNativeManifest(pkgDir: string): Promise<PackageManifest> {
 
 async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
-	if (pkg.kind === "native") {
+	if (pkg.kind === "native" || pkg.kind === "manifest") {
 		return rewriteNativeManifest(pkgDir);
 	}
 	for (const argv of pkg.preBuild ?? []) {

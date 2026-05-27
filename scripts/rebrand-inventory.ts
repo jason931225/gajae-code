@@ -34,6 +34,7 @@ const expectedBundledRoleAgents = ["architect", "critic", "executor", "planner"]
 const expectedPackageScope = "@gajae-code/";
 const expectedCliBins = ["gjc", "gjc-stats", "gjc-swarm"] as const;
 const expectedRootPackageName = "gajae-code";
+const allowedUnscopedPackageNames = new Set([expectedRootPackageName]);
 const rootPublicMetadataFields = ["name", "description", "homepage", "repository", "bugs"] as const;
 const rootLegacyScriptKeys = new Set(["test:py"]);
 
@@ -239,7 +240,7 @@ const unexpectedBundledWorkflowSkills = bundledWorkflowSkills.filter(def => !exp
 const unexpectedBundledRoleAgents = bundledRoleAgents.filter(def => !expectedBundledRoleAgents.includes(def.name as (typeof expectedBundledRoleAgents)[number]));
 const missingBundledWorkflowSkills = expectedBundledWorkflowSkills.filter(name => !bundledWorkflowSkills.some(def => def.name === name));
 const missingBundledRoleAgents = expectedBundledRoleAgents.filter(name => !bundledRoleAgents.some(def => def.name === name));
-const nonGajaePackages = packages.filter(pkg => pkg.name && !pkg.name.startsWith(expectedPackageScope));
+const nonGajaePackages = packages.filter(pkg => pkg.name && !pkg.name.startsWith(expectedPackageScope) && !allowedUnscopedPackageNames.has(pkg.name));
 const observedBins = [...new Set(packages.flatMap(pkg => pkg.bins))].sort();
 const missingBins = expectedCliBins.filter(bin => !observedBins.includes(bin));
 const unexpectedLegacyHits = legacyHits.filter(hit => !hit.allowlist);

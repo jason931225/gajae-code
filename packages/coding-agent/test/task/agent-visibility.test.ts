@@ -28,10 +28,16 @@ describe("task agent visibility", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("marks bundled support agents as hidden", () => {
+	it("marks bundled support agents as hidden while keeping public workflow agents visible", () => {
 		const agents = loadBundledAgents();
 		expect(agents.length).toBeGreaterThan(0);
-		expect(agents.map(agent => [agent.name, agent.hide])).toEqual(agents.map(agent => [agent.name, true]));
+		const visibility = new Map(agents.map(agent => [agent.name, agent.hide]));
+		for (const name of ["deep-interview", "ralplan", "team", "ultragoal"]) {
+			expect(visibility.get(name)).toBe(false);
+		}
+		for (const name of ["explore", "plan", "reviewer", "task"]) {
+			expect(visibility.get(name)).toBe(true);
+		}
 	});
 
 	it("omits hidden agents from task tool descriptions and unknown-agent hints", async () => {

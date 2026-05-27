@@ -1257,14 +1257,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 
 		// Custom tool and extension discovery is quarantined from the public GJC utility surface.
-		const inlineExtensions: ExtensionFactory[] = [];
+		// Explicit SDK extension factories are still honored; callers use them to
+		// register in-process tools/providers without enabling filesystem discovery.
+		const inlineExtensions: ExtensionFactory[] = [...(options.extensions ?? [])];
 		if (customTools.length > 0) {
 			inlineExtensions.push(createCustomToolsExtension(customTools));
 		}
 
 		// Extension/module discovery is quarantined; retain only the private
-		// runtime needed to adapt explicitly supplied SDK custom tools.
-		const extensionsResult: LoadExtensionsResult = { extensions: [], errors: [], runtime: new ExtensionRuntime() };
+		// runtime needed for explicitly supplied SDK extensions and custom tools.
+		const extensionsResult: LoadExtensionsResult = options.preloadedExtensions ?? {
+			extensions: [],
+			errors: [],
+			runtime: new ExtensionRuntime(),
+		};
 
 		// Load inline extensions from factories
 		if (inlineExtensions.length > 0) {

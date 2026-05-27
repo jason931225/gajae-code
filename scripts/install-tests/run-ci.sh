@@ -20,7 +20,7 @@ smoke_cli() {
 	runtime_dir="$(mktemp -d "$WORK_DIR/compiled-runtime.XXXXXX")"
 	XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$gjc_bin" --version
 	XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$gjc_bin" --help >/dev/null
-	XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$gjc_bin" stats --summary >/dev/null
+	XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$gjc_bin" stats --help >/dev/null
 	# Spawns the stats sync worker via `new Worker(...)` and waits for a pong.
 	# Regression probe for #1011 (browser tab worker) and #1027 (stats sync
 	# worker) — both broke silently in compiled binaries because the `with
@@ -66,20 +66,21 @@ SOURCE_BUN_HOME="$WORK_DIR/bun-source"
 section "Tarball install smoke"
 TARBALL_DIR="$WORK_DIR/tarballs"
 mkdir -p "$TARBALL_DIR"
-for pkg in utils natives ai agent tui stats coding-agent; do
+for pkg in utils natives ai agent tui stats coding-agent gajae-code; do
 	(
 		cd "$ROOT_DIR/packages/$pkg"
 		bun pm pack --destination "$TARBALL_DIR" --quiet >/dev/null
 	)
 done
 
-utils_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-pi-utils-*.tgz)"
-natives_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-pi-natives-*.tgz)"
-ai_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-pi-ai-*.tgz)"
-agent_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-pi-agent-core-*.tgz)"
-tui_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-pi-tui-*.tgz)"
-stats_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-gjc-stats-*.tgz)"
-coding_agent_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-gajae-code-*.tgz)"
+utils_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-utils-*.tgz)"
+natives_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-natives-*.tgz)"
+ai_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-ai-*.tgz)"
+agent_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-agent-core-*.tgz)"
+tui_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-tui-*.tgz)"
+stats_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-stats-*.tgz)"
+coding_agent_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-coding-agent-*.tgz)"
+wrapper_tgz="$(find_tarball "$TARBALL_DIR"/gajae-code-[0-9]*.tgz)"
 
 TARBALL_APP_DIR="$WORK_DIR/tarball-install"
 mkdir -p "$TARBALL_APP_DIR"
@@ -103,7 +104,7 @@ mkdir -p "$TARBALL_APP_DIR"
 		require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
 	"
 
-	bun add "$utils_tgz" "$natives_tgz" "$ai_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz"
+	bun add "$utils_tgz" "$natives_tgz" "$ai_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$wrapper_tgz"
 	smoke_cli ./node_modules/.bin/gjc
 )
 

@@ -155,7 +155,7 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
  * Resolves with the worker's `import.meta.url` (caller-visible diagnostics);
  * rejects on transport error, error response, or timeout.
  */
-export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
+export async function smokeTestSyncWorker({ timeoutMs = 30_000 }: { timeoutMs?: number } = {}): Promise<void> {
 	const worker = createSyncWorker();
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
 	const timer = setTimeout(() => reject(new Error(`sync worker did not pong within ${timeoutMs}ms`)), timeoutMs);

@@ -30,6 +30,7 @@ if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 process.title = APP_NAME;
 
 const commands: CommandEntry[] = [
+	{ name: "codex-native-hook", load: () => import("./commands/codex-native-hook").then(m => m.default) },
 	{ name: "question", load: () => import("./commands/question").then(m => m.default) },
 	{ name: "state", load: () => import("./commands/state").then(m => m.default) },
 	{ name: "team", load: () => import("./commands/team").then(m => m.default) },

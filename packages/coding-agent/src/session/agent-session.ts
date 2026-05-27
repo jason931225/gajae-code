@@ -137,6 +137,7 @@ import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
+import { buildGjcRuntimeSessionEnv, consumePendingGoalModeRequest } from "../gjc-runtime/goal-mode-request";
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -1406,6 +1407,7 @@ export class AgentSession {
 					}
 				}
 			}
+			await this.#syncSkillPromptActiveStateSafely(event.message, true);
 		}
 
 		// Plan-mode → compaction transition: stamp `SILENT_ABORT_MARKER` on the
@@ -1483,6 +1485,9 @@ export class AgentSession {
 				await this.#goalRuntime.onGoalToolCompleted();
 			} else {
 				await this.#goalRuntime.onToolCompleted(event.toolName);
+			}
+			if (event.toolName === "bash" && !event.isError) {
+				await this.#activatePendingGjcGoalModeRequest();
 			}
 		}
 		if (event.type === "tool_execution_end" && event.toolName === "yield" && !event.isError) {
@@ -1750,15 +1755,14 @@ export class AgentSession {
 				},
 			});
 			if (this.#activeSkillState) {
-				await syncSkillActiveState({
-					cwd: this.sessionManager.getCwd(),
-					skill: this.#activeSkillState.skill,
-					active: false,
-					phase: "complete",
-					sessionId: this.#activeSkillState.sessionId,
-					source: "skill-prompt",
-				}).catch(() => {});
-				this.#activeSkillState = undefined;
+				const { skill, sessionId } = this.#activeSkillState;
+				await this.#syncSkillPromptActiveStateSafely(
+					{ customType: SKILL_PROMPT_MESSAGE_TYPE, details: { name: skill } },
+					false,
+				);
+				if (this.#activeSkillState?.skill === skill && this.#activeSkillState.sessionId === sessionId) {
+					this.#activeSkillState = undefined;
+				}
 			}
 			const fallbackAssistant = [...event.messages]
 				.reverse()
@@ -3796,6 +3800,25 @@ export class AgentSession {
 		);
 	}
 
+	async #activatePendingGjcGoalModeRequest(): Promise<boolean> {
+		if (!this.settings.get("goal.enabled")) return false;
+		const currentState = this.getGoalModeState();
+		if (currentState?.goal && currentState.goal.status !== "complete" && currentState.goal.status !== "dropped") {
+			return false;
+		}
+		const pendingGoal = await consumePendingGoalModeRequest(this.sessionManager.getCwd());
+		if (!pendingGoal) return false;
+
+		const previousTools = this.getActiveToolNames().filter(name => name !== "goal");
+		const goalTools = [...new Set([...previousTools, "goal"])];
+		await this.#goalRuntime.createGoal({ objective: pendingGoal.objective });
+		await this.setActiveToolsByName(goalTools);
+		if (this.isStreaming) {
+			await this.sendGoalModeContext({ deliverAs: "steer" });
+		}
+		return true;
+	}
+
 	resolveRoleModel(role: string): Model | undefined {
 		return this.#resolveRoleModelFull(role, this.#modelRegistry.getAvailable(), this.model).model;
 	}
@@ -4027,6 +4050,19 @@ export class AgentSession {
 		this.#activeSkillState = active ? { skill: name, sessionId } : undefined;
 	}
 
+	async #syncSkillPromptActiveStateSafely(
+		message: Pick<CustomMessage<unknown>, "customType" | "details">,
+		active: boolean,
+	): Promise<void> {
+		try {
+			await this.#syncSkillPromptActiveState(message, active);
+		} catch {
+			// Skill HUD state is observational; a filesystem write failure must not
+			// interrupt the prompt turn it is visualizing. The native Stop hook still
+			// performs authoritative workflow blocking from persisted state.
+		}
+	}
+
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice">,
@@ -4057,11 +4093,11 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 
-		await this.#syncSkillPromptActiveState(customMessage, true).catch(() => {});
+		await this.#syncSkillPromptActiveStateSafely(customMessage, true);
 		try {
 			await this.#promptWithMessage(customMessage, textContent, options);
 		} finally {
-			await this.#syncSkillPromptActiveState(customMessage, false).catch(() => {});
+			await this.#syncSkillPromptActiveStateSafely(customMessage, false);
 		}
 	}
 
@@ -4473,6 +4509,7 @@ export class AgentSession {
 
 		const prependMessages = queuedMessages.slice(0, -1);
 		const textContent = this.#getCustomMessageTextContent(message);
+		await this.#syncSkillPromptActiveStateSafely(message, true);
 		try {
 			await this.#promptWithMessage(message, textContent, {
 				prependMessages,
@@ -4481,6 +4518,8 @@ export class AgentSession {
 		} catch (error) {
 			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
 			throw error;
+		} finally {
+			await this.#syncSkillPromptActiveStateSafely(message, false);
 		}
 	}
 
@@ -4552,7 +4591,12 @@ export class AgentSession {
 					this.#queueHiddenNextTurnMessage(appMessage, false);
 					return;
 				}
-				await this.agent.prompt(appMessage);
+				await this.#syncSkillPromptActiveStateSafely(appMessage, true);
+				try {
+					await this.agent.prompt(appMessage);
+				} finally {
+					await this.#syncSkillPromptActiveStateSafely(appMessage, false);
+				}
 				return;
 			}
 			this.agent.appendMessage(appMessage);
@@ -4571,7 +4615,12 @@ export class AgentSession {
 				this.#queueHiddenNextTurnMessage(appMessage, false);
 				return;
 			}
-			await this.agent.prompt(appMessage);
+			await this.#syncSkillPromptActiveStateSafely(appMessage, true);
+			try {
+				await this.agent.prompt(appMessage);
+			} finally {
+				await this.#syncSkillPromptActiveStateSafely(appMessage, false);
+			}
 			return;
 		}
 
@@ -7330,6 +7379,9 @@ export class AgentSession {
 			});
 			if (hookResult?.result) {
 				this.recordBashResult(command, hookResult.result, options);
+				if (hookResult.result.exitCode === 0 && !hookResult.result.cancelled) {
+					await this.#activatePendingGjcGoalModeRequest();
+				}
 				return hookResult.result;
 			}
 		}
@@ -7343,10 +7395,18 @@ export class AgentSession {
 				signal: abortController.signal,
 				sessionKey: this.sessionId,
 				timeout: clampTimeout("bash") * 1000,
+				env: buildGjcRuntimeSessionEnv({
+					sessionFile: this.sessionManager.getSessionFile(),
+					sessionId: this.sessionId,
+					cwd,
+				}),
 				onMinimizedSave: originalText => this.#saveBashOriginalArtifact(originalText),
 			});
 
 			this.recordBashResult(command, result, options);
+			if (result.exitCode === 0 && !result.cancelled) {
+				await this.#activatePendingGjcGoalModeRequest();
+			}
 			return result;
 		} finally {
 			this.#bashAbortControllers.delete(abortController);

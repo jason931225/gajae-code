@@ -8,9 +8,14 @@ import { $which, APP_NAME, getPythonEnvDir } from "@gajae-code/utils";
 import { $ } from "bun";
 import chalk from "chalk";
 import { installDefaultGjcDefinitions } from "../defaults/gjc-defaults";
+import {
+	getDefaultCodexHooksPath,
+	mergeGjcManagedCodexHooksConfig,
+	readGjcManagedCodexHooksStatus,
+} from "../hooks/codex-native-hooks-config";
 import { theme } from "../modes/theme/theme";
 
-export type SetupComponent = "defaults" | "python" | "stt";
+export type SetupComponent = "defaults" | "hooks" | "python" | "stt";
 
 export interface SetupCommandArgs {
 	component: SetupComponent;
@@ -21,7 +26,7 @@ export interface SetupCommandArgs {
 	};
 }
 
-const VALID_COMPONENTS: SetupComponent[] = ["defaults", "python", "stt"];
+const VALID_COMPONENTS: SetupComponent[] = ["defaults", "hooks", "python", "stt"];
 
 const MANAGED_PYTHON_ENV = getPythonEnvDir();
 
@@ -118,6 +123,9 @@ export async function runSetupCommand(cmd: SetupCommandArgs): Promise<void> {
 		case "defaults":
 			await handleDefaultsSetup(cmd.flags);
 			break;
+		case "hooks":
+			await handleHooksSetup(cmd.flags);
+			break;
 		case "python":
 			await handlePythonSetup(cmd.flags);
 			break;
@@ -125,6 +133,42 @@ export async function runSetupCommand(cmd: SetupCommandArgs): Promise<void> {
 			await handleSttSetup(cmd.flags);
 			break;
 	}
+}
+
+async function handleHooksSetup(flags: { json?: boolean; check?: boolean }): Promise<void> {
+	const hooksPath = getDefaultCodexHooksPath();
+	const existingContent = await Bun.file(hooksPath).text().catch(() => null);
+	const status = readGjcManagedCodexHooksStatus(existingContent, hooksPath);
+
+	if (flags.check) {
+		if (flags.json) {
+			process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+			if (!status.installed) process.exit(1);
+			return;
+		}
+		if (!status.installed) {
+			process.stderr.write(`${chalk.red(`${theme.status.error} GJC native Codex hooks are not fully installed`)}\n`);
+			process.stderr.write(`${chalk.dim(`Target: ${hooksPath}`)}\n`);
+			process.stderr.write(`${chalk.dim(`Missing events: ${status.missingEvents.join(", ")}`)}\n`);
+			process.exit(1);
+		}
+		process.stdout.write(`${chalk.green(`${theme.status.success} GJC native Codex hooks are installed`)}\n`);
+		process.stdout.write(`${chalk.dim(`Target: ${hooksPath}`)}\n`);
+		return;
+	}
+
+	const merged = mergeGjcManagedCodexHooksConfig(existingContent);
+	await Bun.write(hooksPath, merged.content);
+	const installed = readGjcManagedCodexHooksStatus(merged.content, hooksPath);
+
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify({ ...installed, changed: merged.changed }, null, 2)}\n`);
+		return;
+	}
+
+	process.stdout.write(`${chalk.green(`${theme.status.success} GJC native Codex hooks installed`)}\n`);
+	process.stdout.write(`${chalk.dim(`Target: ${hooksPath}`)}\n`);
+	process.stdout.write(`${chalk.dim(`Managed events: UserPromptSubmit, Stop; changed: ${merged.changed ? "yes" : "no"}`)}\n`);
 }
 
 async function handleDefaultsSetup(flags: { json?: boolean; check?: boolean; force?: boolean }): Promise<void> {
@@ -253,6 +297,7 @@ ${chalk.bold("Usage:")}
 
 ${chalk.bold("Components:")}
   defaults  Install bundled GJC default skills and agents
+  hooks     Install GJC native Codex UserPromptSubmit/Stop skill-state hooks
   python    Verify a Python 3 interpreter is reachable for code execution
   stt       Install speech-to-text dependencies (openai-whisper, recording tools)
 
@@ -264,6 +309,8 @@ ${chalk.bold("Options:")}
 ${chalk.bold("Examples:")}
   ${APP_NAME} setup defaults         Install bundled GJC defaults
   ${APP_NAME} setup defaults --check Check bundled GJC defaults are installed
+  ${APP_NAME} setup hooks            Install native Codex skill-state hooks
+  ${APP_NAME} setup hooks --check    Check native Codex skill-state hooks
   ${APP_NAME} setup python           Install Python execution dependencies
   ${APP_NAME} setup stt              Install speech-to-text dependencies
   ${APP_NAME} setup stt --check      Check if STT dependencies are available

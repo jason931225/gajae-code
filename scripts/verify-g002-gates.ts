@@ -15,6 +15,7 @@ const repoRoot = path.join(import.meta.dir, "..");
 const EXPECTED_DEFINITIONS = ["deep-interview", "ralplan", "team", "ultragoal"] as const;
 const EXPECTED_ROLE_AGENTS = ["architect", "critic", "executor", "planner"] as const;
 const EXPECTED_PUBLIC_PACKAGE_VERSION = "0.1.1";
+const ALLOWED_PUBLIC_PACKAGE_VERSIONS = new Map<string, string>([["gajae-code", "0.1.2"]]);
 const ALLOWED_PRIVATE_PACKAGE_VERSIONS = new Map<string, string>([["@gajae-code/typescript-edit-benchmark", "0.0.1"]]);
 const ALLOWED_UNSCOPED_PACKAGE_NAMES = new Set<string>(["gajae-code"]);
 const ALLOWED_PACKAGE_BINARIES = new Map<string, readonly string[]>([
@@ -215,7 +216,11 @@ async function verifyPackageVersionAndBinaryAllowlist(): Promise<GateResult> {
 		}
 
 		const allowedPrivateVersion = ALLOWED_PRIVATE_PACKAGE_VERSIONS.get(packageName);
-		const expectedVersion = isPrivate && allowedPrivateVersion ? allowedPrivateVersion : EXPECTED_PUBLIC_PACKAGE_VERSION;
+		const allowedPublicVersion = ALLOWED_PUBLIC_PACKAGE_VERSIONS.get(packageName);
+		const expectedVersion =
+			isPrivate && allowedPrivateVersion
+				? allowedPrivateVersion
+				: allowedPublicVersion ?? EXPECTED_PUBLIC_PACKAGE_VERSION;
 		if (packageVersion !== expectedVersion) {
 			versionFindings.push(`${relativePath}: ${packageName} version ${packageVersion} != ${expectedVersion}`);
 		}

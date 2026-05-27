@@ -4,6 +4,8 @@ Gajae-Code (`gjc`) is a private MVP coding-agent CLI with a deliberately small w
 
 It keeps the core coding-agent strengths—fast file/search tools, LSP-aware edits, native helpers, model-provider flexibility, and a terminal TUI—while removing broad inherited workflow sprawl from the default surface.
 
+The default dark TUI identity is the GJC red-claw theme, with brand colors kept separate from warning, error, and diff-removal semantics.
+
 ## Current MVP contract
 
 Default public workflow definitions are exactly:

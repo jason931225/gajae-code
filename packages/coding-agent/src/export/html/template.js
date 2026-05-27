@@ -20,7 +20,9 @@
 
       // Parse URL parameters for deep linking: leafId and targetId
       // Check for injected params (when loaded in iframe via srcdoc) or use window.location
-      const injectedParams = document.querySelector('meta[name="pi-url-params"]');
+      const injectedParams =
+        document.querySelector('meta[name="gjc-url-params"]') ||
+        document.querySelector('meta[name="pi-url-params"]');
       const searchString = injectedParams ? injectedParams.content : window.location.search.substring(1);
       const urlParams = new URLSearchParams(searchString);
       const urlLeafId = urlParams.get('leafId');
@@ -1613,7 +1615,9 @@
        */
       function buildShareUrl(entryId) {
         // Check for injected base URL (used when loaded in iframe via srcdoc)
-        const baseUrlMeta = document.querySelector('meta[name="pi-share-base-url"]');
+        const baseUrlMeta =
+          document.querySelector('meta[name="gjc-share-base-url"]') ||
+          document.querySelector('meta[name="pi-share-base-url"]');
         const baseUrl = baseUrlMeta ? baseUrlMeta.content : window.location.href.split('?')[0];
 
         const url = new URL(window.location.href);
@@ -1898,9 +1902,11 @@
 
         let html = `
           <div class="header">
-            <h1>Session: ${escapeHtml(header?.id || 'unknown')}</h1>
+            <div class="brand-kicker">gajae-code · red-claw transcript</div>
+            <h1>GJC Session Export: ${escapeHtml(header?.id || 'unknown')}</h1>
             <div class="help-bar">Ctrl+T toggle thinking · Ctrl+O toggle tools</div>
             <div class="header-info">
+              <div class="info-item"><span class="info-label">Product:</span><span class="info-value">GJC / gajae-code</span></div>
               <div class="info-item"><span class="info-label">Date:</span><span class="info-value">${header?.timestamp ? new Date(header.timestamp).toLocaleString() : 'unknown'}</span></div>
               <div class="info-item"><span class="info-label">Models:</span><span class="info-value">${globalStats.models.join(', ') || 'unknown'}</span></div>
               <div class="info-item"><span class="info-label">Messages:</span><span class="info-value">${msgParts.join(', ') || '0'}</span></div>
@@ -2083,7 +2089,8 @@
       const overlay = document.getElementById('sidebar-overlay');
       const hamburger = document.getElementById('hamburger');
       const sidebarResizer = document.getElementById('sidebar-resizer');
-      const SIDEBAR_WIDTH_STORAGE_KEY = 'pi-share:v1:sidebar-width';
+      const SIDEBAR_WIDTH_STORAGE_KEY = 'gjc-share:v1:sidebar-width';
+      const LEGACY_SIDEBAR_WIDTH_STORAGE_KEY = 'pi-share:v1:sidebar-width';
       const MIN_CONTENT_WIDTH = 320;
 
       function isMobileLayout() {
@@ -2112,7 +2119,7 @@
 
       function loadSidebarWidth() {
         try {
-          const raw = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+          const raw = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY) ?? localStorage.getItem(LEGACY_SIDEBAR_WIDTH_STORAGE_KEY);
           if (raw === null) return null;
           const width = Number(raw);
           return Number.isFinite(width) ? width : null;

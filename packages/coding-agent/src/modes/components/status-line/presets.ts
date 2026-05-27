@@ -2,9 +2,9 @@ import type { PresetDef, StatusLinePreset } from "./types";
 
 export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 	default: {
-		leftSegments: ["pi", "model", "mode", "path", "git", "pr", "context_pct", "cost"],
+		leftSegments: ["model", "mode", "path", "git", "pr", "context_pct", "cost"],
 		rightSegments: ["session_name"],
-		separator: "powerline-thin",
+		separator: "slash",
 		segmentOptions: {
 			model: { showThinkingLevel: true },
 			path: { abbreviate: true, maxLength: 40, stripWorkPrefix: true },
@@ -25,7 +25,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 	compact: {
 		leftSegments: ["model", "mode", "git", "pr"],
 		rightSegments: ["session_name", "cost", "context_pct"],
-		separator: "powerline-thin",
+		separator: "slash",
 		segmentOptions: {
 			model: { showThinkingLevel: false },
 			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: false },
@@ -95,7 +95,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 		// User-defined - these are just defaults that get overridden
 		leftSegments: ["model", "mode", "path", "git", "pr"],
 		rightSegments: ["session_name", "token_total", "cost", "context_pct"],
-		separator: "powerline-thin",
+		separator: "slash",
 		segmentOptions: {},
 	},
 };

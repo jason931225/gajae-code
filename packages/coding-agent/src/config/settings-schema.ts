@@ -12,7 +12,7 @@ import { EDIT_MODES } from "../utils/edit-mode";
  *
  * The Settings singleton provides type-safe path-based access:
  *   settings.get("compaction.enabled")  // => boolean
- *   settings.set("theme.dark", "titanium")  // sync, saves in background
+ *   settings.set("theme.dark", "red-claw")  // sync, saves in background
  */
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -330,7 +330,7 @@ export const SETTINGS_SCHEMA = {
 	// Theme
 	"theme.dark": {
 		type: "string",
-		default: "titanium",
+		default: "red-claw",
 		ui: {
 			tab: "appearance",
 			label: "Dark Theme",
@@ -400,7 +400,7 @@ export const SETTINGS_SCHEMA = {
 	"statusLine.separator": {
 		type: "enum",
 		values: ["powerline", "powerline-thin", "slash", "pipe", "block", "none", "ascii"] as const,
-		default: "powerline-thin",
+		default: "slash",
 		ui: {
 			tab: "appearance",
 			label: "Status Line Separator",

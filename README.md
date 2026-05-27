@@ -1,6 +1,14 @@
 # Gajae-Code
 
+<p align="center">
+  <img src="assets/hero.png" alt="Gajae-Code autonomous coding-agent hero illustration" width="100%" />
+</p>
+
 Gajae-Code (`gjc`) is a minimal coding-agent harness with a deliberately fixed public surface: four workflow skills, four role subagents, and a resilient CLI/runtime around them.
+
+<p align="center">
+  <img src="assets/character.png" alt="Gajae-Code character mascot" width="360" />
+</p>
 
 ## Story
 

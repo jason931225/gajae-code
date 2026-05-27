@@ -77,7 +77,7 @@ describe("AssistantMessageComponent mermaid markdown", () => {
 describe("AssistantMessageComponent tool images", () => {
 	it("converts WebP tool images for Kitty terminal rendering", async () => {
 		const webpBase64 = Buffer.from(
-			await Bun.file(path.join(import.meta.dir, "../../../../../assets/python.webp")).arrayBuffer(),
+			await Bun.file(path.join(import.meta.dir, "../../../../../assets/tool-image-fixture.webp")).arrayBuffer(),
 		).toBase64();
 		setTerminalImageProtocol(ImageProtocol.Kitty);
 

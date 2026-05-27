@@ -86,6 +86,7 @@ import { resolveAuthBrokerConfig } from "./session/auth-broker-config";
 import { AuthBrokerClient, AuthStorage, RemoteAuthCredentialStore } from "./session/auth-storage";
 import { type CustomMessage, convertToLlm } from "./session/messages";
 import { SessionManager } from "./session/session-manager";
+import { formatNoModelsAvailableFallback } from "./setup/model-onboarding-guidance";
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
@@ -1333,8 +1334,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const patterns = settings.get("enabledModels");
 				modelFallbackMessage =
 					patterns && patterns.length > 0
-						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
-						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. ${formatNoModelsAvailableFallback()}`
+						: formatNoModelsAvailableFallback();
 			}
 		}
 

@@ -73,6 +73,34 @@ describe("provider slash command", () => {
 		expect(configChanged).toBe(true);
 	});
 
+	it("rejects raw API keys in public provider onboarding", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const outputs: string[] = [];
+		const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+
+		await command?.handle?.(
+			{
+				name: "provider",
+				args: "add --compat openai --provider raw-key --base-url https://proxy.example.test --api-key sk-secret --model gpt",
+				text: "/provider add",
+			},
+			{
+				session: { modelRegistry: { refresh: async () => undefined } },
+				sessionManager: {},
+				settings: {},
+				cwd: process.cwd(),
+				output: (text: string) => outputs.push(text),
+				refreshCommands: () => undefined,
+				reloadPlugins: async () => undefined,
+				notifyConfigChanged: () => undefined,
+			} as unknown as SlashCommandRuntime,
+		);
+
+		expect(outputs.join("\n")).toContain("rejects raw --api-key values");
+		expect(await Bun.file(path.join(tempAgentDir, "models.yml")).exists()).toBe(false);
+	});
+
 	it("honors trailing --force for replacement", async () => {
 		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
 		setAgentDir(tempAgentDir);

@@ -45,6 +45,7 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import type { AuthStorage } from "./session/auth-storage";
 import { resolveResumableSession, type SessionInfo, SessionManager } from "./session/session-manager";
+import { formatModelOnboardingGuidance } from "./setup/model-onboarding-guidance";
 import { resolvePromptInput } from "./system-prompt";
 import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
@@ -879,25 +880,22 @@ export async function runRootCommand(
 			notifs.push({ kind: "error", message: modelRegistryError.message });
 		}
 
-		if (isInteractive && !session.model) {
+		if (isInteractive && !session.model && !modelFallbackMessage) {
 			notifs.push({
 				kind: "info",
-				message:
-					"No usable model is configured yet. Run /provider for API-compatible setup or /login for OAuth/subscription providers.",
+				message: `No usable model is configured yet. ${formatModelOnboardingGuidance()}`,
 			});
 		}
 
 		applyExtensionFlagValues(session, rawArgs);
 
 		if (!isInteractive && !session.model) {
-			if (modelFallbackMessage) {
-				process.stderr.write(`${chalk.red(modelFallbackMessage)}\n`);
-			} else {
-				process.stderr.write(`${chalk.red("No models available.")}\n`);
-			}
-			process.stderr.write(`${chalk.yellow("\nSet an API key environment variable:")}\n`);
-			process.stderr.write("  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n");
-			process.stderr.write(`${chalk.yellow(`\nOr create ${ModelsConfigFile.path()}`)}\n`);
+			process.stderr.write(
+				`${chalk.red(modelFallbackMessage ?? `No models available. ${formatModelOnboardingGuidance()}`)}\n`,
+			);
+			process.stderr.write(
+				`${chalk.yellow(`\nAdvanced manual config remains available at ${ModelsConfigFile.path()}`)}\n`,
+			);
 			process.exit(1);
 		}
 

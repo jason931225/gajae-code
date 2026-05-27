@@ -31,7 +31,6 @@ export interface SetupCommandArgs {
 		compat?: string;
 		provider?: string;
 		baseUrl?: string;
-		apiKey?: string;
 		apiKeyEnv?: string;
 		model?: string[];
 		modelsPath?: string;
@@ -45,7 +44,6 @@ function hasProviderSetupFlags(flags: SetupCommandArgs["flags"]): boolean {
 		flags.compat !== undefined ||
 		flags.provider !== undefined ||
 		flags.baseUrl !== undefined ||
-		flags.apiKey !== undefined ||
 		flags.apiKeyEnv !== undefined ||
 		flags.model !== undefined ||
 		flags.modelsPath !== undefined
@@ -94,7 +92,8 @@ export function parseSetupArgs(args: string[]): SetupCommandArgs | undefined {
 		} else if (arg === "--base-url") {
 			flags.baseUrl = args[++i];
 		} else if (arg === "--api-key") {
-			flags.apiKey = args[++i];
+			console.error(chalk.red("Provider setup rejects raw --api-key values; use --api-key-env <ENV> instead."));
+			process.exit(1);
 		} else if (arg === "--api-key-env") {
 			flags.apiKeyEnv = args[++i];
 		} else if (arg === "--model" || arg === "--models") {
@@ -194,7 +193,6 @@ async function handleProviderSetup(flags: {
 	compat?: string;
 	provider?: string;
 	baseUrl?: string;
-	apiKey?: string;
 	apiKeyEnv?: string;
 	model?: string[];
 	modelsPath?: string;
@@ -204,7 +202,7 @@ async function handleProviderSetup(flags: {
 		if (!flags.compat) missing.push("--compat");
 		if (!flags.provider) missing.push("--provider");
 		if (!flags.baseUrl) missing.push("--base-url");
-		if (!flags.apiKey && !flags.apiKeyEnv) missing.push("--api-key or --api-key-env");
+		if (!flags.apiKeyEnv) missing.push("--api-key-env");
 		if (!flags.model || flags.model.length === 0) missing.push("--model");
 		if (missing.length > 0) {
 			throw new Error(`Missing required provider setup option(s): ${missing.join(", ")}`);
@@ -213,7 +211,6 @@ async function handleProviderSetup(flags: {
 			compatibility: parseProviderCompatibility(flags.compat!),
 			providerId: flags.provider!,
 			baseUrl: flags.baseUrl!,
-			apiKey: flags.apiKey,
 			apiKeyEnv: flags.apiKeyEnv,
 			models: flags.model!,
 			modelsPath: flags.modelsPath,
@@ -418,7 +415,6 @@ ${chalk.bold("Options:")}
   --compat          Provider compatibility: openai or anthropic
   --provider        Provider id to add to models.yml
   --base-url        Provider API base URL
-  --api-key         Provider API key
   --api-key-env     Read provider API key from this environment variable
   --model, --models Model id to add (repeat or comma-separate)
   --models-path     Override models config path

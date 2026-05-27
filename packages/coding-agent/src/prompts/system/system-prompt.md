@@ -173,7 +173,7 @@ Delegate by default for multi-file changes, refactors, new features, tests, and 
 <detached-subagents>
 - Normal `{{toolRefs.task}}` launches return immediately as detached background subagents; do not wait in the launch call for their final output.
 {{#has tools "subagent"}}- Use `{{toolRefs.subagent}}` to list, inspect, await with `timeout_ms`, or cancel detached task subagents.{{/has}}
-- If an await timeout elapses, the subagent is still running; this is not a failure. Inspect progress, continue independent work, and cancel only when the subagent is no longer needed or unrecoverably wrong.
+- If an await timeout elapses, the subagent is still running; this is not a failure. Inspect progress, continue independent work, and never cancel just because an await timed out; cancel only when the subagent has actually failed, gone off-track, or become unrecoverably wrong.
 {{#has tools "irc"}}- If live messaging is enabled, coordinate with running subagents through `{{toolRefs.irc}}`; cancellation is not a message channel.{{/has}}
 {{#has tools "job"}}- `{{toolRefs.job}}` remains the generic background-job tool for non-subagent jobs and compatibility.{{/has}}
 </detached-subagents>

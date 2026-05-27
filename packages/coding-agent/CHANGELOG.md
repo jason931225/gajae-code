@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Restored `gjc team` multi-worker OMX-parity orchestration with current-window worker panes, GJC-scoped state/API semantics, and `N:agent-type` launches.
+
 ### Added
 
 - Added a detached `subagent` control tool for task subagents, with list, inspect, await-with-timeout, and cancel actions.
@@ -19,7 +23,6 @@
 - Changed default interactive `gjc` startup to enter a `gajae_code` tmux session before launching the Gajae Code TUI, with non-interactive modes continuing to run directly.
 - Changed `/skill:<name>` handling so canonical skill invocations can be chained in one prompt across interactive and ACP sessions, with autocomplete-only `/name` and `/skill-name` normalization back to the public canonical form.
 - Changed interactive `gjc` startup to launch tmux only when `--tmux` is provided, with direct startup as the default.
-- Changed `gjc team` to split the current tmux leader window into one GJC worker pane, reject multi-worker starts, and clean up worker panes without killing the leader session.
 - Changed GJC default definitions so workflow skills remain source-bundled while repo-visible `.gjc` default artifacts are no longer the source of truth; updated system and Ultragoal guidance to use role-agent delegation and ralplan-first planning when needed.
 - Changed bare `gjc setup` to install the normal default workflow skills, while keeping hooks, provider, Python, and speech-to-text setup as explicit optional components.
 - Changed `gjc team` startup to use tmux worker panes backed by dedicated detached git worktrees by default, while keeping `--worktree` as a backward-compatible launch override.

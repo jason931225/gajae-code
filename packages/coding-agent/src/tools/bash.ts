@@ -519,6 +519,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			},
 		};
 		command = await expandInternalUrls(command, { ...internalUrlOptions, ensureLocalParentDirs: true });
+		const sessionFile = this.session.getSessionFile?.() ?? null;
 		const expandedEnv = env
 			? Object.fromEntries(
 					await Promise.all(
@@ -535,7 +536,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			: undefined;
 		const resolvedEnv = {
 			...buildGjcRuntimeSessionEnv({
-				sessionFile: this.session.getSessionFile(),
+				sessionFile,
 				sessionId: this.session.getSessionId?.(),
 				cwd: this.session.cwd,
 			}),

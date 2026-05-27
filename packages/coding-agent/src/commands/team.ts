@@ -1,13 +1,11 @@
 import { Args, Command, Flags } from "@gajae-code/utils/cli";
 import {
-	claimGjcTeamTask,
-	type GjcTeamTaskStatus,
+	executeGjcTeamApiOperation,
 	listGjcTeams,
 	parseTeamLaunchArgs,
 	readGjcTeamSnapshot,
 	shutdownGjcTeam,
 	startGjcTeam,
-	transitionGjcTeamTask,
 } from "../gjc-runtime/team-runtime";
 
 function writeJson(value: unknown): void {
@@ -28,15 +26,6 @@ function parseInputFlag(argv: string[]): Record<string, unknown> {
 	return parsed as Record<string, unknown>;
 }
 
-function stringField(input: Record<string, unknown>, name: string): string {
-	const value = input[name];
-	return typeof value === "string" ? value.trim() : "";
-}
-
-function isTaskStatus(value: string): value is GjcTeamTaskStatus {
-	return ["pending", "in_progress", "complete", "failed", "blocked"].includes(value);
-}
-
 export default class Team extends Command {
 	static description = "Run native GJC tmux team orchestration commands";
 	static strict = false;
@@ -54,9 +43,9 @@ export default class Team extends Command {
 	};
 
 	static examples = [
-		'gjc team executor "Implement the approved plan"',
+		'gjc team 3:executor "Implement the approved plan"',
 		"gjc team status <team-name> --json",
-		'gjc team api claim-task --input \'{"team_name":"demo","worker_id":"worker-01"}\' --json',
+		'gjc team api claim-task --input \'{"team_name":"demo","worker_id":"worker-1"}\' --json',
 		"gjc team shutdown <team-name>",
 	];
 
@@ -108,23 +97,19 @@ export default class Team extends Command {
 
 		if (action === "api") {
 			const [operation] = rest;
+			if (!operation || operation === "--help" || operation === "help") {
+				writeText([
+					"Supported operations:",
+					"send-message broadcast mailbox-list mailbox-mark-delivered mailbox-mark-notified",
+					"create-task read-task list-tasks update-task claim-task transition-task-status release-task-claim",
+					"read-config read-manifest read-worker-status read-worker-heartbeat update-worker-heartbeat write-worker-inbox write-worker-identity",
+					"append-event read-events await-event write-shutdown-request read-shutdown-ack read-monitor-snapshot write-monitor-snapshot read-task-approval write-task-approval",
+				]);
+				return;
+			}
 			const input = parseInputFlag(rest);
-			const teamName = stringField(input, "team_name") || stringField(input, "teamName");
-			if (!teamName) throw new Error("missing_team_name");
-			if (operation === "claim-task") {
-				const workerId = stringField(input, "worker_id") || stringField(input, "workerId") || "worker-01";
-				writeJson(await claimGjcTeamTask(teamName, workerId));
-				return;
-			}
-			if (operation === "transition-task") {
-				const taskId = stringField(input, "task_id") || stringField(input, "taskId");
-				const status = stringField(input, "status");
-				if (!taskId) throw new Error("missing_task_id");
-				if (!isTaskStatus(status)) throw new Error(`invalid_task_status:${status}`);
-				writeJson({ ok: true, task: await transitionGjcTeamTask(teamName, taskId, status) });
-				return;
-			}
-			throw new Error(`unknown_team_api_operation:${operation ?? ""}`);
+			writeJson(await executeGjcTeamApiOperation(operation, input));
+			return;
 		}
 
 		const startArgs = action === "start" ? rest : this.argv;

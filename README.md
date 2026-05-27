@@ -1,5 +1,7 @@
+> Disclaimer: Gajae-Code is an experimental, beta-stage early project. Expect rough edges and verify outputs before relying on it for important work.
+
 <p align="center">
-  <img src="assets/hero.png" alt="Gajae-Code hero logo" width="780">
+  <img src="assets/hero.png" alt="Gajae-Code autonomous coding-agent hero illustration" width="100%" />
 </p>
 
 <h1 align="center">Gajae-Code</h1>
@@ -9,8 +11,11 @@
 </p>
 
 <p align="center">
-  <img src="assets/icon.svg" alt="Gaebal Gajae avatar" width="96" height="96">
+  <img src="assets/character.png" alt="Gajae-Code character mascot" width="360" />
 </p>
+
+## Story
+
 I created an earlier OpenAI code harness and `an earlier Anthropic-code harness`. After living with those harnesses, I felt the same thing kept happening: the harness got bloated, but the work still collapsed into one useful loop.
 
 ## Usage
@@ -42,6 +47,10 @@ gjc --tmux --worktree <path>
 ```
 
 Use a dedicated path for throwaway or branch-specific work so the main checkout stays clean.
+
+## Default TUI identity
+
+The default dark TUI identity is the GJC red-claw theme: a red/orange crustacean look for Gajae-Code terminals. Explicit user theme settings still win.
 
 ## Why Gajae-Code?
 
@@ -110,11 +119,7 @@ For a package-by-package map, see [`docs/codebase-overview.md`](docs/codebase-ov
 
 ## Inspirations and lineage
 
-Gajae-Code builds on lessons from a small family of agent harnesses and keeps attribution visible:
-
-- [`oh-my-pi`](https://github.com/can1357/oh-my-pi) — the upstream red-claw lineage and implementation DNA.
-- [`oh-my-codex`](https://github.com/Yeachan-Heo/oh-my-codex) — Codex-focused orchestration experiments.
-- [`oh-my-claudecode`](https://github.com/Yeachan-Heo/oh-my-claudecode) — Claude Code workflow exploration.
+Gajae-Code builds on lessons from a small family of agent harnesses while keeping the public GJC surface intentionally focused. Historical attribution is kept in [`NOTICE.md`](NOTICE.md).
 
 ## License
 

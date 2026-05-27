@@ -211,8 +211,9 @@ describe("native gjc team runtime", () => {
 		}
 		const tmuxLog = await Bun.file(path.join(cleanupRoot, "tmux.log")).text();
 		expect(tmuxLog).toContain("display-message -p #S:#I #{pane_id}");
-		expect(tmuxLog).toContain("split-window -h -t %1 -d -P -F #{pane_id}");
-		expect(tmuxLog).toContain("select-layout -t test-session:0 main-vertical");
+		expect(tmuxLog).toContain("split-window -h -p 50 -t %1 -d -P -F #{pane_id}");
+		expect(tmuxLog).toContain("select-layout -t test-session:0 even-horizontal");
+		expect(tmuxLog).not.toContain("select-layout -t test-session:0 main-vertical");
 		expect(tmuxLog).not.toContain("new-session");
 		expect(tmuxLog).not.toContain("kill-session");
 	});

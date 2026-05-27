@@ -138,7 +138,7 @@ When `$team` is used as a follow-up mode from ralplan, carry forward the approve
    - `.gjc/state/team/<team>/tasks/task-001.json`
    - `.gjc/state/team/<team>/mailboxes/worker-01.json`
 4. Resolve the worker command from `GJC_TEAM_WORKER_COMMAND` or the active `gjc` entrypoint.
-5. Split the current tmux window into one worker pane with `split-window -h` from the leader pane.
+5. Split the current tmux window into one right-side worker pane with `split-window -h -p 50` from the leader pane, then normalize the window with `select-layout even-horizontal` for a 50/50 leader-left/worker-right layout.
 6. Launch the worker with:
    - `GJC_TEAM_NAME=<team>`
    - `GJC_TEAM_WORKER_ID=worker-01`
@@ -149,8 +149,8 @@ When `$team` is used as a follow-up mode from ralplan, carry forward the approve
 
 Important:
 
-- Leader remains in the existing pane.
-- The worker pane is an independent full GJC worker CLI session.
+- Leader remains in the existing left pane.
+- The worker pane is an independent full GJC worker CLI session on the right side of a 50/50 left-right split.
 - The worker may run in a dedicated git worktree (`gjc team --worktree[=<name>]`) while sharing the team state root.
 - `shutdown` kills only the recorded worker pane after confirming it still belongs to the stored tmux target and is not the leader pane. It never kills the tmux session.
 

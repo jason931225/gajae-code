@@ -484,6 +484,8 @@ async function startTmuxSession(config: GjcTeamConfig, dir: string, dryRun: bool
 				config.tmux_command,
 				"split-window",
 				"-h",
+				"-p",
+				"50",
 				"-t",
 				config.leader.pane_id,
 				"-d",
@@ -503,7 +505,7 @@ async function startTmuxSession(config: GjcTeamConfig, dir: string, dryRun: bool
 		const paneId = split.stdout.toString().trim().split(/\r?\n/)[0]?.trim() ?? "";
 		if (!paneId.startsWith("%")) throw new Error(`tmux_split_missing_pane:${config.tmux_target}:${worker.id}`);
 		rollbackPaneIds.push(paneId);
-		Bun.spawnSync([config.tmux_command, "select-layout", "-t", config.tmux_target, "main-vertical"], {
+		Bun.spawnSync([config.tmux_command, "select-layout", "-t", config.tmux_target, "even-horizontal"], {
 			stdout: "ignore",
 			stderr: "ignore",
 		});

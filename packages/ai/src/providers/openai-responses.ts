@@ -114,7 +114,6 @@ function isDefaultOpenAIBaseUrl(baseUrl: string): boolean {
 	}
 }
 
-
 function resolveOpenAIProviderBaseUrl(
 	baseUrl: string | undefined,
 	authCredentialType: "api_key" | "oauth" | undefined,
@@ -445,7 +444,9 @@ function buildParams(
 		instructions: systemInstructions,
 		stream: true,
 		prompt_cache_key: promptCacheKey,
-		prompt_cache_retention: promptCacheKey ? getPromptCacheRetention(resolvedBaseUrl ?? model.baseUrl, cacheRetention) : undefined,
+		prompt_cache_retention: promptCacheKey
+			? getPromptCacheRetention(resolvedBaseUrl ?? model.baseUrl, cacheRetention)
+			: undefined,
 		store: false,
 		stream_options: model.provider === "openai" ? { include_obfuscation: false } : undefined,
 	};

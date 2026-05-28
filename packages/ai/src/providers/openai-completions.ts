@@ -82,7 +82,6 @@ function isDefaultOpenAIBaseUrl(baseUrl: string): boolean {
 	}
 }
 
-
 function resolveOpenAIProviderBaseUrl(
 	baseUrl: string | undefined,
 	authCredentialType: "api_key" | "oauth" | undefined,

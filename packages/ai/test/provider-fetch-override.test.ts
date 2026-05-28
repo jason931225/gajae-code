@@ -12,7 +12,6 @@ import type { Context, Model } from "../src/types";
 const originalFetch = global.fetch;
 const tempDirs: string[] = [];
 
-
 afterEach(() => {
 	global.fetch = originalFetch;
 	for (const dir of tempDirs.splice(0)) {
@@ -252,7 +251,9 @@ describe("StreamOptions.fetch override", () => {
 				fetch: customFetch,
 			}).result();
 
-			expect(calls[0]?.url).toBe(`${$inheritedEnv("OPENAI_BASE_URL") ?? "https://openai-proxy.example.com/v1"}/responses`);
+			expect(calls[0]?.url).toBe(
+				`${$inheritedEnv("OPENAI_BASE_URL") ?? "https://openai-proxy.example.com/v1"}/responses`,
+			);
 		} finally {
 			restore();
 		}
@@ -283,7 +284,9 @@ describe("StreamOptions.fetch override", () => {
 				fetch: customFetch,
 			}).result();
 
-			expect(calls[0]?.url).toBe(`${$inheritedEnv("OPENAI_BASE_URL") ?? "https://openai-proxy.example.com/v1"}/chat/completions`);
+			expect(calls[0]?.url).toBe(
+				`${$inheritedEnv("OPENAI_BASE_URL") ?? "https://openai-proxy.example.com/v1"}/chat/completions`,
+			);
 		} finally {
 			restore();
 		}

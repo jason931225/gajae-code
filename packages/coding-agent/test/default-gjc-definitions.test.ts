@@ -209,8 +209,9 @@ Project executor override body.
 		for (const required of ["ask", ".gjc/state", "pending approval"]) {
 			expect(content).toContain(required);
 		}
-		expect(content).toMatch(/\/skill:ralplan|gjc ralplan/);
-		expect(content).toMatch(/\/skill:team|gjc team/);
+		expect(content).toContain("/skill:ralplan");
+		expect(content).toContain("/skill:team");
+		expect(content).toContain("private runtime bridge");
 
 		for (const forbidden of [
 			"AskUserQuestion",
@@ -220,6 +221,7 @@ Project executor override body.
 			"Skill(",
 			"gajae-code:",
 			"/gajae-code",
+			"gjc deep-interview",
 		]) {
 			expect(content).not.toContain(forbidden);
 		}

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-28
+
+### Added
+
+- Added scoped GJC tmux profile handling for `gjc --tmux` and `gjc team` sessions without mutating global tmux configuration.
+- Added GJC team integration hardening for worker turn-end integration requests, auto-rebase/auto-merge conflict surfacing, protected checkpoint classification, and leader/worker-visible integration summaries.
+- Added Node 20 release baseline validation to the release/check surface.
+
+### Changed
+
+- Clarified the public workflow contract so `deep-interview` and `ralplan` are invoked through `/skill:<name>`, while `gjc ultragoal` and `gjc team` remain native runtime commands.
+- Updated the README hero image and Discord community invite.
+
+### Fixed
+
+- Restored Ultragoal completion receipt export/generation validation and completion gates.
+- Fixed workflow bridge guidance and tests so private compatibility bridge commands are not advertised as public skill-loading paths.
+
 ## [0.1.3] - 2026-05-28
 
 ### Changed

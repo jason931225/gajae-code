@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-28
+
+### Changed
+
+- Released the GJC 0.2.0 CLI wrapper for the workflow/runtime contract hardening release.
+
 ## [0.1.3] - 2026-05-28
 
 ### Changed

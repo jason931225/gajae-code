@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-28
+
+### Fixed
+
+- Fixed OpenAI-compatible base URL handling so configured proxy URLs and inherited environment overrides are respected at model discovery, completions, responses, and streaming call sites.
+- Fixed OpenAI direct-provider feature gates so prompt-cache/session behavior uses the resolved Responses base URL and only treats exact default `api.openai.com` hosts/paths as direct OpenAI.
+
 ## [0.1.3] - 2026-05-28
 
 ### Changed

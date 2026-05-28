@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-28
+
+### Changed
+
+- Refreshed TUI package metadata for the GJC 0.2.0 release.
+
 ## [0.1.3] - 2026-05-28
 
 ### Changed

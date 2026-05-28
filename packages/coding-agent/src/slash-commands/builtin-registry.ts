@@ -247,6 +247,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 							selector: `${match.provider}/${match.id}`,
 							thinkingLevel: parsedModelSelector?.thinkingLevel,
 						});
+						if (parsedModelSelector?.thinkingLevel) {
+							runtime.session.setThinkingLevel(parsedModelSelector.thinkingLevel);
+						}
 						await runtime.output(`Default model set to ${persistedSelector}.`);
 						await runtime.notifyTitleChanged?.();
 					} else {

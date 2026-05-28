@@ -39,6 +39,7 @@ interface FakeAcpBuiltinSession {
 	getContextUsage(): { tokens?: number; contextWindow: number } | undefined;
 	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	setModel(model: unknown): Promise<void>;
+	setThinkingLevel(thinkingLevel: unknown): void;
 }
 
 function createRuntime() {
@@ -98,6 +99,7 @@ function createRuntime() {
 		getContextUsage: () => undefined,
 		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
 		async setModel(_model: unknown) {},
+		setThinkingLevel(_thinkingLevel: unknown) {},
 		async refreshSshTool(_options?: { activateIfAvailable?: boolean }) {},
 	};
 	const typedSession = session as unknown as AgentSession & FakeAcpBuiltinSession;
@@ -336,6 +338,23 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("Default model set to anthropic/claude-3-5-sonnet");
 		expect(titleNotified).toBe(1);
 		expect(configNotified).toBe(1);
+	});
+
+	it("model: applies explicit thinking level to the live default session", async () => {
+		const { runtime, session } = createRuntime();
+		const available = [{ provider: "anthropic", id: "claude-3-5-sonnet", contextWindow: 200_000 }];
+		session.getAvailableModels = () => available;
+		const setModelSpy = spyOn(session, "setModel").mockResolvedValue(undefined);
+		const setThinkingLevelSpy = spyOn(session, "setThinkingLevel");
+
+		const result = await executeAcpBuiltinSlashCommand("/model anthropic/claude-3-5-sonnet:low", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(setModelSpy).toHaveBeenCalledWith(available[0], "default", {
+			selector: "anthropic/claude-3-5-sonnet",
+			thinkingLevel: "low",
+		});
+		expect(setThinkingLevelSpy).toHaveBeenCalledWith("low");
 	});
 
 	it("model: assigns a known model to a GJC role-agent target without switching active model", async () => {

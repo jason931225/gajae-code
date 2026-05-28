@@ -114,6 +114,15 @@ function isDefaultOpenAIBaseUrl(baseUrl: string): boolean {
 	}
 }
 
+function isOpenAIHostBaseUrl(baseUrl: string): boolean {
+	try {
+		const url = new URL(baseUrl);
+		return url.hostname === OPENAI_DEFAULT_BASE_URL_HOST;
+	} catch {
+		return baseUrl.toLowerCase().startsWith(OPENAI_DEFAULT_BASE_URL);
+	}
+}
+
 function resolveOpenAIProviderBaseUrl(
 	baseUrl: string | undefined,
 	authCredentialType: "api_key" | "oauth" | undefined,
@@ -359,6 +368,9 @@ function createClient(
 
 	let baseUrl =
 		model.provider === "openai" ? resolveOpenAIProviderBaseUrl(model.baseUrl, authCredentialType) : model.baseUrl;
+	if (model.provider === "openai" && !baseUrl) {
+		baseUrl = OPENAI_DEFAULT_BASE_URL;
+	}
 	if (model.provider === "github-copilot") {
 		apiKey = parseGitHubCopilotApiKey(rawApiKey).accessToken;
 		const hasImages = hasCopilotVisionInput(context.messages);
@@ -373,7 +385,7 @@ function createClient(
 		copilotPremiumRequests = copilot.premiumRequests;
 		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
 	}
-	if (sessionId && model.provider === "openai" && baseUrl && isDefaultOpenAIBaseUrl(baseUrl)) {
+	if (sessionId && model.provider === "openai" && (!model.baseUrl || (baseUrl && isDefaultOpenAIBaseUrl(baseUrl)))) {
 		headers.session_id ??= sessionId;
 		headers["x-client-request-id"] ??= sessionId;
 	}
@@ -421,7 +433,9 @@ function buildParams(
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	let systemInstructions: string | undefined;
 	if (systemPrompts.length > 0) {
-		const needsDeveloperRole = model.reasoning && supportsDeveloperRole(resolvedBaseUrl ?? model);
+		const needsDeveloperRole =
+			model.reasoning &&
+			((model.provider === "openai" && !model.baseUrl) || supportsDeveloperRole(resolvedBaseUrl || model));
 		if (needsDeveloperRole) {
 			// Reasoning models on known OpenAI-compatible endpoints require the
 			// `developer` role. Send all system prompts inline in `input`.
@@ -445,7 +459,7 @@ function buildParams(
 		stream: true,
 		prompt_cache_key: promptCacheKey,
 		prompt_cache_retention: promptCacheKey
-			? getPromptCacheRetention(resolvedBaseUrl ?? model.baseUrl, cacheRetention)
+			? getPromptCacheRetention(resolvedBaseUrl || model.baseUrl, cacheRetention)
 			: undefined,
 		store: false,
 		stream_options: model.provider === "openai" ? { include_obfuscation: false } : undefined,
@@ -505,9 +519,12 @@ function supportsStrictMode(model: Model<"openai-responses">): boolean {
 
 export function supportsDeveloperRole(modelOrBaseUrl: Pick<Model, "provider" | "baseUrl"> | string): boolean {
 	const baseUrl = typeof modelOrBaseUrl === "string" ? modelOrBaseUrl : (modelOrBaseUrl.baseUrl ?? "");
+	if (typeof modelOrBaseUrl !== "string" && modelOrBaseUrl.provider === "openai" && !baseUrl) {
+		return true;
+	}
 	const lowerBaseUrl = baseUrl.toLowerCase();
 	return (
-		isDefaultOpenAIBaseUrl(baseUrl) ||
+		isOpenAIHostBaseUrl(baseUrl) ||
 		lowerBaseUrl.includes(".openai.azure.com") ||
 		lowerBaseUrl.includes("azure.com/openai") ||
 		lowerBaseUrl.includes("models.inference.ai.azure.com") ||

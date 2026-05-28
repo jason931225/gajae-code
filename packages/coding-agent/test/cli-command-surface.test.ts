@@ -33,7 +33,7 @@ describe("GJC public CLI command surface", () => {
 		try {
 			const result = Bun.spawnSync(["bun", cliEntry, "setup", "--json"], {
 				cwd: repoRoot,
-				env: { ...process.env, HOME: home },
+				env: { ...process.env, HOME: home, GJC_CODING_AGENT_DIR: path.join(home, ".gjc", "agent") },
 				stderr: "pipe",
 				stdout: "pipe",
 			});

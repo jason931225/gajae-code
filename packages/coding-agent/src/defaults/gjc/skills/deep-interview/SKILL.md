@@ -60,7 +60,7 @@ Inspired by the [Ouroboros project](https://github.com/Q00/ouroboros) which demo
 
 ## Native Plugin Invocation Guard (Issue #3030)
 
-If this raw bundled skill is loaded by GJC's native skill loader through `/skill:deep-interview` or `gjc deep-interview`, do not treat that path as permission to skip rendered GJC setup. The user-facing invocation is `/skill:deep-interview`; do not recommend or advertise deprecated aliases as the deep-interview entrypoint. Regardless of invocation path, Phase 0 below remains blocking and must resolve `gjc.deepInterview.ambiguityThreshold` from settings before any announcement, state write, question, or ambiguity score.
+If this raw bundled skill is loaded by GJC's native skill loader through `/skill:deep-interview`, do not treat that path as permission to skip rendered GJC setup. The user-facing invocation is `/skill:deep-interview`; do not recommend or advertise CLI bridge commands as the deep-interview entrypoint. Regardless of invocation path, Phase 0 below remains blocking and must resolve `gjc.deepInterview.ambiguityThreshold` from settings before any announcement, state write, question, or ambiguity score.
 
 ## Phase 0: Resolve Ambiguity Threshold (blocking prerequisite)
 

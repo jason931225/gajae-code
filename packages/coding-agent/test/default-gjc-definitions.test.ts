@@ -204,6 +204,7 @@ Project executor override body.
 			"Skill(",
 			"gajae-code:",
 			"/gajae-code",
+			"gjc deep-interview",
 		]) {
 			expect(content).not.toContain(forbidden);
 		}

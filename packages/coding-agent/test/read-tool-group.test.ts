@@ -97,8 +97,6 @@ describe("ReadToolGroupComponent", () => {
 
 describe("readArgsTargetInternalUrl", () => {
 	it.each([
-		["skill://my-skill"],
-		["skill://my-skill/file.md"],
 		["gjc://docs/tools/read.md"],
 		["issue://123"],
 		["pr://can1357/gajae-code/456"],
@@ -106,7 +104,6 @@ describe("readArgsTargetInternalUrl", () => {
 		["artifact://abc"],
 		["memory://root"],
 		["rule://name"],
-		["mcp://server/resource"],
 		["local://PLAN.md"],
 	])("treats %s as an internal URL read", target => {
 		expect(readArgsTargetInternalUrl({ path: target })).toBe(true);

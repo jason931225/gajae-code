@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RenderResultOptions } from "@gajae-code/agent-core";
-import { preloadPluginRoots } from "@gajae-code/coding-agent/discovery/helpers";
 import { LspTool } from "@gajae-code/coding-agent/lsp";
 import * as lspClient from "@gajae-code/coding-agent/lsp/client";
 import * as lspConfig from "@gajae-code/coding-agent/lsp/config";
@@ -424,87 +423,18 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("loads config-only marketplace LSP servers from Claude plugin cache", async () => {
+	it("keeps config-only marketplace LSP servers quarantined from default loading", async () => {
 		const tempDir = TempDir.createSync("@gjc-lsp-marketplace-config-");
-		const home = path.join(tempDir.path(), "home");
 		const cwd = path.join(tempDir.path(), "repo");
-		const pluginRoot = path.join(
-			home,
-			".claude",
-			"plugins",
-			"cache",
-			"claude-plugins-official",
-			"csharp-lsp",
-			"1.0.0",
-		);
-		const marketplaceRoot = path.dirname(path.dirname(pluginRoot));
-		const registryPath = path.join(home, ".claude", "plugins", "installed_plugins.json");
-
-		await fs.promises.mkdir(pluginRoot, { recursive: true });
-		await fs.promises.mkdir(cwd, { recursive: true });
-		await fs.promises.mkdir(path.dirname(registryPath), { recursive: true });
-		await Bun.write(path.join(cwd, "Example.csproj"), "<Project />\n");
-		await Bun.write(
-			registryPath,
-			`${JSON.stringify(
-				{
-					version: 2,
-					plugins: {
-						"csharp-lsp@claude-plugins-official": [
-							{
-								scope: "user",
-								installPath: pluginRoot,
-								version: "1.0.0",
-								installedAt: "2026-05-25T00:00:00.000Z",
-								lastUpdated: "2026-05-25T00:00:00.000Z",
-							},
-						],
-					},
-				},
-				null,
-				2,
-			)}\n`,
-		);
-		await Bun.write(
-			path.join(marketplaceRoot, "marketplace.json"),
-			`${JSON.stringify(
-				{
-					name: "claude-plugins-official",
-					owner: { name: "anthropic" },
-					plugins: [
-						{
-							name: "csharp-lsp",
-							version: "1.0.0",
-							source: "./csharp-lsp/1.0.0",
-							lspServers: {
-								"csharp-ls": {
-									command: "csharp-ls",
-									extensionToLanguage: { ".cs": "csharp" },
-								},
-							},
-						},
-					],
-				},
-				null,
-				2,
-			)}\n`,
-		);
-
-		const whichSpy = vi
-			.spyOn(piUtils, "$which")
-			.mockImplementation(command => (command === "csharp-ls" ? "/usr/local/bin/csharp-ls" : null));
-
 		try {
-			await preloadPluginRoots(home, cwd);
+			await fs.promises.mkdir(cwd, { recursive: true });
+			await Bun.write(path.join(cwd, "Example.csproj"), "<Project />\n");
 
 			const config = loadConfig(cwd);
 
-			expect(config.servers["csharp-ls"]?.resolvedCommand).toBe("/usr/local/bin/csharp-ls");
-			expect(getServersForFile(config, path.join(cwd, "Program.cs")).map(([name]) => name)).toEqual(["csharp-ls"]);
-			expect(config.servers["csharp-ls"]?.rootMarkers).toEqual(["."]);
-			expect(whichSpy).toHaveBeenCalledWith("csharp-ls");
+			expect(config.servers["csharp-ls"]).toBeUndefined();
+			expect(getServersForFile(config, path.join(cwd, "Program.cs")).map(([name]) => name)).toEqual([]);
 		} finally {
-			await preloadPluginRoots(path.join(tempDir.path(), "empty-home"), cwd);
 			tempDir.removeSync();
 		}
 	});

@@ -121,6 +121,10 @@ bun test packages/coding-agent/test/default-gjc-definitions.test.ts
 
 For a package-by-package map, see [`docs/codebase-overview.md`](docs/codebase-overview.md).
 
+## Contributors
+
+Thanks to the people and agents helping shape the early Gajae-Code releases, including [Yeachan-Heo](https://github.com/Yeachan-Heo) and [IYENTeam](https://github.com/IYENTeam). Contributions, bug reports, and release validation are welcome through GitHub and the Discord community.
+
 ## Inspirations and lineage
 
 Gajae-Code's default dark TUI identity is the GJC red-claw theme. It builds on lessons from a small family of agent harnesses while keeping the public GJC surface intentionally focused. Historical attribution is kept in [`NOTICE.md`](NOTICE.md).

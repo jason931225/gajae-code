@@ -50,6 +50,7 @@ export interface UltragoalCompletionVerification {
 	gjcGoalMode: UltragoalGjcGoalMode;
 	gjcObjective: string;
 	qualityGateHash: string;
+	gjcGoalSnapshotHash: string;
 	planGeneration: string;
 	basis: {
 		planHashBeforeCheckpoint: string;
@@ -100,8 +101,29 @@ const TERMINAL_OR_SKIPPED_STATUSES = new Set<UltragoalGoalStatus>(["complete", "
 const CLEAN_ARCHITECT_STATUS = "CLEAR";
 const APPROVE_RECOMMENDATION = "APPROVE";
 const PASSED_STATUS = "passed";
+const GJC_GOAL_SNAPSHOT_MAX_AGE_MILLISECONDS = 10 * 60 * 1000;
+const GJC_GOAL_SNAPSHOT_MAX_FUTURE_SKEW_MILLISECONDS = 60 * 1000;
 
 const SCHEDULABLE_STATUSES = new Set<UltragoalGoalStatus>(["pending", "active", "failed"]);
+
+function stableStructuredValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(item => stableStructuredValue(item));
+	if (typeof value !== "object" || value === null) return value;
+	const record = value as Record<string, unknown>;
+	const sorted: Record<string, unknown> = {};
+	for (const key of Object.keys(record).sort()) {
+		const item = record[key];
+		if (item !== undefined) sorted[key] = stableStructuredValue(item);
+	}
+	return sorted;
+}
+
+export function hashStructuredValue(value: unknown): string {
+	return crypto
+		.createHash("sha256")
+		.update(JSON.stringify(stableStructuredValue(value)))
+		.digest("hex");
+}
 
 export function getUltragoalPaths(cwd: string): UltragoalPaths {
 	const dir = path.join(cwd, ".gjc", "ultragoal");
@@ -154,6 +176,151 @@ async function writePlan(cwd: string, plan: UltragoalPlan): Promise<void> {
 	await ensureUltragoalDir(paths);
 	await Bun.write(paths.briefPath, `${plan.brief.trim()}\n`);
 	await Bun.write(paths.goalsPath, `${JSON.stringify(plan, null, 2)}\n`);
+}
+
+function requiredUltragoalGoals(plan: UltragoalPlan): UltragoalGoal[] {
+	return plan.goals.filter(goal => goal.status !== "superseded");
+}
+
+function receiptRelevantGoals(
+	plan: UltragoalPlan,
+	goal: UltragoalGoal,
+	receiptKind: UltragoalReceiptKind,
+): UltragoalGoal[] {
+	return receiptKind === "final-aggregate" ? requiredUltragoalGoals(plan) : [goal];
+}
+
+function ledgerEventId(event: UltragoalLedgerEvent): string | null {
+	return typeof event.eventId === "string" && event.eventId.trim().length > 0 ? event.eventId : null;
+}
+
+function latestRelevantLedgerEventId(
+	ledger: readonly UltragoalLedgerEvent[],
+	relevantGoalIds: readonly string[],
+	excludeEventId?: string,
+): string | null {
+	const relevant = new Set(relevantGoalIds);
+	for (const event of [...ledger].reverse()) {
+		const eventId = ledgerEventId(event);
+		if (eventId && eventId === excludeEventId) continue;
+		const goalId = typeof event.goalId === "string" ? event.goalId : null;
+		if (!goalId || relevant.has(goalId)) return eventId;
+	}
+	return null;
+}
+
+function planSnapshotForReceipt(input: {
+	plan: UltragoalPlan;
+	goal: UltragoalGoal;
+	beforeStatus: UltragoalGoalStatus;
+	targetGoalUpdatedAt: string;
+}): unknown {
+	return {
+		...input.plan,
+		updatedAt: undefined,
+		goals: input.plan.goals.map(goal => ({
+			...goal,
+			status: goal.id === input.goal.id ? input.beforeStatus : goal.status,
+			updatedAt: goal.id === input.goal.id ? input.targetGoalUpdatedAt : goal.updatedAt,
+			evidence: goal.id === input.goal.id ? undefined : goal.evidence,
+			completedAt: goal.id === input.goal.id ? undefined : goal.completedAt,
+			completionVerification: undefined,
+		})),
+	};
+}
+
+export function computeUltragoalPlanGeneration(input: {
+	plan: UltragoalPlan;
+	ledger: readonly UltragoalLedgerEvent[];
+	goal: UltragoalGoal;
+	receiptKind: UltragoalReceiptKind;
+	beforeStatus: UltragoalGoalStatus;
+	excludeEventId?: string;
+	targetGoalUpdatedAt?: string;
+}): {
+	planGeneration: string;
+	basis: UltragoalCompletionVerification["basis"];
+} {
+	const relevantGoals = receiptRelevantGoals(input.plan, input.goal, input.receiptKind);
+	const relevantGoalIds = relevantGoals.map(goal => goal.id);
+	const targetGoalUpdatedAt = input.targetGoalUpdatedAt ?? input.goal.updatedAt;
+	const planHashBeforeCheckpoint = hashStructuredValue(
+		planSnapshotForReceipt({
+			plan: input.plan,
+			goal: input.goal,
+			beforeStatus: input.beforeStatus,
+			targetGoalUpdatedAt,
+		}),
+	);
+	const requiredGoalSetHashBeforeCheckpoint = hashStructuredValue(
+		relevantGoals.map(goal => ({
+			id: goal.id,
+			status: goal.id === input.goal.id ? input.beforeStatus : goal.status,
+			updatedAt: goal.id === input.goal.id ? targetGoalUpdatedAt : goal.updatedAt,
+		})),
+	);
+	const basis: UltragoalCompletionVerification["basis"] = {
+		planHashBeforeCheckpoint,
+		latestRelevantLedgerEventIdBeforeCheckpoint: latestRelevantLedgerEventId(
+			input.ledger,
+			relevantGoalIds,
+			input.excludeEventId,
+		),
+		goalUpdatedAtBeforeCheckpoint: targetGoalUpdatedAt,
+		relevantGoalIdsBeforeCheckpoint: relevantGoalIds,
+		requiredGoalSetHashBeforeCheckpoint,
+	};
+	return { planGeneration: hashStructuredValue(basis), basis };
+}
+
+function chooseReceiptKind(
+	plan: UltragoalPlan,
+	goal: UltragoalGoal,
+	status: UltragoalGoalStatus,
+): UltragoalReceiptKind {
+	if (plan.gjcGoalMode === "per-story") return "per-goal";
+	if (status !== "complete") return "per-goal";
+	const unfinishedRequiredGoals = requiredUltragoalGoals(plan).filter(
+		item => item.id !== goal.id && !TERMINAL_OR_SKIPPED_STATUSES.has(item.status),
+	);
+	return unfinishedRequiredGoals.length === 0 ? "final-aggregate" : "per-goal";
+}
+
+function buildCompletionReceipt(input: {
+	plan: UltragoalPlan;
+	ledger: readonly UltragoalLedgerEvent[];
+	goal: UltragoalGoal;
+	receiptKind: UltragoalReceiptKind;
+	beforeStatus: UltragoalGoalStatus;
+	qualityGateJson: JsonObject;
+	gjcGoalJson: JsonObject;
+	now: string;
+	checkpointLedgerEventId: string;
+}): UltragoalCompletionVerification {
+	const generation = computeUltragoalPlanGeneration({
+		plan: input.plan,
+		ledger: input.ledger,
+		goal: input.goal,
+		receiptKind: input.receiptKind,
+		beforeStatus: input.beforeStatus,
+		targetGoalUpdatedAt: input.now,
+		excludeEventId: input.checkpointLedgerEventId,
+	});
+	return {
+		schemaVersion: 1,
+		receiptId: crypto.randomUUID(),
+		verifiedAt: input.now,
+		goalId: input.goal.id,
+		receiptKind: input.receiptKind,
+		goalStatusBeforeCheckpoint: input.beforeStatus,
+		gjcGoalMode: input.plan.gjcGoalMode,
+		gjcObjective: input.plan.gjcObjective,
+		qualityGateHash: hashStructuredValue(input.qualityGateJson),
+		gjcGoalSnapshotHash: hashStructuredValue(input.gjcGoalJson),
+		planGeneration: generation.planGeneration,
+		basis: generation.basis,
+		checkpointLedgerEventId: input.checkpointLedgerEventId,
+	};
 }
 
 function nonEmptyString(value: unknown): string | null {
@@ -362,334 +529,138 @@ async function readStructuredValue(cwd: string, value: string): Promise<unknown>
 		throw error;
 	}
 }
-
-function recordValue(record: JsonObject, key: string): JsonObject | null {
-	const value = record[key];
+function qualityGateObject(value: unknown): JsonObject | null {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonObject) : null;
 }
 
-function stringValue(record: JsonObject, key: string): string {
-	const value = record[key];
-	return typeof value === "string" ? value.trim() : "";
+function nonEmptyStringArray(value: unknown): string[] | null {
+	if (!Array.isArray(value)) return null;
+	const strings = value.filter(item => typeof item === "string" && item.trim().length > 0);
+	return strings.length === value.length && strings.length > 0 ? strings : null;
 }
 
-function assertStringValue(record: JsonObject, key: string, expected: string, pathName: string): void {
-	const actual = stringValue(record, key);
-	if (actual !== expected) throw new Error(`${pathName}.${key} must be ${expected}`);
-}
-
-function assertNonEmptyString(record: JsonObject, key: string, pathName: string): void {
-	if (!stringValue(record, key)) throw new Error(`${pathName}.${key} is required`);
-}
-
-function assertStringArray(record: JsonObject, key: string, pathName: string): string[] {
-	const value = record[key];
-	if (!Array.isArray(value)) throw new Error(`${pathName}.${key} must be a non-empty string[]`);
-	const items = value.map(item => (typeof item === "string" ? item.trim() : ""));
-	if (items.length === 0 || items.some(item => item.length === 0)) {
-		throw new Error(`${pathName}.${key} must be a non-empty string[]`);
+function requireNonEmptyString(value: unknown, fieldName: string): void {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw new Error(`qualityGate ${fieldName} must be a non-empty string`);
 	}
-	return items;
 }
 
-function assertEmptyArray(record: JsonObject, key: string, pathName: string): void {
-	const value = record[key];
-	if (!Array.isArray(value)) throw new Error(`${pathName}.${key} must be []`);
-	if (value.length !== 0) throw new Error(`${pathName}.${key} must be empty`);
+function requireEmptyBlockers(value: unknown, fieldName: string): void {
+	if (!Array.isArray(value) || value.length !== 0) {
+		throw new Error(`qualityGate ${fieldName} must be an empty blockers array`);
+	}
 }
 
-function assertBooleanValue(record: JsonObject, key: string, expected: boolean, pathName: string): void {
-	if (record[key] !== expected) throw new Error(`${pathName}.${key} must be ${String(expected)}`);
-}
-
-function assertExactKeys(record: JsonObject, pathName: string, expectedKeys: readonly string[]): void {
-	const expected = new Set(expectedKeys);
-	const extra = Object.keys(record).filter(key => !expected.has(key));
-	if (extra.length > 0) throw new Error(`${pathName} contains unsupported keys: ${extra.join(", ")}`);
-}
-
-async function readQualityGate(cwd: string, qualityGateJson: string | undefined): Promise<unknown> {
-	if (qualityGateJson === undefined) {
+function validateCompletionQualityGate(gate: JsonObject): void {
+	const codeReview = qualityGateObject(gate.codeReview);
+	if (codeReview) {
 		throw new Error(
-			"complete checkpoints require --quality-gate-json with strict architectReview, executorQa, and iteration passes",
+			"checkpoint --status complete requires architect review approval through architectReview, executorQa, and iteration quality-gate evidence; legacy codeReview-only gates are not sufficient",
 		);
 	}
-	return await readStructuredValue(cwd, qualityGateJson);
-}
-
-export function stableJson(value: unknown): string {
-	if (Array.isArray(value)) return `[${value.map(item => stableJson(item)).join(",")}]`;
-	if (value && typeof value === "object") {
-		const record = value as Record<string, unknown>;
-		return `{${Object.keys(record)
-			.sort()
-			.map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`)
-			.join(",")}}`;
+	const allowedKeys = new Set(["architectReview", "executorQa", "iteration"]);
+	const unsupportedKeys = Object.keys(gate).filter(key => !allowedKeys.has(key));
+	if (unsupportedKeys.length > 0) {
+		throw new Error(`qualityGate contains unsupported keys: ${unsupportedKeys.join(", ")}`);
 	}
-	return JSON.stringify(value);
-}
-
-export function hashStructuredValue(value: unknown): string {
-	return crypto.createHash("sha256").update(stableJson(value)).digest("hex");
-}
-
-export function validateCompleteQualityGate(value: unknown): JsonObject {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		throw new Error("quality gate must be a JSON object");
+	const architectReview = qualityGateObject(gate.architectReview);
+	const executorQa = qualityGateObject(gate.executorQa);
+	const iteration = qualityGateObject(gate.iteration);
+	if (!architectReview || !executorQa || !iteration) {
+		throw new Error("qualityGate requires architectReview, executorQa, and iteration objects");
 	}
-	const gate = value as JsonObject;
-	assertExactKeys(gate, "qualityGate", ["architectReview", "executorQa", "iteration"]);
-	const architectReview = recordValue(gate, "architectReview");
-	if (!architectReview) throw new Error("quality gate requires architectReview");
-	assertExactKeys(architectReview, "architectReview", [
-		"architectureStatus",
-		"productStatus",
-		"codeStatus",
-		"recommendation",
-		"evidence",
-		"commands",
-		"blockers",
-	]);
-	assertStringValue(architectReview, "architectureStatus", CLEAN_ARCHITECT_STATUS, "architectReview");
-	assertStringValue(architectReview, "productStatus", CLEAN_ARCHITECT_STATUS, "architectReview");
-	assertStringValue(architectReview, "codeStatus", CLEAN_ARCHITECT_STATUS, "architectReview");
-	assertStringValue(architectReview, "recommendation", APPROVE_RECOMMENDATION, "architectReview");
-	assertNonEmptyString(architectReview, "evidence", "architectReview");
-	assertStringArray(architectReview, "commands", "architectReview");
-	assertEmptyArray(architectReview, "blockers", "architectReview");
+	if (
+		architectReview.architectureStatus !== CLEAN_ARCHITECT_STATUS ||
+		architectReview.productStatus !== CLEAN_ARCHITECT_STATUS ||
+		architectReview.codeStatus !== CLEAN_ARCHITECT_STATUS ||
+		architectReview.recommendation !== APPROVE_RECOMMENDATION
+	) {
+		throw new Error(
+			"checkpoint --status complete requires architect review approval: architectReview architecture/product/code must be CLEAR and recommendation must be APPROVE",
+		);
+	}
+	if (!nonEmptyStringArray(architectReview.commands)) {
+		throw new Error("qualityGate architectReview.commands must be a non-empty string array");
+	}
+	requireNonEmptyString(architectReview.evidence, "architectReview.evidence");
+	requireEmptyBlockers(architectReview.blockers, "architectReview.blockers");
+	if (
+		executorQa.status !== PASSED_STATUS ||
+		executorQa.e2eStatus !== PASSED_STATUS ||
+		executorQa.redTeamStatus !== PASSED_STATUS
+	) {
+		throw new Error("qualityGate executorQa status, e2eStatus, and redTeamStatus must be passed");
+	}
+	if (!nonEmptyStringArray(executorQa.e2eCommands) || !nonEmptyStringArray(executorQa.redTeamCommands)) {
+		throw new Error("qualityGate executorQa e2eCommands and redTeamCommands must be non-empty string arrays");
+	}
+	requireNonEmptyString(executorQa.evidence, "executorQa.evidence");
+	requireEmptyBlockers(executorQa.blockers, "executorQa.blockers");
+	if (iteration.status !== PASSED_STATUS || iteration.fullRerun !== true) {
+		throw new Error("qualityGate iteration must be passed with fullRerun true");
+	}
+	if (!nonEmptyStringArray(iteration.rerunCommands)) {
+		throw new Error("qualityGate iteration.rerunCommands must be a non-empty string array");
+	}
+	requireNonEmptyString(iteration.evidence, "iteration.evidence");
+	requireEmptyBlockers(iteration.blockers, "iteration.blockers");
+}
 
-	const executorQa = recordValue(gate, "executorQa");
-	if (!executorQa) throw new Error("quality gate requires executorQa");
-	assertExactKeys(executorQa, "executorQa", [
-		"status",
-		"e2eStatus",
-		"redTeamStatus",
-		"evidence",
-		"e2eCommands",
-		"redTeamCommands",
-		"blockers",
-	]);
-	assertStringValue(executorQa, "status", PASSED_STATUS, "executorQa");
-	assertStringValue(executorQa, "e2eStatus", PASSED_STATUS, "executorQa");
-	assertStringValue(executorQa, "redTeamStatus", PASSED_STATUS, "executorQa");
-	assertNonEmptyString(executorQa, "evidence", "executorQa");
-	assertStringArray(executorQa, "e2eCommands", "executorQa");
-	assertStringArray(executorQa, "redTeamCommands", "executorQa");
-	assertEmptyArray(executorQa, "blockers", "executorQa");
-
-	const iteration = recordValue(gate, "iteration");
-	if (!iteration) throw new Error("quality gate requires iteration");
-	assertExactKeys(iteration, "iteration", ["status", "evidence", "fullRerun", "rerunCommands", "blockers"]);
-	assertStringValue(iteration, "status", PASSED_STATUS, "iteration");
-	assertNonEmptyString(iteration, "evidence", "iteration");
-	assertBooleanValue(iteration, "fullRerun", true, "iteration");
-	assertStringArray(iteration, "rerunCommands", "iteration");
-	assertEmptyArray(iteration, "blockers", "iteration");
-
+async function readRequiredCompletionQualityGate(cwd: string, value: string | undefined): Promise<unknown> {
+	if (!value?.trim()) {
+		throw new Error(
+			"complete checkpoints require --quality-gate-json with architectReview, executorQa, and iteration evidence",
+		);
+	}
+	const gate = await readStructuredValue(cwd, value);
+	const gateObject = qualityGateObject(gate);
+	if (!gateObject) throw new Error("qualityGate must be a JSON object");
+	validateCompletionQualityGate(gateObject);
 	return gate;
 }
 
-function requiredGoals(plan: UltragoalPlan): UltragoalGoal[] {
-	return plan.goals.filter(goal => goal.status !== "superseded");
-}
-
-function receiptRelevantGoals(
-	plan: UltragoalPlan,
-	goal: UltragoalGoal,
-	receiptKind: UltragoalReceiptKind,
-): UltragoalGoal[] {
-	if (receiptKind === "final-aggregate") return requiredGoals(plan);
-	const relatedIds = new Set([goal.id]);
-	const blockedGoalId =
-		typeof goal.steering?.kind === "string" && goal.steering.kind === "review_blocker"
-			? nonEmptyString(goal.steering.blockedGoalId)
-			: null;
-	if (blockedGoalId) relatedIds.add(blockedGoalId);
-	for (const item of plan.goals) {
-		const linkedBlockedGoalId =
-			typeof item.steering?.kind === "string" && item.steering.kind === "review_blocker"
-				? nonEmptyString(item.steering.blockedGoalId)
-				: null;
-		if (linkedBlockedGoalId === goal.id) relatedIds.add(item.id);
-	}
-	return plan.goals.filter(item => relatedIds.has(item.id));
-}
-
-function normalizedGoalForGeneration(
-	goal: UltragoalGoal,
-	targetGoalId: string,
-	beforeStatus: UltragoalGoalStatus,
-): JsonObject {
-	return {
-		id: goal.id,
-		title: goal.title,
-		objective: goal.objective,
-		status: goal.id === targetGoalId ? beforeStatus : goal.status,
-		evidence: goal.id === targetGoalId ? undefined : goal.evidence,
-		steering: goal.steering ?? null,
-	};
-}
-
-function latestRelevantLedgerEventId(
-	ledger: readonly UltragoalLedgerEvent[],
-	goalIds: readonly string[],
-	receiptKind: UltragoalReceiptKind,
-	excludeEventId?: string,
-): string | null {
-	const goalIdSet = new Set(goalIds);
-	for (let index = ledger.length - 1; index >= 0; index -= 1) {
-		const event = ledger[index];
-		if (!event || event.eventId === excludeEventId) continue;
-		const eventName = typeof event.event === "string" ? event.event : "";
-		const eventGoalId = typeof event.goalId === "string" ? event.goalId : "";
-		if (receiptKind === "final-aggregate") {
-			if (
-				[
-					"plan_created",
-					"goal_started",
-					"goal_checkpointed",
-					"steering_accepted",
-					"review_blockers_recorded",
-				].includes(eventName)
-			) {
-				return event.eventId ?? null;
-			}
-			continue;
-		}
-		const blockerGoalId = typeof event.blockerGoalId === "string" ? event.blockerGoalId : "";
-		if (goalIdSet.has(eventGoalId) || goalIdSet.has(blockerGoalId)) return event.eventId ?? null;
-	}
-	return null;
-}
-
-export function computeUltragoalPlanGeneration(input: {
+async function readGjcGoalSnapshot(input: {
+	cwd: string;
+	value: string | undefined;
 	plan: UltragoalPlan;
-	ledger: readonly UltragoalLedgerEvent[];
-	goal: UltragoalGoal;
-	receiptKind: UltragoalReceiptKind;
-	beforeStatus: UltragoalGoalStatus;
-	excludeEventId?: string;
-}): {
-	planGeneration: string;
-	planHash: string;
-	latestRelevantLedgerEventId: string | null;
-	relevantGoalIds: string[];
-	requiredGoalSetHash: string;
-} {
-	const relevantGoals = receiptRelevantGoals(input.plan, input.goal, input.receiptKind);
-	const relevantGoalIds = relevantGoals.map(goal => goal.id).sort();
-	const requiredGoalIds = requiredGoals(input.plan)
-		.map(goal => goal.id)
-		.sort();
-	const latestEventId = latestRelevantLedgerEventId(
-		input.ledger,
-		relevantGoalIds,
-		input.receiptKind,
-		input.excludeEventId,
-	);
-	const snapshot = {
-		gjcGoalMode: input.plan.gjcGoalMode,
-		gjcObjective: input.plan.gjcObjective,
-		gjcObjectiveAliases: input.plan.gjcObjectiveAliases ?? [],
-		receiptKind: input.receiptKind,
-		goals: relevantGoals.map(goal => normalizedGoalForGeneration(goal, input.goal.id, input.beforeStatus)),
-		requiredGoalIds: input.receiptKind === "final-aggregate" ? requiredGoalIds : [],
-		latestRelevantLedgerEventId: latestEventId,
-	};
-	const planHash = hashStructuredValue(snapshot);
-	return {
-		planGeneration: planHash,
-		planHash,
-		latestRelevantLedgerEventId: latestEventId,
-		relevantGoalIds,
-		requiredGoalSetHash: hashStructuredValue(requiredGoalIds),
-	};
-}
-
-function chooseReceiptKind(
-	plan: UltragoalPlan,
-	goal: UltragoalGoal,
-	status: UltragoalGoalStatus,
-): UltragoalReceiptKind {
-	if (plan.gjcGoalMode === "per-story") return "per-goal";
-	const incomplete = requiredGoals(plan).filter(
-		item => item.id !== goal.id && !TERMINAL_OR_SKIPPED_STATUSES.has(item.status),
-	);
-	return status === "complete" && incomplete.length === 0 ? "final-aggregate" : "per-goal";
-}
-
-function buildCompletionReceipt(input: {
-	plan: UltragoalPlan;
-	ledger: readonly UltragoalLedgerEvent[];
-	goal: UltragoalGoal;
-	receiptKind: UltragoalReceiptKind;
-	beforeStatus: UltragoalGoalStatus;
-	qualityGateJson: JsonObject;
-	now: string;
-	checkpointLedgerEventId: string;
-}): UltragoalCompletionVerification {
-	const generation = computeUltragoalPlanGeneration({
-		plan: input.plan,
-		ledger: input.ledger,
-		goal: input.goal,
-		receiptKind: input.receiptKind,
-		beforeStatus: input.beforeStatus,
-	});
-	return {
-		schemaVersion: 1,
-		receiptId: crypto.randomUUID(),
-		verifiedAt: input.now,
-		goalId: input.goal.id,
-		receiptKind: input.receiptKind,
-		goalStatusBeforeCheckpoint: input.beforeStatus,
-		gjcGoalMode: input.plan.gjcGoalMode,
-		gjcObjective: input.plan.gjcObjective,
-		qualityGateHash: hashStructuredValue(input.qualityGateJson),
-		planGeneration: generation.planGeneration,
-		basis: {
-			planHashBeforeCheckpoint: generation.planHash,
-			latestRelevantLedgerEventIdBeforeCheckpoint: generation.latestRelevantLedgerEventId,
-			goalUpdatedAtBeforeCheckpoint: input.goal.updatedAt,
-			relevantGoalIdsBeforeCheckpoint: generation.relevantGoalIds,
-			requiredGoalSetHashBeforeCheckpoint: generation.requiredGoalSetHash,
-		},
-		checkpointLedgerEventId: input.checkpointLedgerEventId,
-	};
-}
-
-function findGoalSnapshot(value: unknown): { objective?: unknown; status?: unknown } | null {
-	if (typeof value !== "object" || value === null) return null;
-	const record = value as JsonObject;
-	const directGoal = record.goal;
-	if (typeof directGoal === "object" && directGoal !== null)
-		return directGoal as { objective?: unknown; status?: unknown };
-	const details = record.details;
-	if (typeof details === "object" && details !== null) {
-		const detailsGoal = (details as JsonObject).goal;
-		if (typeof detailsGoal === "object" && detailsGoal !== null)
-			return detailsGoal as { objective?: unknown; status?: unknown };
+	goal?: UltragoalGoal;
+	required: boolean;
+	errorPrefix: string;
+	allowCompletedLegacyBlocker?: boolean;
+}): Promise<unknown> {
+	if (!input.value?.trim()) {
+		if (!input.required) return undefined;
+		throw new Error(`${input.errorPrefix} require --gjc-goal-json from a fresh active get_goal snapshot`);
 	}
-	if ("objective" in record || "status" in record) return record as { objective?: unknown; status?: unknown };
-	return null;
-}
-
-function validateGjcGoalSnapshot(input: { value: unknown; plan: UltragoalPlan; goal: UltragoalGoal }): void {
-	const snapshot = findGoalSnapshot(input.value);
-	if (!snapshot) throw new Error("complete checkpoints require --gjc-goal-json with a get_goal snapshot");
-	const objective = typeof snapshot.objective === "string" ? snapshot.objective.trim() : "";
-	const status = typeof snapshot.status === "string" ? snapshot.status.trim() : "";
-	const allowedObjectives = new Set([
-		input.plan.gjcObjective,
-		DEFAULT_ULTRAGOAL_OBJECTIVE,
-		input.goal.objective,
-		...(input.plan.gjcObjectiveAliases ?? []),
-	]);
-	if (!allowedObjectives.has(objective)) {
-		throw new Error("complete checkpoint --gjc-goal-json objective does not match the active Ultragoal objective");
+	const snapshot = await readStructuredValue(input.cwd, input.value);
+	const snapshotObject = qualityGateObject(snapshot);
+	const detailsObject = qualityGateObject(snapshotObject?.details);
+	const goalObject = qualityGateObject(snapshotObject?.goal) ?? qualityGateObject(detailsObject?.goal);
+	if (!goalObject) throw new Error(`${input.errorPrefix} require --gjc-goal-json with a goal object`);
+	const updatedAt = typeof goalObject.updatedAt === "number" ? goalObject.updatedAt : null;
+	if (!updatedAt) throw new Error(`${input.errorPrefix} require --gjc-goal-json goal.updatedAt from get_goal`);
+	const nowMilliseconds = Date.now();
+	if (updatedAt < nowMilliseconds - GJC_GOAL_SNAPSHOT_MAX_AGE_MILLISECONDS) {
+		throw new Error(`${input.errorPrefix} require a fresh --gjc-goal-json snapshot`);
 	}
-	if (status !== "active" && status !== "paused") {
-		throw new Error("complete checkpoint --gjc-goal-json status must be active before receipt-backed reconciliation");
+	if (updatedAt > nowMilliseconds + GJC_GOAL_SNAPSHOT_MAX_FUTURE_SKEW_MILLISECONDS) {
+		throw new Error(`${input.errorPrefix} require --gjc-goal-json goal.updatedAt that is not from the future`);
 	}
+	const objective = typeof goalObject.objective === "string" ? goalObject.objective : "";
+	const expectedObjectives = new Set([input.plan.gjcObjective, ...(input.plan.gjcObjectiveAliases ?? [])]);
+	if (input.plan.gjcGoalMode === "per-story" && input.goal?.objective) {
+		expectedObjectives.add(input.goal.objective);
+	}
+	if (input.allowCompletedLegacyBlocker && goalObject.status === "complete" && !expectedObjectives.has(objective)) {
+		return snapshot;
+	}
+	if (!expectedObjectives.has(objective)) {
+		throw new Error(`${input.errorPrefix} require --gjc-goal-json objective to match the active Ultragoal objective`);
+	}
+	if (goalObject.status !== "active") {
+		throw new Error(`${input.errorPrefix} require --gjc-goal-json goal.status to be active`);
+	}
+	return snapshot;
 }
 
 export async function checkpointUltragoalGoal(input: {
@@ -706,18 +677,12 @@ export async function checkpointUltragoalGoal(input: {
 	if (!goal) throw new Error(`No ultragoal goal found for ${input.goalId}.`);
 	const evidence = input.evidence.trim();
 	if (!evidence) throw new Error("checkpoint evidence is required");
-	const gjcGoalJson = input.gjcGoalJson ? await readStructuredValue(input.cwd, input.gjcGoalJson) : undefined;
 	const qualityGateJson =
 		input.status === "complete"
-			? validateCompleteQualityGate(await readQualityGate(input.cwd, input.qualityGateJson))
+			? await readRequiredCompletionQualityGate(input.cwd, input.qualityGateJson)
 			: input.qualityGateJson
 				? await readStructuredValue(input.cwd, input.qualityGateJson)
 				: undefined;
-	if (input.status === "complete") {
-		if (gjcGoalJson === undefined)
-			throw new Error("complete checkpoints require --gjc-goal-json with a fresh get_goal snapshot");
-		validateGjcGoalSnapshot({ value: gjcGoalJson, plan, goal });
-	}
 	const now = new Date().toISOString();
 	const ledgerBefore = await readUltragoalLedger(input.cwd);
 	const beforeStatus = goal.status;
@@ -734,6 +699,25 @@ export async function checkpointUltragoalGoal(input: {
 		}
 	}
 	const receiptKind = input.status === "complete" ? chooseReceiptKind(plan, goal, input.status) : null;
+	const gjcGoalJson =
+		input.status === "complete"
+			? await readGjcGoalSnapshot({
+					cwd: input.cwd,
+					value: input.gjcGoalJson,
+					plan,
+					goal,
+					required: true,
+					errorPrefix: "complete checkpoints",
+				})
+			: await readGjcGoalSnapshot({
+					cwd: input.cwd,
+					value: input.gjcGoalJson,
+					plan,
+					goal,
+					required: false,
+					errorPrefix: `${input.status} checkpoints`,
+					allowCompletedLegacyBlocker: input.status === "blocked",
+				});
 	const pendingCheckpointEventId = crypto.randomUUID();
 	if (input.status === "complete" && receiptKind && qualityGateJson && !Array.isArray(qualityGateJson)) {
 		goal.completionVerification = buildCompletionReceipt({
@@ -743,6 +727,7 @@ export async function checkpointUltragoalGoal(input: {
 			receiptKind,
 			beforeStatus,
 			qualityGateJson: qualityGateJson as JsonObject,
+			gjcGoalJson: gjcGoalJson as JsonObject,
 			now,
 			checkpointLedgerEventId: pendingCheckpointEventId,
 		});
@@ -761,7 +746,7 @@ export async function checkpointUltragoalGoal(input: {
 		evidence,
 		gjcGoalJson,
 		qualityGateJson,
-		completionVerification: input.status === "complete" ? goal.completionVerification : undefined,
+		completionVerification: goal.completionVerification,
 	});
 	return plan;
 }
@@ -816,6 +801,9 @@ export async function recordUltragoalReviewBlockers(input: {
 }): Promise<UltragoalPlan> {
 	const objective = input.objective.trim();
 	if (!objective) throw new Error("record-review-blockers --objective is required");
+	if (!input.gjcGoalJson?.trim()) {
+		throw new Error("record-review-blockers require --gjc-goal-json from a fresh active get_goal snapshot");
+	}
 	const plan = await checkpointUltragoalGoal({
 		cwd: input.cwd,
 		goalId: input.goalId,

@@ -24,6 +24,10 @@ interface FakeAcpBuiltinSession {
 	messages: unknown[];
 	modelRegistry: {
 		getApiKey(model: { provider: string; id: string }, sessionId?: string): Promise<string | undefined>;
+		resolveCanonicalModel?: (
+			canonicalId: string,
+			options?: { candidates?: Array<{ provider: string; id: string; contextWindow?: number }> },
+		) => { provider: string; id: string; contextWindow?: number } | undefined;
 	};
 	model: { provider: string; id: string } | undefined;
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
@@ -357,6 +361,24 @@ describe("ACP builtin slash commands", () => {
 		expect(setThinkingLevelSpy).toHaveBeenCalledWith("low");
 	});
 
+	it("model: applies explicit thinking level from a bare model id", async () => {
+		const { output, runtime, session } = createRuntime();
+		const available = [{ provider: "anthropic", id: "claude-3-5-sonnet", contextWindow: 200_000 }];
+		session.getAvailableModels = () => available;
+		const setModelSpy = spyOn(session, "setModel").mockResolvedValue(undefined);
+		const setThinkingLevelSpy = spyOn(session, "setThinkingLevel");
+
+		const result = await executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet:low", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(setModelSpy).toHaveBeenCalledWith(available[0], "default", {
+			selector: "anthropic/claude-3-5-sonnet",
+			thinkingLevel: "low",
+		});
+		expect(setThinkingLevelSpy).toHaveBeenCalledWith("low");
+		expect(output[0]).toContain("Default model set to anthropic/claude-3-5-sonnet:low");
+	});
+
 	it("model: assigns a known model to a GJC role-agent target without switching active model", async () => {
 		const { output, runtime, session } = createRuntime();
 		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-3-5-sonnet", contextWindow: 200_000 }];
@@ -380,6 +402,53 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("executor agent model set to anthropic/claude-3-5-sonnet:low");
 		expect(titleNotified).toBe(0);
 		expect(configNotified).toBe(1);
+	});
+
+	it("model: preserves existing role-agent thinking when text assignment omits one", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-3-5-sonnet", contextWindow: 200_000 }];
+		runtime.settings.set("task.agentModelOverrides", {
+			executor: "anthropic/old-model:high",
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/model executor claude-3-5-sonnet", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(runtime.settings.get("task.agentModelOverrides")).toEqual({
+			executor: "anthropic/claude-3-5-sonnet:high",
+		});
+		expect(output[0]).toContain("executor agent model set to anthropic/claude-3-5-sonnet:high");
+	});
+
+	it("model: lets explicit role-agent thinking override preserved thinking", async () => {
+		const { runtime, session } = createRuntime();
+		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-3-5-sonnet", contextWindow: 200_000 }];
+		runtime.settings.set("task.agentModelOverrides", {
+			executor: "anthropic/old-model:high",
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/model executor claude-3-5-sonnet:low", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(runtime.settings.get("task.agentModelOverrides")).toEqual({
+			executor: "anthropic/claude-3-5-sonnet:low",
+		});
+	});
+
+	it("model: preserves canonical selectors for text role-agent assignments", async () => {
+		const { output, runtime, session } = createRuntime();
+		const available = [{ provider: "anthropic", id: "claude-sonnet-4-5", contextWindow: 200_000 }];
+		session.getAvailableModels = () => available;
+		session.modelRegistry.resolveCanonicalModel = (canonicalId, options) =>
+			canonicalId === "claude-sonnet" ? options?.candidates?.[0] : undefined;
+
+		const result = await executeAcpBuiltinSlashCommand("/model executor claude-sonnet:low", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(runtime.settings.get("task.agentModelOverrides")).toEqual({
+			executor: "claude-sonnet:low",
+		});
+		expect(output[0]).toContain("executor agent model set to claude-sonnet:low");
 	});
 
 	it("model: does not emit config change when id is unknown", async () => {

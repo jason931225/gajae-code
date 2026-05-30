@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-30
+
 ### Fixed
 
 - Made TUI terminal writes tolerate `EIO`/closed PTY failures by marking output unavailable, swallowing render/cursor cleanup write errors, and suppressing later render writes after detach.

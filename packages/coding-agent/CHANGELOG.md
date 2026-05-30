@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `gjc session` for listing, inspecting, removing, and attaching GJC-managed tmux sessions.
+
+### Changed
+
+- Changed `gjc --tmux` startup to create a fresh GJC-managed tmux session instead of attaching to an existing default session.
+
 ### Fixed
 
 - Added a `gjc skills` inspection command so installed binaries can list and read embedded workflow skills from any project without relying on source-tree `.gjc` files.

@@ -155,7 +155,15 @@ export default class Index extends Command {
 			setProjectDir(launch.cwd);
 		}
 		const launchParsed = parseArgs(launch.args);
-		if (launchDefaultTmuxIfNeeded({ parsed: launchParsed, rawArgs: launch.args, cwd: launch.cwd })) return;
+		if (
+			launchDefaultTmuxIfNeeded({
+				parsed: launchParsed,
+				rawArgs: launch.args,
+				cwd: launch.cwd,
+				worktreeBranch: launch.worktree.enabled && !launch.worktree.detached ? launch.worktree.branchName : null,
+			})
+		)
+			return;
 		await runRootCommand(launchParsed, launch.args);
 	}
 }

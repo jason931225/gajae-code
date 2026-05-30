@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-30
+
+### Changed
+
+- Refreshed AI package metadata for the GJC 0.2.1 release.
+
 ## [0.2.0] - 2026-05-28
 
 ### Fixed

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-30
+
+### Changed
+
+- Released the GJC 0.2.1 CLI wrapper for the release-readiness patch.
+
 ## [0.2.0] - 2026-05-28
 
 ### Changed

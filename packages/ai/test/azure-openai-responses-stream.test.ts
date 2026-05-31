@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { getEnvApiKey } from "../src/stream";
 import { type AzureOpenAIResponsesOptions, streamAzureOpenAIResponses } from "../src/providers/azure-openai-responses";
+import { getEnvApiKey } from "../src/stream";
 import type { Context, Model, Tool } from "../src/types";
 
 const originalFetch = global.fetch;

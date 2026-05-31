@@ -42,6 +42,11 @@ function formatTaskCounts(counts: Record<string, number>): string {
 		.join(" ");
 }
 
+function formatNotificationSummary(snapshot: GjcTeamSnapshot): string {
+	const summary = snapshot.notification_summary;
+	return `notifications: total=${summary.total} replay_eligible=${summary.replay_eligible} pending=${summary.by_state.pending} queued=${summary.by_state.queued} deferred=${summary.by_state.deferred} failed=${summary.by_state.failed}`;
+}
+
 function formatAwaitingIntegrationNextStep(snapshot: GjcTeamSnapshot): string[] {
 	if (snapshot.phase !== "awaiting_integration") return [];
 	return [
@@ -125,6 +130,7 @@ export default class Team extends Command {
 				`state: ${snapshot.state_dir}`,
 				`tasks: ${snapshot.task_total} (${formatTaskCounts(snapshot.task_counts)})`,
 				`workers: ${snapshot.workers.map(worker => `${worker.id}:${worker.status}`).join(" ")}`,
+				formatNotificationSummary(snapshot),
 				...formatAwaitingIntegrationNextStep(snapshot),
 				...formatIntegrationSummary(snapshot),
 			]);
@@ -149,7 +155,7 @@ export default class Team extends Command {
 			if (!operation || operation === "--help" || operation === "help") {
 				writeText([
 					"Supported operations:",
-					"send-message broadcast mailbox-list mailbox-mark-delivered mailbox-mark-notified",
+					"send-message broadcast mailbox-list mailbox-mark-delivered mailbox-mark-notified notification-list notification-read notification-replay notification-mark-pane-attempt worker-startup-ack",
 					"create-task read-task list-tasks update-task claim-task transition-task-status release-task-claim",
 					"read-config read-manifest read-worker-status read-worker-heartbeat update-worker-heartbeat write-worker-inbox write-worker-identity",
 					"append-event read-events await-event write-shutdown-request read-shutdown-ack read-monitor-snapshot write-monitor-snapshot read-task-approval write-task-approval",

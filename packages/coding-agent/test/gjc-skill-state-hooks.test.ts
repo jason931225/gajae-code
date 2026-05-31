@@ -116,13 +116,48 @@ describe("GJC native skill-state hooks", () => {
 		});
 		expect(allowed.blocked).toBe(false);
 
-		const blocked = await getDeepInterviewMutationDecision({
+		const allowedSpec = await getDeepInterviewMutationDecision({
 			cwd: root,
 			sessionId: "session-rich",
 			tool: { name: "write" } as never,
 			args: { path: ".gjc/specs/deep-interview-sample.md", content: "spec" },
 		});
+		expect(allowedSpec.blocked).toBe(false);
+
+		const blocked = await getDeepInterviewMutationDecision({
+			cwd: root,
+			sessionId: "session-rich",
+			tool: { name: "write" } as never,
+			args: { path: ".gjc/state/sessions/session-rich/deep-interview-state.json", content: "{}" },
+		});
 		expect(blocked.blocked).toBe(true);
+		expect(blocked.reason).toBe("workflow-state-target");
+	});
+
+	it("blocks direct workflow state JSON writes and points to gjc state", async () => {
+		const root = await cwd();
+		const blocked = await getDeepInterviewMutationDecision({
+			cwd: root,
+			tool: { name: "write" } as never,
+			args: { path: ".gjc/state/ralplan-state.json", content: "{}" },
+		});
+		expect(blocked.blocked).toBe(true);
+		expect(blocked.reason).toBe("workflow-state-target");
+		expect(blocked.message).toContain("gjc state ralplan");
+
+		const allowedSpec = await getDeepInterviewMutationDecision({
+			cwd: root,
+			tool: { name: "write" } as never,
+			args: { path: ".gjc/specs/deep-interview-sample.md", content: "spec" },
+		});
+		expect(allowedSpec.blocked).toBe(false);
+
+		const allowedPlan = await getDeepInterviewMutationDecision({
+			cwd: root,
+			tool: { name: "write" } as never,
+			args: { path: ".gjc/plans/sample.md", content: "plan" },
+		});
+		expect(allowedPlan.blocked).toBe(false);
 	});
 
 	it("encodes hook session ids before writing skill and mode state paths", async () => {

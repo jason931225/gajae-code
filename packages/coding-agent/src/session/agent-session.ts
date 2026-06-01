@@ -1378,6 +1378,14 @@ export class AgentSession {
 		}
 
 		const messages = selected;
+		let appendOnlyPrefixSnapshot: StablePrefixSnapshot | undefined;
+		const appendOnly = this.agent.appendOnlyContext;
+		if (appendOnly) {
+			if (!appendOnly.prefix.built) {
+				appendOnly.prefix.build(this.agent.state, { intentTracing: this.agent.intentTracing });
+			}
+			appendOnlyPrefixSnapshot = appendOnly.prefix.exportSnapshot() ?? undefined;
+		}
 		return {
 			messages,
 			agentMessages: messages.map(message => structuredClone(message) as AgentMessage),
@@ -1392,6 +1400,7 @@ export class AgentSession {
 				skippedReasons,
 			},
 			cacheIdentity: options.cacheIdentity ?? this.sessionId,
+			appendOnlyPrefixSnapshot,
 		};
 	}
 

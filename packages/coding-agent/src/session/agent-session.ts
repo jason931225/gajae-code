@@ -197,7 +197,7 @@ import {
 } from "../runtime-mcp/discoverable-tool-metadata";
 import { deobfuscateSessionContext, type SecretObfuscator } from "../secrets/obfuscator";
 import { formatNoCredentialOnboardingError, formatNoModelOnboardingError } from "../setup/model-onboarding-guidance";
-import { isCanonicalGjcWorkflowSkill, syncSkillActiveState } from "../skill-state/active-state";
+import { isCanonicalGjcWorkflowSkill } from "../skill-state/active-state";
 import { assertDeepInterviewMutationAllowed } from "../skill-state/deep-interview-mutation-guard";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
 import { resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
@@ -274,6 +274,13 @@ export type AgentSessionEvent =
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| { type: "thinking_level_changed"; thinkingLevel: ThinkingLevel | undefined }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
+
+/**
+ * Safe path component pattern used to validate session-id segments before
+ * joining them into `.gjc/state` paths. Mirrors the regex used by the
+ * `gjc state` runtime selector resolver.
+ */
+const SAFE_PATH_COMPONENT = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -1243,6 +1250,37 @@ export class AgentSession {
 			skill: this.#activeSkillState.skill,
 			...(this.#activeSkillState.sessionId ? { session_id: this.#activeSkillState.sessionId } : {}),
 		};
+	}
+
+	/** Best-effort accessor for the active skill's `current_phase` field from
+	 *  its persisted mode-state file. Used by the `skill` tool to enforce the
+	 *  terminal-phase chain guard. Returns undefined when no active skill is
+	 *  recorded or the mode-state file is missing/unreadable; callers should
+	 *  treat undefined as a non-terminal phase (refuses to chain). */
+	getActiveSkillPhase(): string | undefined {
+		const active = this.#activeSkillState;
+		if (!active) return undefined;
+		// Path safety: refuse to read mode-state files when the skill or
+		// session-id are not safe path components. The `skill` tool
+		// interprets undefined as a non-terminal phase, so chaining is
+		// refused — there is no risk of bypassing the guard via a custom
+		// skill name with `..` or a session-id with separators.
+		if (!isCanonicalGjcWorkflowSkill(active.skill)) return undefined;
+		if (active.sessionId !== undefined && !SAFE_PATH_COMPONENT.test(active.sessionId)) {
+			return undefined;
+		}
+		try {
+			const stateDir = path.join(this.sessionManager.getCwd(), ".gjc", "state");
+			const segments = active.sessionId
+				? [stateDir, "sessions", encodeURIComponent(active.sessionId).replaceAll(".", "%2E")]
+				: [stateDir];
+			const filePath = path.join(...segments, `${active.skill}-state.json`);
+			const raw = fs.readFileSync(filePath, "utf-8");
+			const parsed = JSON.parse(raw) as { current_phase?: unknown };
+			return typeof parsed.current_phase === "string" ? parsed.current_phase : undefined;
+		} catch {
+			return undefined;
+		}
 	}
 
 	/** Peek the in-flight directive's invocation handler for use by the resolve tool. */
@@ -4230,17 +4268,15 @@ export class AgentSession {
 		if (typeof name !== "string" || !name.trim()) return;
 		const skill = name.trim();
 		const sessionId = this.sessionManager.getSessionId();
-		if (isCanonicalGjcWorkflowSkill(skill)) {
-			const cwd = this.sessionManager.getCwd();
-			await syncSkillActiveState({
-				cwd,
-				skill,
-				active,
-				phase: active ? "running" : "complete",
-				sessionId,
-				source: "skill-prompt",
-			});
-		}
+		// Canonical GJC workflow skills (deep-interview, ralplan, ultragoal, team)
+		// own their `.gjc/state/skill-active-state.json` row through the
+		// `gjc state handoff` and `gjc state clear` runtime verbs. The prompt
+		// observer here used to overwrite the row with `phase: running` and
+		// later remove it with `active:false`, which clobbered handoff lineage
+		// (`handoff_from`/`handoff_at`) and made the HUD inconsistent with
+		// mode-state. The observational filesystem write is now skipped for
+		// canonical skills; the in-memory `#activeSkillState` tracking below
+		// keeps `getActiveSkillState` accurate for the chain guard.
 		this.#activeSkillState = active ? { skill, sessionId } : undefined;
 	}
 

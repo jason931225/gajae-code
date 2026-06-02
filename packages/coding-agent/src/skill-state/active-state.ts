@@ -345,24 +345,79 @@ function filterRootEntriesForSession(entries: SkillActiveEntry[], sessionId?: st
 	});
 }
 
+function entryRecency(entry: SkillActiveEntry): number {
+	const stamp = entry.handoff_at || entry.updated_at || entry.activated_at;
+	const ms = stamp ? Date.parse(stamp) : Number.NaN;
+	return Number.isFinite(ms) ? ms : 0;
+}
+
+/**
+ * Collapse the merged, session-scoped entries down to a single row per skill.
+ * A handed-off skill can leave more than one row visible to a session — e.g. a
+ * row seeded without a session id (rendered globally by
+ * `filterRootEntriesForSession`) plus a later, session-scoped handoff demotion
+ * of the same skill. Without this collapse the HUD renders the same workflow
+ * twice and keeps showing a skill that has already handed control to its
+ * successor. The most recently updated row wins, so a handoff demotion
+ * (`active:false`, newest timestamp) supersedes an older stale `active:true`
+ * row of the same skill and is then dropped by the active filter below.
+ */
+function dedupeVisibleBySkill(entries: SkillActiveEntry[]): SkillActiveEntry[] {
+	const winners = new Map<string, SkillActiveEntry>();
+	for (const entry of entries) {
+		const current = winners.get(entry.skill);
+		if (!current || entryRecency(entry) >= entryRecency(current)) {
+			winners.set(entry.skill, entry);
+		}
+	}
+	return [...winners.values()];
+}
+
+/**
+ * The planning pipeline advances one stage at a time: `deep-interview →
+ * ralplan → ultragoal`. Each stage is activated through its own command path
+ * (`gjc deep-interview`, `gjc ralplan`, `gjc ultragoal`), and those activations
+ * do not demote the previous stage's row — only the explicit `handoff` verb
+ * does. Without this collapse, activating ultragoal while ralplan is still
+ * `active:true` would render both stages and keep showing a workflow that has
+ * already handed control forward. Keep only the most recently updated pipeline
+ * stage so the HUD reflects the single current workflow. `team` is intentionally
+ * excluded — it runs alongside ultragoal — and every non-pipeline skill is left
+ * untouched.
+ */
+const PLANNING_PIPELINE_SKILLS = new Set<string>(["deep-interview", "ralplan", "ultragoal"]);
+
+function collapsePlanningPipeline(entries: SkillActiveEntry[]): SkillActiveEntry[] {
+	const pipeline = entries.filter(entry => PLANNING_PIPELINE_SKILLS.has(entry.skill));
+	if (pipeline.length <= 1) return entries;
+	let current = pipeline[0];
+	for (const entry of pipeline) {
+		if (entryRecency(entry) >= entryRecency(current)) current = entry;
+	}
+	return entries.filter(entry => !PLANNING_PIPELINE_SKILLS.has(entry.skill) || entry === current);
+}
+
 function mergeVisibleEntries(
 	sessionState: SkillActiveState | null,
 	rootState: SkillActiveState | null,
 	sessionId?: string,
 ): SkillActiveEntry[] {
-	const rootEntries = filterRootEntriesForSession(listActiveSkills(rootState), sessionId);
+	// Use the raw (active + inactive) rows so a handoff demotion stays visible
+	// long enough to supersede a stale same-skill row before the active filter.
+	const rootEntries = filterRootEntriesForSession(rawActiveEntries(rootState), sessionId);
 	const merged = new Map(rootEntries.map(entry => [entryKey(entry), entry]));
-	for (const entry of listActiveSkills(sessionState)) {
+	for (const entry of rawActiveEntries(sessionState)) {
 		merged.set(entryKey(entry), entry);
 	}
-	return [...merged.values()];
+	const active = dedupeVisibleBySkill([...merged.values()]).filter(entry => entry.active !== false);
+	return collapsePlanningPipeline(active);
 }
 
 export async function readVisibleSkillActiveState(cwd: string, sessionId?: string): Promise<SkillActiveState | null> {
 	const { rootPath, sessionPath } = getSkillActiveStatePaths(cwd, sessionId);
 	const [rootState, sessionState] = await Promise.all([
-		readStateFile(rootPath),
-		sessionPath ? readStateFile(sessionPath) : Promise.resolve(null),
+		readRawActiveStateForHandoff(rootPath, false),
+		sessionPath ? readRawActiveStateForHandoff(sessionPath, false) : Promise.resolve(null),
 	]);
 	const activeSkills = mergeVisibleEntries(sessionState, rootState, sessionId);
 	if (activeSkills.length === 0) return null;
@@ -468,11 +523,25 @@ export async function applyHandoffToActiveState(options: ApplyHandoffOptions): P
 	const { rootPath, sessionPath } = getSkillActiveStatePaths(options.cwd, sessionId);
 	const readState = (filePath: string) => readRawActiveStateForHandoff(filePath, options.strict === true);
 
+	// A skill can hold more than one visible row in this session's scope — e.g.
+	// it was seeded without a session id (rendered globally) and is now handed
+	// off under a concrete session id. Supersede every same-session-scope row of
+	// the caller and callee skills, not just the exact `skill::session_id` key,
+	// so a stale `active:true` row cannot survive the demotion and keep showing
+	// in the HUD. Rows owned by other sessions are left untouched.
+	const handoffSession = safeString(sessionId).trim();
+	const reassignedSkills = new Set([callerEntry.skill, calleeEntry.skill]);
+	const supersedesVisible = (entry: SkillActiveEntry): boolean => {
+		if (!reassignedSkills.has(entry.skill)) return false;
+		const entrySession = safeString(entry.session_id).trim();
+		return entrySession.length === 0 || entrySession === handoffSession;
+	};
 	const applyEntries = (entries: SkillActiveEntry[]): SkillActiveEntry[] => {
 		const callerKey = entryKey(callerEntry);
-		const calleeKey = entryKey(calleeEntry);
-		const priorCaller = entries.find(e => entryKey(e) === callerKey);
-		const kept = entries.filter(e => entryKey(e) !== callerKey && entryKey(e) !== calleeKey);
+		const priorCaller =
+			entries.find(e => entryKey(e) === callerKey) ??
+			entries.find(e => e.skill === callerEntry.skill && supersedesVisible(e) && Boolean(e.handoff_from));
+		const kept = entries.filter(e => !supersedesVisible(e));
 		// Merge prior lineage into the demoted caller so multi-step handoff
 		// chains preserve `handoff_from` from the previous transition while
 		// the new `handoff_to`/`handoff_at` describe this one.

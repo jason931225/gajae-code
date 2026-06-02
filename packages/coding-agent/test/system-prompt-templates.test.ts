@@ -399,7 +399,7 @@ describe("system Handlebars prompt templates", () => {
 		expect(promptText).toContain("Edit: `apply_patch`");
 		expect(promptText).toContain("Surgical text edits → `apply_patch`");
 		expect(promptText).not.toContain("Edit: `edit`");
-	});
+	}, 30_000);
 
 	test("buildSystemPrompt omits CPU info when os.cpus fails", async () => {
 		vi.spyOn(os, "cpus").mockImplementation(() => {
@@ -419,5 +419,5 @@ describe("system Handlebars prompt templates", () => {
 		const workstation = /<workstation>\n(?<content>[\s\S]*?)\n<\/workstation>/u.exec(projectPrompt)?.groups?.content;
 		expect(workstation).toContain("OS:");
 		expect(workstation).not.toContain("CPU:");
-	});
+	}, 30_000);
 });

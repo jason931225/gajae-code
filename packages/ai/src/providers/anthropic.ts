@@ -184,12 +184,14 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			"User-Agent": userAgent,
 		};
 	} else if (!isAnthropicApiBaseUrl(options.baseUrl)) {
+		const incomingUserAgent = getHeaderCaseInsensitive(options.modelHeaders, "User-Agent");
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
 			Authorization: `Bearer ${options.apiKey}`,
 			...sharedHeaders,
 			"Anthropic-Beta": betaHeader,
+			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 		};
 	} else {
 		return {

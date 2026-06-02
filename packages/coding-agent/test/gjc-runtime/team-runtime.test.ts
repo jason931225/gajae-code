@@ -207,6 +207,9 @@ describe("native gjc team runtime", () => {
 		expect(snapshot.workers).toHaveLength(1);
 		expect(snapshot.tmux_target).toBe("dry-run:0");
 		expect(snapshot.workers[0]?.pane_id).toBe("%dry-run-worker-1");
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.lifecycle_state).toBe("starting");
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.worker_status_state).toBe("idle");
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.pane_id).toBe("%dry-run-worker-1");
 
 		const config = await readTeamConfig(snapshot.state_dir);
 		const manifest = await Bun.file(path.join(snapshot.state_dir, "manifest.v2.json")).json();
@@ -216,6 +219,83 @@ describe("native gjc team runtime", () => {
 		const telemetry = await Bun.file(path.join(snapshot.state_dir, "telemetry.jsonl")).text();
 		expect(telemetry).toContain("Native gjc team dry-run state initialized");
 		expect(telemetry).toContain('"dry_run":true');
+	});
+
+	it("separates managed worker lifecycle from worker-reported status", async () => {
+		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-team-runtime-"));
+		await startGjcTeam({
+			workerCount: 1,
+			agentType: "executor",
+			task: "Report lifecycle separately",
+			teamName: "worker-lifecycle-team",
+			cwd: cleanupRoot,
+			dryRun: true,
+			env: { PATH: "" },
+		});
+
+		const initialStatus = (await executeGjcTeamApiOperation(
+			"read-worker-status",
+			{ team_name: "worker-lifecycle-team", worker_id: "worker-1" },
+			cleanupRoot,
+			{ PATH: "" },
+		)) as { state: string };
+		expect(initialStatus.state).toBe("idle");
+
+		const startupAck = (await executeGjcTeamApiOperation(
+			"worker-startup-ack",
+			{ team_name: "worker-lifecycle-team", worker_id: "worker-1", pid: 1234, protocol_version: "1" },
+			cleanupRoot,
+			{ PATH: "" },
+		)) as { pid?: number };
+		expect(startupAck.pid).toBe(1234);
+
+		let snapshot = await readGjcTeamSnapshot("worker-lifecycle-team", cleanupRoot, { PATH: "" });
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.lifecycle_state).toBe("ready");
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.worker_status_state).toBe("idle");
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.pid).toBe(1234);
+
+		const workingStatus = (await executeGjcTeamApiOperation(
+			"update-worker-status",
+			{ team_name: "worker-lifecycle-team", worker_id: "worker-1", status: "working", current_task_id: "task-1" },
+			cleanupRoot,
+			{ PATH: "" },
+		)) as { state: string; current_task_id?: string };
+		expect(workingStatus.state).toBe("working");
+		expect(workingStatus.current_task_id).toBe("task-1");
+
+		snapshot = await readGjcTeamSnapshot("worker-lifecycle-team", cleanupRoot, { PATH: "" });
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.lifecycle_state).toBe("working");
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.worker_status_state).toBe("working");
+
+		await executeGjcTeamApiOperation(
+			"update-worker-status",
+			{ team_name: "worker-lifecycle-team", worker_id: "worker-1", status: "blocked", reason: "waiting" },
+			cleanupRoot,
+			{ PATH: "" },
+		);
+
+		snapshot = await readGjcTeamSnapshot("worker-lifecycle-team", cleanupRoot, { PATH: "" });
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.lifecycle_state).toBe("ready");
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.worker_status_state).toBe("blocked");
+		const forceRequest = (await executeGjcTeamApiOperation(
+			"write-shutdown-request",
+			{
+				team_name: "worker-lifecycle-team",
+				worker_id: "worker-1",
+				requested_by: "leader-fixed",
+				request_id: "manual-force-stop",
+				mode: "force",
+			},
+			cleanupRoot,
+			{ PATH: "" },
+		)) as { mode?: string; request_id?: string };
+		expect(forceRequest.mode).toBe("force");
+		expect(forceRequest.request_id).toBe("manual-force-stop");
+
+		snapshot = await readGjcTeamSnapshot("worker-lifecycle-team", cleanupRoot, { PATH: "" });
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.lifecycle_state).toBe("draining");
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.shutdown_mode).toBe("force");
+		expect(snapshot.worker_lifecycle_by_id["worker-1"]?.worker_status_state).toBe("blocked");
 	});
 
 	it("persists the active worker command so tmux workers use the same gjc entrypoint", async () => {
@@ -601,6 +681,14 @@ describe("native gjc team runtime", () => {
 		const stopped = await shutdownGjcTeam("life-team", cleanupRoot, { PATH: "" });
 		expect(stopped.phase).toBe("complete");
 		expect(stopped.workers[0]?.status).toBe("stopped");
+		expect(stopped.worker_lifecycle_by_id["worker-1"]?.lifecycle_state).toBe("stopped");
+		expect(stopped.worker_lifecycle_by_id["worker-1"]?.shutdown_mode).toBe("graceful");
+		expect(stopped.worker_lifecycle_by_id["worker-1"]?.shutdown_request_id?.startsWith("shutdown-")).toBe(true);
+		const shutdownRequest = (await Bun.file(
+			path.join(cleanupRoot, ".gjc", "state", "team", "life-team", "workers", "worker-1", "shutdown-request.json"),
+		).json()) as { mode?: string; request_id?: string };
+		expect(shutdownRequest.mode).toBe("graceful");
+		expect(shutdownRequest.request_id).toBe(stopped.worker_lifecycle_by_id["worker-1"]?.shutdown_request_id);
 	});
 
 	it("stores structured completion evidence in task listings and honors claim tokens without implicit worker defaults", async () => {

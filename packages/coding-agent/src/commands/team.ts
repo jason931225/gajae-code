@@ -49,6 +49,17 @@ function formatNotificationSummary(snapshot: GjcTeamSnapshot): string {
 	return `notifications: total=${summary.total} replay_eligible=${summary.replay_eligible} pending=${summary.by_state.pending} queued=${summary.by_state.queued} deferred=${summary.by_state.deferred} failed=${summary.by_state.failed}`;
 }
 
+function formatWorkerLifecycleSummary(snapshot: GjcTeamSnapshot): string {
+	return snapshot.workers
+		.map(worker => {
+			const lifecycle = snapshot.worker_lifecycle_by_id[worker.id];
+			const lifecycleState = lifecycle?.lifecycle_state ?? "unknown";
+			const reportedState = lifecycle?.worker_status_state ?? "unknown";
+			return `${worker.id}:runtime=${worker.status},lifecycle=${lifecycleState},reported=${reportedState}`;
+		})
+		.join(" ");
+}
+
 function formatAwaitingIntegrationNextStep(snapshot: GjcTeamSnapshot): string[] {
 	if (snapshot.phase !== "awaiting_integration") return [];
 	return [
@@ -136,7 +147,7 @@ export default class Team extends Command {
 				`tmux: ${snapshot.tmux_target || snapshot.tmux_session}`,
 				`state: ${snapshot.state_dir}`,
 				`tasks: ${snapshot.task_total} (${formatTaskCounts(snapshot.task_counts)})`,
-				`workers: ${snapshot.workers.map(worker => `${worker.id}:${worker.status}`).join(" ")}`,
+				`workers: ${formatWorkerLifecycleSummary(snapshot)}`,
 				formatNotificationSummary(snapshot),
 				...formatAwaitingIntegrationNextStep(snapshot),
 				...formatIntegrationSummary(snapshot),
@@ -164,7 +175,7 @@ export default class Team extends Command {
 					"Supported operations:",
 					"send-message broadcast mailbox-list mailbox-mark-delivered mailbox-mark-notified notification-list notification-read notification-replay notification-mark-pane-attempt worker-startup-ack",
 					"create-task read-task list-tasks update-task claim-task transition-task-status release-task-claim",
-					"read-config read-manifest read-worker-status read-worker-heartbeat update-worker-heartbeat write-worker-inbox write-worker-identity",
+					"read-config read-manifest read-worker-status update-worker-status read-worker-heartbeat update-worker-heartbeat write-worker-inbox write-worker-identity",
 					"append-event read-events await-event write-shutdown-request read-shutdown-ack read-monitor-snapshot write-monitor-snapshot read-task-approval write-task-approval",
 					"Completion example:",
 					'transition-task-status --input \'{"team_name":"demo","task_id":"task-1","to":"completed","claim_token":"...","completion_evidence":{"summary":"done","items":[{"kind":"command","status":"passed","summary":"focused tests passed","command":"bun test packages/coding-agent/test/gjc-runtime/team-runtime.test.ts"}]}}\' --json',

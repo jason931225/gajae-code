@@ -56,6 +56,7 @@ requiring a separate linked execution loop up front. GJC team supports current-w
 
 - **Canonical launch:** use plain `gjc team ...` / `$team ...` for the coordinated worker.
 - **Verification ownership:** keep one lane focused on tests, regression coverage, and evidence before shutdown.
+- **Typed lanes:** model delivery, verification, architecture, or specialist work as task `lane` metadata plus `required_role` / `allowed_roles`; claiming enforces owner, role, dependency, and lease order.
 - **Escalation:** use a new explicit follow-up task only when later manual work still needs a persistent single-owner fix/verification loop.
 - **Deprecation:** nested team execution commands have been removed. Use plain `gjc team ...` for coordinated execution.
 
@@ -247,6 +248,7 @@ gjc team api transition-task-status --input '{"team_name":"my-team","task_id":"t
 gjc team api update-worker-status --input '{"team_name":"my-team","worker_id":"worker-1","status":"working","current_task_id":"task-1"}' --json
 gjc team api recover-stale-claims --input '{"team_name":"my-team"}' --json
 gjc team api read-traces --input '{"team_name":"my-team"}' --json
+gjc team api create-task --input '{"team_name":"my-team","subject":"Verify delivery","description":"Run verification","owner":"worker-1","lane":"verification","required_role":"executor","depends_on":["task-1"]}' --json
 ```
 
 Canonical worker lifecycle operations:
@@ -257,6 +259,7 @@ Canonical worker lifecycle operations:
 - `recover-stale-claims` is leader/runtime-owned; it clears expired claim files, requeues in-progress tasks claimed by stale workers, and records `task_claim_recovered` events without modifying terminal task records or completion evidence
 - `transition-task-status` with the claim token, worker id, and structured completion evidence
 - `release-task-claim`
+Claim eligibility is ordered and must not be bypassed: explicit task id selection, task status/terminal checks, owner/assignee checks, lane/role checks, dependency/blocked checks, then active lease creation. `lane` is descriptive metadata; `required_role` and `allowed_roles` are the enforced worker role gates.
 
 GJC-team interop operations are also available for mailbox, native notification, worker heartbeat/status, stale-claim recovery, startup ACK, events, monitor snapshots, approvals, and shutdown request/ack flows; run `gjc team api --help` for the full operation list.
 

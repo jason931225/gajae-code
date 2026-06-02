@@ -1059,6 +1059,79 @@ describe("native gjc team runtime", () => {
 		expect(recovered.worker_lifecycle_by_id["worker-1"]?.stop_reason).toBe("pane_missing");
 		expect(await readEvents(stateDir)).toContain("missing_pane");
 	});
+
+	it("enforces typed lane claim eligibility before leases are granted", async () => {
+		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-team-runtime-"));
+		await startGjcTeam({
+			workerCount: 2,
+			agentType: "executor",
+			task: "Route work by lane",
+			teamName: "lane-team",
+			cwd: cleanupRoot,
+			dryRun: true,
+			env: { PATH: "" },
+		});
+
+		const wrongOwner = await claimGjcTeamTask("lane-team", "worker-1", cleanupRoot, { PATH: "" }, "task-2");
+		expect(wrongOwner.ok).toBe(false);
+		expect(wrongOwner.reason).toBe("task_owner_mismatch:task-2:worker-2");
+
+		const dependentTask = (await executeGjcTeamApiOperation(
+			"create-task",
+			{
+				team_name: "lane-team",
+				subject: "Verify delivery",
+				description: "Run verification after implementation",
+				owner: "worker-1",
+				lane: "verification",
+				required_role: "executor",
+				depends_on: ["task-1"],
+			},
+			cleanupRoot,
+			{ PATH: "" },
+		)) as { task: { id: string; lane?: string; required_role?: string; depends_on?: string[] } };
+		expect(dependentTask.task.lane).toBe("verification");
+		expect(dependentTask.task.required_role).toBe("executor");
+		expect(dependentTask.task.depends_on).toEqual(["task-1"]);
+
+		const blockedByDependency = await claimGjcTeamTask("lane-team", "worker-1", cleanupRoot, { PATH: "" }, "task-3");
+		expect(blockedByDependency.ok).toBe(false);
+		expect(blockedByDependency.reason).toBe("task_dependency_incomplete:task-3:task-1");
+
+		await executeGjcTeamApiOperation(
+			"create-task",
+			{
+				team_name: "lane-team",
+				subject: "Architecture review",
+				description: "Review architecture lane",
+				owner: "worker-1",
+				lane: "architecture",
+				required_role: "architect",
+			},
+			cleanupRoot,
+			{ PATH: "" },
+		);
+		const wrongRole = await claimGjcTeamTask("lane-team", "worker-1", cleanupRoot, { PATH: "" }, "task-4");
+		expect(wrongRole.ok).toBe(false);
+		expect(wrongRole.reason).toBe("task_role_mismatch:task-4:architect");
+
+		const implementationClaim = await claimGjcTeamTask("lane-team", "worker-1", cleanupRoot, { PATH: "" }, "task-1");
+		expect(implementationClaim.ok).toBe(true);
+		await transitionGjcTeamTask(
+			"lane-team",
+			"task-1",
+			"completed",
+			cleanupRoot,
+			{ PATH: "" },
+			implementationClaim.claim_token,
+			commandCompletionEvidence("dependency completed"),
+		);
+
+		const verificationClaim = await claimGjcTeamTask("lane-team", "worker-1", cleanupRoot, { PATH: "" }, "task-3");
+		expect(verificationClaim.ok).toBe(true);
+		expect(verificationClaim.task?.lane).toBe("verification");
+		expect(verificationClaim.task?.required_role).toBe("executor");
+	});
 	it("allows only one worker to claim a task under concurrent claim attempts", async () => {
 		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-team-runtime-"));
 		await startGjcTeam({
@@ -1078,7 +1151,9 @@ describe("native gjc team runtime", () => {
 
 		expect(claims.filter(claim => claim.ok)).toHaveLength(1);
 		expect(claims.filter(claim => !claim.ok)).toHaveLength(1);
-		expect(claims.find(claim => !claim.ok)?.reason).toMatch(/task_already_claimed:task-1|task_not_pending:task-1/);
+		expect(claims.find(claim => !claim.ok)?.reason).toMatch(
+			/task_already_claimed:task-1|task_not_pending:task-1|task_owner_mismatch:task-1:worker-1/,
+		);
 		const status = await readGjcTeamSnapshot("claim-race-team", cleanupRoot, { PATH: "" });
 		expect(status.task_counts.in_progress).toBe(1);
 	});

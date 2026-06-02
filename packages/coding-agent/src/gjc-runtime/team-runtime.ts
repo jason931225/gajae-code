@@ -102,6 +102,9 @@ export interface GjcTeamTask {
 	error?: string;
 	blocked_by?: string[];
 	depends_on?: string[];
+	lane?: string;
+	required_role?: string;
+	allowed_roles?: string[];
 	version: number;
 	claim?: GjcTeamTaskClaim;
 	created_at: string;
@@ -1000,6 +1003,39 @@ export async function recoverGjcTeamStaleClaims(
 	const config = await readConfig(dir);
 	return reconcileGjcTeamStaleClaims(teamName, dir, config, env);
 }
+function normalizeOptionalTaskString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed || undefined;
+}
+
+function normalizeOptionalTaskStringArray(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const items = Array.from(
+		new Set(value.map(item => (typeof item === "string" ? item.trim() : "")).filter(item => item.length > 0)),
+	).sort();
+	return items.length > 0 ? items : undefined;
+}
+type GjcTeamTaskMetadataInput = Partial<
+	Pick<GjcTeamTask, "owner" | "lane" | "required_role" | "allowed_roles" | "depends_on" | "blocked_by">
+>;
+
+function taskMetadataFromInput(input: Record<string, unknown>, includeOwner = false): GjcTeamTaskMetadataInput {
+	const metadata: GjcTeamTaskMetadataInput = {};
+	const owner = normalizeOptionalTaskString(input.owner);
+	const lane = normalizeOptionalTaskString(input.lane);
+	const requiredRole = normalizeOptionalTaskString(input.required_role ?? input.requiredRole);
+	const allowedRoles = normalizeOptionalTaskStringArray(input.allowed_roles ?? input.allowedRoles);
+	const dependsOn = normalizeOptionalTaskStringArray(input.depends_on ?? input.dependsOn);
+	const blockedBy = normalizeOptionalTaskStringArray(input.blocked_by ?? input.blockedBy);
+	if (includeOwner && owner) metadata.owner = owner;
+	if (lane) metadata.lane = lane;
+	if (requiredRole) metadata.required_role = requiredRole;
+	if (allowedRoles) metadata.allowed_roles = allowedRoles;
+	if (dependsOn) metadata.depends_on = dependsOn;
+	if (blockedBy) metadata.blocked_by = blockedBy;
+	return metadata;
+}
 
 function normalizeTask(raw: GjcTeamTask): GjcTeamTask {
 	const status = raw.status === ("complete" as GjcTeamTaskStatus) ? "completed" : raw.status;
@@ -1011,6 +1047,9 @@ function normalizeTask(raw: GjcTeamTask): GjcTeamTask {
 		title: raw.title ?? raw.subject,
 		objective: raw.objective ?? raw.description,
 		version: raw.version ?? 1,
+		lane: normalizeOptionalTaskString(raw.lane),
+		required_role: normalizeOptionalTaskString(raw.required_role),
+		allowed_roles: normalizeOptionalTaskStringArray(raw.allowed_roles),
 	};
 }
 
@@ -1200,6 +1239,42 @@ function getGjcTeamTaskCompletionEvidenceFailure(task: GjcTeamTask): string | nu
 
 function isGjcTeamTaskCompletionVerified(task: GjcTeamTask): boolean {
 	return getGjcTeamTaskCompletionEvidenceFailure(task) == null;
+}
+function roleValuesForWorker(worker: GjcTeamWorker): Set<string> {
+	return new Set([worker.role, worker.agent_type].map(value => value.trim()).filter(value => value.length > 0));
+}
+
+function getGjcTeamTaskClaimEligibilityReason(
+	task: GjcTeamTask,
+	worker: GjcTeamWorker,
+	tasks: GjcTeamTask[],
+): string | null {
+	if (task.status !== "pending") return `task_not_pending:${task.id}`;
+	if (task.owner && task.owner !== worker.id) return `task_owner_mismatch:${task.id}:${task.owner}`;
+	if (task.assignee && task.assignee !== worker.id) return `task_assignee_mismatch:${task.id}:${task.assignee}`;
+
+	const workerRoles = roleValuesForWorker(worker);
+	if (task.required_role && !workerRoles.has(task.required_role))
+		return `task_role_mismatch:${task.id}:${task.required_role}`;
+	if (task.allowed_roles?.length && !task.allowed_roles.some(role => workerRoles.has(role)))
+		return `task_role_mismatch:${task.id}:${task.allowed_roles.join(",")}`;
+
+	if (task.blocked_by?.length) return `task_blocked:${task.id}:${task.blocked_by.join(",")}`;
+	for (const dependencyId of task.depends_on ?? []) {
+		const dependency = tasks.find(candidate => candidate.id === dependencyId);
+		if (!dependency || !isGjcTeamTaskCompletionVerified(dependency))
+			return `task_dependency_incomplete:${task.id}:${dependencyId}`;
+	}
+
+	return null;
+}
+
+async function getActiveClaimReason(dir: string, task: GjcTeamTask): Promise<string | null> {
+	const claimPath = path.join(dir, "claims", `${task.id}.json`);
+	const diskClaim = readClaimRecord(await readJsonFile<unknown>(claimPath));
+	const claim = task.claim ?? diskClaim;
+	if (!claim || isPastTimestamp(claim.leased_until)) return null;
+	return `task_already_claimed:${task.id}`;
 }
 function isGjcTeamTaskRecord(value: unknown): value is GjcTeamTask {
 	return (
@@ -2730,9 +2805,11 @@ export async function createGjcTeamTask(
 	description: string,
 	cwd = process.cwd(),
 	env: NodeJS.ProcessEnv = process.env,
+	taskOptions: GjcTeamTaskMetadataInput = {},
 ): Promise<GjcTeamTask> {
 	const dir = await findTeamDir(teamName, cwd, env);
 	const config = await readConfig(dir);
+	if (taskOptions.owner) assertKnownWorker(config, taskOptions.owner);
 	const tasks = await readTasks(dir);
 	const next = tasks.length + 1;
 	const task: GjcTeamTask = {
@@ -2742,6 +2819,12 @@ export async function createGjcTeamTask(
 		title: subject,
 		objective: description,
 		status: "pending",
+		...(taskOptions.owner ? { owner: taskOptions.owner } : {}),
+		...(taskOptions.lane ? { lane: taskOptions.lane } : {}),
+		...(taskOptions.required_role ? { required_role: taskOptions.required_role } : {}),
+		...(taskOptions.allowed_roles ? { allowed_roles: taskOptions.allowed_roles } : {}),
+		...(taskOptions.depends_on ? { depends_on: taskOptions.depends_on } : {}),
+		...(taskOptions.blocked_by ? { blocked_by: taskOptions.blocked_by } : {}),
 		version: 1,
 		created_at: now(),
 		updated_at: now(),
@@ -2755,7 +2838,12 @@ export async function createGjcTeamTask(
 export async function updateGjcTeamTask(
 	teamName: string,
 	taskId: string,
-	updates: Partial<Pick<GjcTeamTask, "subject" | "description" | "blocked_by" | "depends_on">>,
+	updates: Partial<
+		Pick<
+			GjcTeamTask,
+			"subject" | "description" | "blocked_by" | "depends_on" | "lane" | "required_role" | "allowed_roles"
+		>
+	>,
 	cwd = process.cwd(),
 	env: NodeJS.ProcessEnv = process.env,
 ): Promise<GjcTeamTask> {
@@ -2782,7 +2870,7 @@ export async function claimGjcTeamTask(
 ): Promise<GjcTeamApiClaimResult> {
 	const dir = await findTeamDir(teamName, cwd, env);
 	const config = await readConfig(dir);
-	assertKnownWorker(config, workerId);
+	const teamWorker = findKnownWorker(config, workerId);
 	const livenessRecovery = await reconcileGjcTeamStaleClaims(teamName, dir, config, env);
 	const staleWorkerReasons = livenessRecovery.stale_workers[workerId];
 	if (staleWorkerReasons?.length)
@@ -2790,9 +2878,12 @@ export async function claimGjcTeamTask(
 	const tasks = await readTasks(dir);
 	const task = taskId
 		? tasks.find(candidate => candidate.id === taskId)
-		: tasks.find(candidate => candidate.status === "pending" && (!candidate.owner || candidate.owner === workerId));
-	if (!task) return { ok: false, reason: "no_pending_task" };
-	if (task.status !== "pending") return { ok: false, reason: `task_not_pending:${task.id}` };
+		: tasks.find(candidate => getGjcTeamTaskClaimEligibilityReason(candidate, teamWorker, tasks) == null);
+	if (!task) return { ok: false, reason: taskId ? `task_not_found:${taskId}` : "no_pending_task" };
+	const eligibilityReason = getGjcTeamTaskClaimEligibilityReason(task, teamWorker, tasks);
+	if (eligibilityReason) return { ok: false, reason: eligibilityReason };
+	const activeClaimReason = await getActiveClaimReason(dir, task);
+	if (activeClaimReason) return { ok: false, reason: activeClaimReason };
 	const token = randomUUID();
 	const claim: GjcTeamTaskClaim = {
 		owner: workerId,
@@ -2803,6 +2894,11 @@ export async function claimGjcTeamTask(
 	const created = await writeJsonFileNoClobber(claimPath, claim);
 	if (!created) return { ok: false, reason: `task_already_claimed:${task.id}` };
 	const current = await readGjcTeamTask(teamName, task.id, cwd, env);
+	const currentEligibilityReason = getGjcTeamTaskClaimEligibilityReason(current, teamWorker, await readTasks(dir));
+	if (currentEligibilityReason) {
+		await fs.rm(claimPath, { force: true });
+		return { ok: false, reason: currentEligibilityReason };
+	}
 	if (current.status !== "pending") {
 		await deleteIfOwned(claimPath, {
 			...stateWriterOptions(claimPath, "prune", "rollback"),
@@ -3523,6 +3619,7 @@ export async function executeGjcTeamApiOperation(
 					String(input.description ?? ""),
 					cwd,
 					env,
+					taskMetadataFromInput(input, true),
 				),
 			};
 		case "update-task":
@@ -3533,19 +3630,22 @@ export async function executeGjcTeamApiOperation(
 					{
 						subject: typeof input.subject === "string" ? input.subject : undefined,
 						description: typeof input.description === "string" ? input.description : undefined,
+						...taskMetadataFromInput(input),
 					},
 					cwd,
 					env,
 				),
 			};
-		case "claim-task":
+		case "claim-task": {
+			const requestedTaskId = input.task_id ?? input.taskId;
 			return claimGjcTeamTask(
 				teamName,
 				worker,
 				cwd,
 				env,
-				typeof input.task_id === "string" ? input.task_id : undefined,
+				typeof requestedTaskId === "string" ? requestedTaskId : undefined,
 			);
+		}
 		case "transition-task":
 		case "transition-task-status":
 			return {

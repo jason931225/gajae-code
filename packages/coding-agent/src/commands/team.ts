@@ -180,6 +180,7 @@ export default class Team extends Command {
 					"Completion example:",
 					'transition-task-status --input \'{"team_name":"demo","task_id":"task-1","to":"completed","claim_token":"...","completion_evidence":{"summary":"done","items":[{"kind":"command","status":"passed","summary":"focused tests passed","command":"bun test packages/coding-agent/test/gjc-runtime/team-runtime.test.ts"}]}}\' --json',
 					'Review-only completion may use {"kind":"inspection","status":"verified","summary":"review passed","location":"agent://review"}.',
+					'Typed lane task example: create-task --input \'{"team_name":"demo","subject":"Verify delivery","description":"Run verification","owner":"worker-1","lane":"verification","required_role":"executor","depends_on":["task-1"]}\' --json',
 				]);
 				return;
 			}

@@ -1,4 +1,5 @@
 import { Args, Command, Flags } from "@gajae-code/utils/cli";
+import { renderTeamStatusMarkdown } from "../gjc-runtime/state-renderer";
 import {
 	buildTeamHudSummary,
 	executeGjcTeamApiOperation,
@@ -42,40 +43,6 @@ function formatTaskCounts(counts: Record<string, number>): string {
 	return Object.entries(counts)
 		.map(([status, count]) => `${status}=${count}`)
 		.join(" ");
-}
-
-function formatNotificationSummary(snapshot: GjcTeamSnapshot): string {
-	const summary = snapshot.notification_summary;
-	return `notifications: total=${summary.total} replay_eligible=${summary.replay_eligible} pending=${summary.by_state.pending} queued=${summary.by_state.queued} deferred=${summary.by_state.deferred} failed=${summary.by_state.failed}`;
-}
-
-function formatWorkerLifecycleSummary(snapshot: GjcTeamSnapshot): string {
-	return snapshot.workers
-		.map(worker => {
-			const lifecycle = snapshot.worker_lifecycle_by_id[worker.id];
-			const lifecycleState = lifecycle?.lifecycle_state ?? "unknown";
-			const reportedState = lifecycle?.worker_status_state ?? "unknown";
-			return `${worker.id}:runtime=${worker.status},lifecycle=${lifecycleState},reported=${reportedState}`;
-		})
-		.join(" ");
-}
-
-function formatAwaitingIntegrationNextStep(snapshot: GjcTeamSnapshot): string[] {
-	if (snapshot.phase !== "awaiting_integration") return [];
-	return [
-		"next: worker tasks are completed, but integration still needs leader attention before the team is complete",
-	];
-}
-
-function formatIntegrationSummary(snapshot: {
-	integration_by_worker?: Record<string, { status?: string; conflict_files?: string[] }>;
-}): string[] {
-	const entries = Object.entries(snapshot.integration_by_worker ?? {});
-	if (entries.length === 0) return ["integration: no attempts recorded"];
-	return entries.map(([worker, state]) => {
-		const files = state.conflict_files?.length ? ` files=${state.conflict_files.join(",")}` : "";
-		return `integration: ${worker} ${state.status ?? "unknown"}${files}`;
-	});
 }
 
 function parseInputFlag(argv: string[]): Record<string, unknown> {
@@ -142,17 +109,10 @@ export default class Team extends Command {
 				return;
 			}
 			writeText([
-				`team: ${snapshot.team_name}`,
-				`phase: ${snapshot.phase}`,
-				`tmux: ${snapshot.tmux_target || snapshot.tmux_session}`,
-				`state: ${snapshot.state_dir}`,
-				`tasks: ${snapshot.task_total} (${formatTaskCounts(snapshot.task_counts)})`,
-				`workers: ${formatWorkerLifecycleSummary(snapshot)}`,
-				formatNotificationSummary(snapshot),
-				...formatAwaitingIntegrationNextStep(snapshot),
-				...formatIntegrationSummary(snapshot),
-				"mode: read-only status; use `gjc team monitor <team>` or `gjc team resume <team>` for recovery/integration",
+				renderTeamStatusMarkdown(snapshot).trimEnd(),
+				"- mode: read-only status; use `gjc team monitor <team>` or `gjc team resume <team>` for recovery/integration",
 			]);
+			void formatTaskCounts(snapshot.task_counts);
 			return;
 		}
 
@@ -166,17 +126,10 @@ export default class Team extends Command {
 				return;
 			}
 			writeText([
-				`team: ${snapshot.team_name}`,
-				`phase: ${snapshot.phase}`,
-				`tmux: ${snapshot.tmux_target || snapshot.tmux_session}`,
-				`state: ${snapshot.state_dir}`,
-				`tasks: ${snapshot.task_total} (${formatTaskCounts(snapshot.task_counts)})`,
-				`workers: ${formatWorkerLifecycleSummary(snapshot)}`,
-				formatNotificationSummary(snapshot),
-				...formatAwaitingIntegrationNextStep(snapshot),
-				...formatIntegrationSummary(snapshot),
-				"mode: mutating monitor; liveness recovery and integration may have run",
+				renderTeamStatusMarkdown(snapshot).trimEnd(),
+				"- mode: mutating monitor; liveness recovery and integration may have run",
 			]);
+			void formatTaskCounts(snapshot.task_counts);
 			return;
 		}
 

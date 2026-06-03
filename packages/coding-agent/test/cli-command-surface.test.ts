@@ -22,9 +22,11 @@ describe("GJC public CLI command surface", () => {
 			"setup",
 			"skills",
 			"session",
+			"harness",
 			"team",
 			"ultragoal",
 			"ralplan",
+			"config",
 			"contribute-pr",
 			"deep-interview",
 			"update",
@@ -75,6 +77,8 @@ describe("GJC public CLI command surface", () => {
 		expect(output).toContain("--dry-run");
 		expect(output).toContain(".gjc/state/team");
 		expect(output).toContain("do not commit");
+		expect(output).toContain("existing tmux/GJC --tmux session");
+		expect(output).toContain("gjc --tmux");
 	}, 30_000);
 
 	it("does not capture absolute-path prompts as startup slash commands", () => {

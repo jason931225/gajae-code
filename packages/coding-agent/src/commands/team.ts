@@ -1,11 +1,13 @@
 import { Args, Command, Flags } from "@gajae-code/utils/cli";
+import { renderTeamStatusMarkdown } from "../gjc-runtime/state-renderer";
 import {
 	buildTeamHudSummary,
 	executeGjcTeamApiOperation,
 	type GjcTeamSnapshot,
 	listGjcTeams,
-	monitorGjcTeam,
+	monitorGjcTeamSnapshot,
 	parseTeamLaunchArgs,
+	persistGjcTeamModeStateSummary,
 	readGjcTeamEvents,
 	readGjcTeamSnapshot,
 	shutdownGjcTeam,
@@ -31,6 +33,7 @@ async function syncTeamHud(snapshot: GjcTeamSnapshot): Promise<void> {
 			hud: await buildTeamHudSummary(snapshot, events.at(-1)),
 			source: "gjc-team",
 		});
+		await persistGjcTeamModeStateSummary(snapshot, process.cwd());
 	} catch {
 		// HUD sync is best-effort and must not change command semantics.
 	}
@@ -40,29 +43,6 @@ function formatTaskCounts(counts: Record<string, number>): string {
 	return Object.entries(counts)
 		.map(([status, count]) => `${status}=${count}`)
 		.join(" ");
-}
-
-function formatNotificationSummary(snapshot: GjcTeamSnapshot): string {
-	const summary = snapshot.notification_summary;
-	return `notifications: total=${summary.total} replay_eligible=${summary.replay_eligible} pending=${summary.by_state.pending} queued=${summary.by_state.queued} deferred=${summary.by_state.deferred} failed=${summary.by_state.failed}`;
-}
-
-function formatAwaitingIntegrationNextStep(snapshot: GjcTeamSnapshot): string[] {
-	if (snapshot.phase !== "awaiting_integration") return [];
-	return [
-		"next: worker tasks are completed, but integration still needs leader attention before the team is complete",
-	];
-}
-
-function formatIntegrationSummary(snapshot: {
-	integration_by_worker?: Record<string, { status?: string; conflict_files?: string[] }>;
-}): string[] {
-	const entries = Object.entries(snapshot.integration_by_worker ?? {});
-	if (entries.length === 0) return ["integration: no attempts recorded"];
-	return entries.map(([worker, state]) => {
-		const files = state.conflict_files?.length ? ` files=${state.conflict_files.join(",")}` : "";
-		return `integration: ${worker} ${state.status ?? "unknown"}${files}`;
-	});
 }
 
 function parseInputFlag(argv: string[]): Record<string, unknown> {
@@ -76,12 +56,13 @@ function parseInputFlag(argv: string[]): Record<string, unknown> {
 }
 
 export default class Team extends Command {
-	static description = "Run native GJC tmux team orchestration; --dry-run writes ephemeral .gjc/state/team state only";
+	static description =
+		"Run native GJC tmux team orchestration from inside an existing tmux/GJC --tmux session; --dry-run writes ephemeral .gjc/state/team state only";
 	static strict = false;
 
 	static args = {
 		action: Args.string({
-			description: "start (default), status, list, shutdown, resume, or api",
+			description: "start (default), status, monitor, list, shutdown, resume, or api",
 			required: false,
 		}),
 	};
@@ -96,8 +77,10 @@ export default class Team extends Command {
 	};
 
 	static examples = [
+		"gjc --tmux  # start/attach the required tmux-backed leader session first",
 		'gjc team 3:executor "Implement the approved plan"',
 		"gjc team status <team-name> --json",
+		"gjc team monitor <team-name> --json",
 		'gjc team api claim-task --input \'{"team_name":"demo","worker_id":"worker-1"}\' --json',
 		'gjc team 2:executor --dry-run --json "Preview state only"',
 		"gjc team shutdown <team-name>",
@@ -119,26 +102,36 @@ export default class Team extends Command {
 			return;
 		}
 
-		if (action === "status" || action === "resume") {
+		if (action === "status") {
 			const teamName = rest.find(arg => !arg.startsWith("--"));
 			if (!teamName) throw new Error("missing_team_name");
-			const snapshot = await monitorGjcTeam(teamName);
+			const snapshot = await readGjcTeamSnapshot(teamName);
+			if (json) {
+				writeJson(snapshot);
+				return;
+			}
+			writeText([
+				renderTeamStatusMarkdown(snapshot).trimEnd(),
+				"- mode: read-only status; use `gjc team monitor <team>` or `gjc team resume <team>` for recovery/integration",
+			]);
+			void formatTaskCounts(snapshot.task_counts);
+			return;
+		}
+
+		if (action === "monitor" || action === "resume") {
+			const teamName = rest.find(arg => !arg.startsWith("--"));
+			if (!teamName) throw new Error("missing_team_name");
+			const snapshot = await monitorGjcTeamSnapshot(teamName);
 			await syncTeamHud(snapshot);
 			if (json) {
 				writeJson(snapshot);
 				return;
 			}
 			writeText([
-				`team: ${snapshot.team_name}`,
-				`phase: ${snapshot.phase}`,
-				`tmux: ${snapshot.tmux_target || snapshot.tmux_session}`,
-				`state: ${snapshot.state_dir}`,
-				`tasks: ${snapshot.task_total} (${formatTaskCounts(snapshot.task_counts)})`,
-				`workers: ${snapshot.workers.map(worker => `${worker.id}:${worker.status}`).join(" ")}`,
-				formatNotificationSummary(snapshot),
-				...formatAwaitingIntegrationNextStep(snapshot),
-				...formatIntegrationSummary(snapshot),
+				renderTeamStatusMarkdown(snapshot).trimEnd(),
+				"- mode: mutating monitor; liveness recovery and integration may have run",
 			]);
+			void formatTaskCounts(snapshot.task_counts);
 			return;
 		}
 
@@ -162,8 +155,12 @@ export default class Team extends Command {
 					"Supported operations:",
 					"send-message broadcast mailbox-list mailbox-mark-delivered mailbox-mark-notified notification-list notification-read notification-replay notification-mark-pane-attempt worker-startup-ack",
 					"create-task read-task list-tasks update-task claim-task transition-task-status release-task-claim",
-					"read-config read-manifest read-worker-status read-worker-heartbeat update-worker-heartbeat write-worker-inbox write-worker-identity",
-					"append-event read-events await-event write-shutdown-request read-shutdown-ack read-monitor-snapshot write-monitor-snapshot read-task-approval write-task-approval",
+					"read-config read-manifest read-worker-status update-worker-status read-worker-heartbeat recover-stale-claims update-worker-heartbeat write-worker-inbox write-worker-identity",
+					"append-event read-events read-traces await-event write-shutdown-request read-shutdown-ack read-monitor-snapshot write-monitor-snapshot read-task-approval write-task-approval",
+					"Completion example:",
+					'transition-task-status --input \'{"team_name":"demo","task_id":"task-1","to":"completed","claim_token":"...","completion_evidence":{"summary":"done","items":[{"kind":"command","status":"passed","summary":"focused tests passed","command":"bun test packages/coding-agent/test/gjc-runtime/team-runtime.test.ts"}]}}\' --json',
+					'Review-only completion may use {"kind":"inspection","status":"verified","summary":"review passed","location":"agent://review"}.',
+					'Typed lane task example: create-task --input \'{"team_name":"demo","subject":"Verify delivery","description":"Run verification","owner":"worker-1","lane":"verification","required_role":"executor","depends_on":["task-1"]}\' --json',
 				]);
 				return;
 			}

@@ -217,8 +217,7 @@ Semantics:
 - `.gjc/state/team/<team>/telemetry.jsonl`
 - `.gjc/state/team/<team>/monitor-snapshot.json`
 - `.gjc/state/team/<team>/integration-report.md`
-- `.gjc/state/team/<team>/tasks/task-1.json`
-- `.gjc/state/team/<team>/evidence/tasks/task-1.json`
+- `.gjc/state/team/<team>/tasks/task-1.json` (includes structured `completion_evidence` after completed transitions)
 - `.gjc/state/team/<team>/mailbox/worker-1/<message-id>.json`
 - `.gjc/state/team/<team>/mailbox/worker-1.json` (legacy compatibility view)
 - `.gjc/state/team/<team>/notifications/<notification-id>.json`
@@ -233,15 +232,17 @@ Use `gjc team api` for machine-readable task lifecycle operations.
 ```bash
 gjc team api worker-startup-ack --input '{"team_name":"my-team","worker_id":"worker-1","protocol_version":"1"}' --json
 gjc team api claim-task --input '{"team_name":"my-team","worker_id":"worker-1"}' --json
-gjc team api transition-task-status --input '{"team_name":"my-team","task_id":"task-1","to":"completed","worker_id":"worker-1","claim_token":"<claim-token>","evidence":"summary of completed work and validation"}' --json
+gjc team api transition-task-status --input '{"team_name":"my-team","task_id":"task-1","to":"completed","worker_id":"worker-1","claim_token":"<claim-token>","completion_evidence":{"summary":"Completed requested work and verified it locally.","items":[{"kind":"command","status":"passed","summary":"Focused test passed","command":"bun test packages/coding-agent/test/gjc-runtime/team-runtime.test.ts"}],"files":["packages/coding-agent/test/gjc-runtime/team-runtime.test.ts"],"notes":"Include at least one passed command or verified inspection/artifact item."}}' --json
 ```
 
 Canonical worker lifecycle operations:
 
 - `worker-startup-ack` before task work
 - `claim-task`
-- `transition-task-status` with the claim token, worker id, and completion evidence
+- `transition-task-status` with the claim token, worker id, and structured `completion_evidence` object
 - `release-task-claim`
+
+Completion evidence is stored inline on the task record as `completion_evidence`. It must include a non-empty `summary`, an `items` array, and at least one item with `status: "passed"` or `status: "verified"`. Valid item kinds are `command`, `inspection`, and `artifact`; command items require `command`. The camel-case alias `completionEvidence` is accepted by the API input, but legacy string `evidence` and separate evidence files are not part of the public completion contract.
 
 GJC-team interop operations are also available for mailbox, native notification, worker heartbeat/status, startup ACK, events, monitor snapshots, approvals, and shutdown request/ack flows; run `gjc team api --help` for the full operation list.
 

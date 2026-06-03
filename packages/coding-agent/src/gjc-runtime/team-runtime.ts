@@ -2246,12 +2246,16 @@ export async function shutdownGjcTeam(
 			return reason ? { task_id: task.id, reason } : null;
 		})
 		.filter((failure): failure is { task_id: string; reason: string } => failure != null);
-	const shutdownPhase: GjcTeamPhase =
-		tasks.length === 0 || tasks.every(isGjcTeamTaskCompletionVerified)
-			? "complete"
-			: evidenceFailures.length > 0 || tasks.some(task => task.status === "failed" || task.status === "blocked")
-				? "failed"
-				: "cancelled";
+	const monitor = await readJsonFile<GjcTeamMonitorSnapshot>(monitorSnapshotPath(dir));
+	const completionVerified = tasks.length === 0 || tasks.every(isGjcTeamTaskCompletionVerified);
+	const pendingIntegration = completionVerified ? await hasPendingGjcTeamIntegration(dir, config, monitor) : false;
+	const shutdownPhase: GjcTeamPhase = completionVerified
+		? pendingIntegration
+			? "awaiting_integration"
+			: "complete"
+		: evidenceFailures.length > 0 || tasks.some(task => task.status === "failed" || task.status === "blocked")
+			? "failed"
+			: "cancelled";
 	killWorkerPanes(config);
 	await removeCleanCreatedWorktrees(config.workers);
 	const stopped = {

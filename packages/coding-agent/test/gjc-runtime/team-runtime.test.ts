@@ -1295,6 +1295,11 @@ describe("native gjc team runtime", () => {
 		expect(status.task_counts.completed).toBe(1);
 		expect(status.phase).toBe("awaiting_integration");
 		expect(status.phase).not.toBe("running");
+
+		const stopped = await shutdownGjcTeam("awaiting-request-team", cleanupRoot, { PATH: process.env.PATH ?? "" });
+		expect(stopped.task_counts.completed).toBe(1);
+		expect(stopped.phase).toBe("awaiting_integration");
+		expect(stopped.phase).not.toBe("complete");
 	});
 
 	it("monitor cherry-picks diverged worker commits and stays idempotent on repeated status checks", async () => {
@@ -1415,6 +1420,11 @@ describe("native gjc team runtime", () => {
 		expect(monitored.integration_by_worker?.["worker-1"]?.status).toBe("merge_conflict");
 		expect(monitored.phase).toBe("awaiting_integration");
 		expect(monitored.phase).not.toBe("running");
+
+		const stopped = await shutdownGjcTeam("awaiting-conflict-team", cleanupRoot, { PATH: process.env.PATH ?? "" });
+		expect(stopped.task_counts.completed).toBe(1);
+		expect(stopped.phase).toBe("awaiting_integration");
+		expect(stopped.phase).not.toBe("complete");
 	});
 
 	it("monitor reports cherry-pick conflicts and aborts cleanly", async () => {

@@ -165,12 +165,13 @@ Follow this exact lifecycle when running `$team`:
 
 1. Start team and verify startup evidence (team line, tmux target, worker pane id, state dir).
 2. Monitor task progress with runtime/state tools first (`gjc team status <team>`, `gjc team resume <team>`, task files).
-3. Wait for terminal task state before shutdown:
+3. Wait for terminal task state and integration settlement before shutdown:
    - `pending=0`
    - `in_progress=0`
    - `failed=0` (or explicitly acknowledged failure path)
+   - no pending integration request/conflict (`status` / `resume` must not report `phase=awaiting_integration`)
 4. Only then run `gjc team shutdown <team>`.
-5. Verify shutdown evidence and preserved state (`phase=complete`, worker status `stopped`). If shutdown is forced before task completion, expect `phase=cancelled` or `phase=failed`, not `complete`.
+5. Verify shutdown evidence and preserved state (`phase=complete`, worker status `stopped`). If shutdown is forced before task completion, expect `phase=cancelled` or `phase=failed`; if tasks are complete but integration is still pending or conflicted, expect `phase=awaiting_integration`, not `complete`.
 
 Do not run `shutdown` while the worker is actively writing updates unless user explicitly requested abort/cancel. Do not treat ad-hoc pane typing as primary control flow when runtime/state evidence is available.
 
@@ -198,7 +199,7 @@ Semantics:
 - `resume`: mutating monitor path; performs the same integration-aware live snapshot for reconnect/inspection flows.
 - `list`: pure read path; lists known teams without integrating worker commits.
 - API/read-only snapshot operations are pure unless explicitly documented as a monitor/status path.
-- `shutdown`: kills the recorded worker pane when it still belongs to the stored tmux target, removes clean created worktrees, marks worker stopped, and sets phase from task state: `complete` only when all tasks completed, `failed` when tasks failed/blocked, and `cancelled` when work remains pending or in progress. It preserves `.gjc/state/team/<team>` as evidence.
+- `shutdown`: kills the recorded worker pane when it still belongs to the stored tmux target, removes clean created worktrees, marks worker stopped, and sets phase from task and integration state: `complete` only when all tasks have verified `completion_evidence` and no integration request/conflict is pending, `awaiting_integration` when tasks are complete but leader integration still requires action, `failed` when tasks failed/blocked or completed tasks lack valid evidence, and `cancelled` when work remains pending or in progress. It preserves `.gjc/state/team/<team>` as evidence.
 
 ## Data Plane and Control Plane
 
@@ -351,7 +352,7 @@ When operating this skill, provide concrete progress evidence:
 1. Team started line (`Team started: <name>`)
 2. tmux target and worker pane id
 3. task state from `gjc team status <team>` or `.gjc/state/team/<team>/tasks/task-1.json`
-4. shutdown outcome (`phase=complete`, worker status `stopped`) when the run is terminal; incomplete shutdowns must report `phase=cancelled`/`failed`
+4. shutdown outcome (`phase=complete`, worker status `stopped`) when the run is terminal; incomplete or integration-blocked shutdowns must report `phase=cancelled`/`failed`/`awaiting_integration`
 
 Do not claim success without file/pane evidence.
 Do not claim clean completion if shutdown occurred with `in_progress>0`.

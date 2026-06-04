@@ -10,6 +10,7 @@ import type { NestedRepoPatch } from "./worktree";
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
 export type ForkContextPolicy = "forbidden" | "allowed";
+export type ForkContextMode = "none" | "receipt" | "last-turn" | "bounded" | "full";
 
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
 	if (value) {
@@ -77,9 +78,11 @@ const createTaskItemSchema = (_contextEnabled: boolean) =>
 		description: z.string().describe("ui label, not seen by subagent"),
 		assignment: z.string().describe(assignmentDescription),
 		inheritContext: z
-			.boolean()
+			.enum(["none", "receipt", "last-turn", "bounded", "full"])
 			.optional()
-			.describe("explicit request to seed a subagent with sanitized parent context"),
+			.describe(
+				"fork-context mode: none/omitted copies no parent context; receipt copies a minimal receipt-sized snapshot; last-turn copies only the latest exchange; bounded copies the sanitized bounded default; full copies a larger sanitized snapshot up to the configured/model token cap",
+			),
 	});
 
 /** Single task item for parallel execution (default shape with context enabled). */
@@ -318,6 +321,8 @@ export interface SingleResult {
 	};
 	/** Output metadata for agent:// URL integration */
 	outputMeta?: { lineCount: number; charCount: number; byteSize?: number; sha256?: string };
+	/** Fork-context seed accounting for this subagent, when inherited parent context was cloned. */
+	forkContext?: { mode: ForkContextMode; clonedTokens: number };
 }
 
 /** Tool details for TUI rendering */
@@ -327,6 +332,8 @@ export interface TaskToolDetails {
 	totalDurationMs: number;
 	/** Aggregated usage across all subagents. */
 	usage?: Usage;
+	/** Aggregate cloned tokens copied into fork-context seeds across subagents. */
+	forkContextClonedTokens?: number;
 	progress?: AgentProgress[];
 	async?: {
 		state: "running" | "paused" | "queued" | "completed" | "failed";

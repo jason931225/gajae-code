@@ -202,7 +202,7 @@ describe("gjc harness start --detach (detached owner lifecycle, B1)", () => {
 			expect(submit.json?.nextAllowedActions).toContainEqual({
 				verb: "submit",
 				available: false,
-				reason: "owner-not-live",
+				reason: "lifecycle-blocked",
 			});
 		} finally {
 			rpcCommandEnv = originalRpcCommandEnv;

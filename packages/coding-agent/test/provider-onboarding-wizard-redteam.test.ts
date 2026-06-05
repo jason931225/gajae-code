@@ -5,8 +5,10 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@gajae-code/ai";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { CustomProviderWizardComponent } from "@gajae-code/coding-agent/modes/components/custom-provider-wizard";
-import { ModelSelectorComponent } from "@gajae-code/coding-agent/modes/components/model-selector";
-import { ProviderOnboardingSelectorComponent, type ProviderOnboardingAction } from "@gajae-code/coding-agent/modes/components/provider-onboarding-selector";
+import {
+	type ProviderOnboardingAction,
+	ProviderOnboardingSelectorComponent,
+} from "@gajae-code/coding-agent/modes/components/provider-onboarding-selector";
 import { SelectorController } from "@gajae-code/coding-agent/modes/controllers/selector-controller";
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@gajae-code/coding-agent/modes/types";
@@ -53,13 +55,18 @@ function driveWizard(
 	component.handleInput("\n");
 	if (options?.credentialSource === "literal") component.handleInput("\x1b[B");
 	component.handleInput("\n");
-	typeText(component, options?.credential ?? (options?.credentialSource === "literal" ? "sk-redteam-secret" : "CUSTOM_PROVIDER_KEY"));
+	typeText(
+		component,
+		options?.credential ?? (options?.credentialSource === "literal" ? "sk-redteam-secret" : "CUSTOM_PROVIDER_KEY"),
+	);
 	component.handleInput("\n");
 	typeText(component, options?.models ?? "custom-model");
 	component.handleInput("\n");
 }
 
-async function withRegistry<T>(run: (registry: ModelRegistry, store: SqliteAuthCredentialStore) => Promise<T>): Promise<T> {
+async function withRegistry<T>(
+	run: (registry: ModelRegistry, store: SqliteAuthCredentialStore) => Promise<T>,
+): Promise<T> {
 	tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-wizard-redteam-"));
 	setAgentDir(tempAgentDir);
 	const store = await SqliteAuthCredentialStore.open(path.join(tempAgentDir, "agent.db"));
@@ -153,12 +160,22 @@ describe("provider onboarding wizard red-team", () => {
 
 	it("emits env-var and pasted-key credential sources as correct ProviderSetupInput fields", () => {
 		const submissions: ProviderSetupInput[] = [];
-		const envWizard = new CustomProviderWizardComponent(input => submissions.push(input), () => undefined);
+		const envWizard = new CustomProviderWizardComponent(
+			input => submissions.push(input),
+			() => undefined,
+		);
 		driveWizard(envWizard, { providerId: "env-provider", credentialSource: "env", credential: "ENV_PROVIDER_KEY" });
 		envWizard.handleInput("\n");
 
-		const literalWizard = new CustomProviderWizardComponent(input => submissions.push(input), () => undefined);
-		driveWizard(literalWizard, { providerId: "literal-provider", credentialSource: "literal", credential: "sk-literal-key" });
+		const literalWizard = new CustomProviderWizardComponent(
+			input => submissions.push(input),
+			() => undefined,
+		);
+		driveWizard(literalWizard, {
+			providerId: "literal-provider",
+			credentialSource: "literal",
+			credential: "sk-literal-key",
+		});
 		literalWizard.handleInput("\n");
 
 		expect(submissions).toEqual([
@@ -169,7 +186,7 @@ describe("provider onboarding wizard red-team", () => {
 
 	it("refreshes offline, notifies config change, shows formatted result, and exposes new provider in a subsequent model selector read", async () => {
 		await withRegistry(async registry => {
-			const refreshModes: string[] = [];
+			const refreshModes: (string | undefined)[] = [];
 			const originalRefresh = registry.refresh.bind(registry);
 			registry.refresh = async mode => {
 				refreshModes.push(mode);
@@ -201,7 +218,10 @@ describe("provider onboarding wizard red-team", () => {
 
 	it("keeps Add custom provider at index 0 while OAuth and API-guide actions still route", () => {
 		const actions: ProviderOnboardingAction[] = [];
-		const selector = new ProviderOnboardingSelectorComponent(action => actions.push(action), () => undefined);
+		const selector = new ProviderOnboardingSelectorComponent(
+			action => actions.push(action),
+			() => undefined,
+		);
 		const rendered = visibleText(selector);
 		expect(rendered.indexOf("Add custom provider")).toBeLessThan(rendered.indexOf("Login with OAuth/subscription"));
 		selector.handleInput("\n");
@@ -230,13 +250,16 @@ describe("provider onboarding wizard red-team", () => {
 function createControllerContext(
 	modelRegistry: Pick<ModelRegistry, "refresh">,
 	notifyConfigChanged?: () => void,
-): InteractiveModeContext & { statuses: string[]; ui: { focused?: unknown; requestRender: () => void; setFocus: (component: unknown) => void } } {
+): InteractiveModeContext & {
+	statuses: string[];
+	ui: { focused?: unknown; requestRender: () => void; setFocus: (component: unknown) => void };
+} {
 	const children: unknown[] = [];
 	const editor = {};
 	const statuses: string[] = [];
 	return {
 		ui: {
-			focused: undefined,
+			focused: undefined as unknown,
 			requestRender: () => undefined,
 			setFocus(component: unknown) {
 				this.focused = component;
@@ -259,7 +282,10 @@ function createControllerContext(
 		showWarning: (message: string) => statuses.push(message),
 		notifyConfigChanged,
 		statuses,
-	} as unknown as InteractiveModeContext & { statuses: string[]; ui: { focused?: unknown; requestRender: () => void; setFocus: (component: unknown) => void } };
+	} as unknown as InteractiveModeContext & {
+		statuses: string[];
+		ui: { focused?: unknown; requestRender: () => void; setFocus: (component: unknown) => void };
+	};
 }
 
 function createSettingsStub(): unknown {

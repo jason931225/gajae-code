@@ -1,16 +1,15 @@
+import { describe, expect, test } from "bun:test";
 import { ThinkingLevel } from "@gajae-code/agent-core";
 import type { Model } from "@gajae-code/ai";
-import { describe, expect, test } from "bun:test";
 import { parseArgs } from "../src/cli/args";
-
-import { applyStartupModelProfiles, createAcpSessionFactory } from "../src/main";
 import type { ModelProfileDefinition } from "../src/config/model-profiles";
 import { Settings } from "../src/config/settings";
+import { applyStartupModelProfiles, createAcpSessionFactory } from "../src/main";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../src/sdk";
 import type { AgentSession } from "../src/session/agent-session";
 
 const model = (provider: string, id: string): Model =>
-	({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 } as Model);
+	({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 }) as Model;
 
 function fakeRegistry(profiles: ModelProfileDefinition[]) {
 	const profileMap = new Map(profiles.map(profile => [profile.name, profile]));
@@ -24,17 +23,18 @@ function fakeRegistry(profiles: ModelProfileDefinition[]) {
 }
 
 function fakeSession(initial = model("initial-provider", "initial")) {
-	return {
+	const session = {
 		model: initial as Model | undefined,
 		thinkingLevel: undefined as ThinkingLevel | undefined,
 		sessionId: "session-1",
 		setModelTemporaryCalls: [] as Array<{ model: Model; thinkingLevel?: ThinkingLevel }>,
 		async setModelTemporary(next: Model, thinkingLevel?: ThinkingLevel) {
-			this.setModelTemporaryCalls.push({ model: next, thinkingLevel });
-			this.model = next;
-			this.thinkingLevel = thinkingLevel;
+			session.setModelTemporaryCalls.push({ model: next, thinkingLevel });
+			session.model = next;
+			session.thinkingLevel = thinkingLevel;
 		},
-	} as AgentSession & { setModelTemporaryCalls: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> };
+	};
+	return session as AgentSession & { setModelTemporaryCalls: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> };
 }
 describe("CLI model profile args", () => {
 	test("parses --mpreset with separate value", () => {
@@ -79,10 +79,9 @@ test("explicit CLI --model/--thinking are reapplied after --mpreset activation",
 		startupThinkingLevel: ThinkingLevel.Low,
 	});
 
-	expect(session.setModelTemporaryCalls.map(call => `${call.model.provider}/${call.model.id}:${call.thinkingLevel}`)).toEqual([
-		"profile-provider/default:high",
-		"cli-provider/explicit:low",
-	]);
+	expect(
+		session.setModelTemporaryCalls.map(call => `${call.model.provider}/${call.model.id}:${call.thinkingLevel}`),
+	).toEqual(["profile-provider/default:high", "cli-provider/explicit:low"]);
 	expect(session.model?.provider).toBe("cli-provider");
 	expect(session.model?.id).toBe("explicit");
 	expect(session.thinkingLevel).toBe(ThinkingLevel.Low);
@@ -108,10 +107,9 @@ test("deferred explicit CLI --model is reapplied after --mpreset activation", as
 		startupThinkingLevel: undefined,
 	});
 
-	expect(session.setModelTemporaryCalls.map(call => `${call.model.provider}/${call.model.id}:${call.thinkingLevel}`)).toEqual([
-		"profile-provider/default:high",
-		"cli-provider/explicit:undefined",
-	]);
+	expect(
+		session.setModelTemporaryCalls.map(call => `${call.model.provider}/${call.model.id}:${call.thinkingLevel}`),
+	).toEqual(["profile-provider/default:high", "cli-provider/explicit:undefined"]);
 	expect(session.setModelTemporaryCalls.at(-1)?.model).toBe(explicitModel);
 	expect(session.model).toBe(explicitModel);
 });
@@ -134,7 +132,12 @@ test("ACP session factory applies default profile and --mpreset before returning
 		},
 	]) as never;
 	const createSession = async (): Promise<CreateAgentSessionResult> =>
-		({ session, setToolUIContext: () => {}, extensionsResult: {}, eventBus: {} }) as CreateAgentSessionResult;
+		({
+			session,
+			setToolUIContext: () => {},
+			extensionsResult: {},
+			eventBus: {},
+		}) as unknown as CreateAgentSessionResult;
 	const factory = createAcpSessionFactory({
 		baseOptions: {} as CreateAgentSessionOptions,
 		settings,
@@ -148,8 +151,7 @@ test("ACP session factory applies default profile and --mpreset before returning
 	const result = await factory(process.cwd());
 
 	expect(result).toBe(session);
-	expect(session.setModelTemporaryCalls.map(call => `${call.model.provider}/${call.model.id}:${call.thinkingLevel}`)).toEqual([
-		"profile-provider/default:medium",
-		"cli-provider/explicit:high",
-	]);
+	expect(
+		session.setModelTemporaryCalls.map(call => `${call.model.provider}/${call.model.id}:${call.thinkingLevel}`),
+	).toEqual(["profile-provider/default:medium", "cli-provider/explicit:high"]);
 });

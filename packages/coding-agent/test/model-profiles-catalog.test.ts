@@ -3,9 +3,9 @@ import { ThinkingLevel } from "@gajae-code/agent-core";
 import modelsJson from "@gajae-code/ai/models.json" with { type: "json" };
 import {
 	BUILTIN_MODEL_PROFILES,
+	type ModelProfileDefinition,
 	mergeModelProfiles,
 	resolveProfileBindings,
-	type ModelProfileDefinition,
 } from "@gajae-code/coding-agent/config/model-profiles";
 import { parseModelString } from "@gajae-code/coding-agent/config/model-resolver";
 import { ProfileModelSelectorSchema } from "@gajae-code/coding-agent/config/models-config-schema";
@@ -77,7 +77,9 @@ describe("built-in model profile catalog", () => {
 	test("*-pro profiles raise effort on architect/planner/critic", () => {
 		for (const profile of BUILTIN_MODEL_PROFILES.filter(candidate => candidate.name.endsWith("-pro"))) {
 			for (const role of reviewRoles) {
-				expect(effortOf(profile.modelMapping[role] ?? "")).toBeGreaterThanOrEqual(effortRank[ThinkingLevel.High] ?? 3);
+				expect(effortOf(profile.modelMapping[role] ?? "")).toBeGreaterThanOrEqual(
+					effortRank[ThinkingLevel.High] ?? 3,
+				);
 			}
 		}
 	});

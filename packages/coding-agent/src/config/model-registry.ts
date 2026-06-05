@@ -43,6 +43,7 @@ import {
 	formatCanonicalVariantSelector,
 	type ModelEquivalenceConfig,
 } from "./model-equivalence";
+import { type ModelProfileDefinition, mergeModelProfiles } from "./model-profiles";
 import {
 	type ModelOverride,
 	type ModelsConfig,
@@ -50,7 +51,6 @@ import {
 	type ProviderAuthMode,
 	type ProviderDiscovery,
 } from "./models-config-schema";
-import { type ModelProfileDefinition, mergeModelProfiles } from "./model-profiles";
 import { type Settings, settings } from "./settings";
 
 export type { CanonicalModelIndex, CanonicalModelRecord, CanonicalModelVariant, ModelEquivalenceConfig };

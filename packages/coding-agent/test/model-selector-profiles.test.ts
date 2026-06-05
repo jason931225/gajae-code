@@ -1,18 +1,24 @@
+import { beforeAll, describe, expect, test, vi } from "bun:test";
 import { ThinkingLevel } from "@gajae-code/agent-core";
 import type { Model } from "@gajae-code/ai";
 import type { ModelProfileDefinition } from "@gajae-code/coding-agent/config/model-profiles";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
-import { ModelSelectorComponent, type ModelSelectorSelection } from "@gajae-code/coding-agent/modes/components/model-selector";
+import {
+	ModelSelectorComponent,
+	type ModelSelectorSelection,
+} from "@gajae-code/coding-agent/modes/components/model-selector";
 import { SelectorController } from "@gajae-code/coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@gajae-code/coding-agent/modes/theme/theme";
 import type { TUI } from "@gajae-code/tui";
-import { beforeAll, describe, expect, test, vi } from "bun:test";
 
 const model = (provider: string, id: string): Model =>
-	({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 } as Model);
+	({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 }) as Model;
 
 function normalizeRenderedText(text: string): string {
-	return text.replace(/\x1b\[[0-9;]*m/g, "").replace(/\s+/g, " ").trim();
+	return text
+		.replace(/\x1b\[[0-9;]*m/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 let testTheme = await getThemeByName("red-claw");
@@ -49,7 +55,10 @@ function createRegistry(options: { missingCredentials?: boolean } = {}) {
 	};
 }
 
-function createSelector(onSelect: (selection: ModelSelectorSelection) => void, options: { temporaryOnly?: boolean } = {}) {
+function createSelector(
+	onSelect: (selection: ModelSelectorSelection) => void,
+	options: { temporaryOnly?: boolean } = {},
+) {
 	const ui = { requestRender: vi.fn() } as unknown as TUI;
 	return new ModelSelectorComponent(
 		ui,
@@ -78,7 +87,7 @@ function createControllerContext(options: { missingCredentials?: boolean } = {})
 	}) as typeof settings.set;
 	const session = {
 		model: alternateModel as Model | undefined,
-		thinkingLevel: ThinkingLevel.Low,
+		thinkingLevel: ThinkingLevel.Low as ThinkingLevel | undefined,
 		sessionId: "session-1",
 		scopedModels: [],
 		modelRegistry: createRegistry(options),
@@ -105,7 +114,8 @@ function createControllerContext(options: { missingCredentials?: boolean } = {})
 
 async function selectFirstProfile(controller: SelectorController, setDefault = false): Promise<void> {
 	controller.showModelSelector();
-	const selector = (controller as unknown as { ctx: { editorContainer: { addChild: ReturnType<typeof vi.fn> } } }).ctx.editorContainer.addChild.mock.calls[0]?.[0] as ModelSelectorComponent;
+	const selector = (controller as unknown as { ctx: { editorContainer: { addChild: ReturnType<typeof vi.fn> } } }).ctx
+		.editorContainer.addChild.mock.calls[0]?.[0] as ModelSelectorComponent;
 	await Bun.sleep(10);
 	installTestTheme();
 	await selector.__testSelectProfile("profile-a", setDefault);
@@ -155,7 +165,7 @@ describe("model selector profiles", () => {
 	});
 
 	test("Set as default persists and flushes modelProfile.default", async () => {
-		const { ctx, settings, flush, setCalls } = createControllerContext();
+		const { ctx, flush, setCalls } = createControllerContext();
 		const controller = new SelectorController(ctx as never);
 		await selectFirstProfile(controller, true);
 

@@ -1,17 +1,17 @@
+import { describe, expect, test } from "bun:test";
 import { ThinkingLevel } from "@gajae-code/agent-core";
 import type { Model } from "@gajae-code/ai";
-import { describe, expect, test } from "bun:test";
 import {
 	activateModelProfile,
 	applyPreparedModelProfileActivation,
 	prepareModelProfileActivation,
 } from "../src/config/model-profile-activation";
-import { BUILTIN_MODEL_PROFILES } from "../src/config/model-profiles";
 import type { ModelProfileDefinition } from "../src/config/model-profiles";
+import { BUILTIN_MODEL_PROFILES } from "../src/config/model-profiles";
 import { Settings } from "../src/config/settings";
 
 const model = (provider: string, id: string): Model =>
-	({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 } as Model);
+	({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 }) as Model;
 
 function fakeRegistry(options?: { missingProviders?: string[]; profiles?: ModelProfileDefinition[] }) {
 	const profiles = new Map<string, ModelProfileDefinition>();
@@ -147,7 +147,10 @@ describe("model profile activation", () => {
 			flushCount += 1;
 		};
 
-		await activateModelProfile({ session, modelRegistry: fakeRegistry(), settings, profileName: "profile-a" }, { persistDefault: true });
+		await activateModelProfile(
+			{ session, modelRegistry: fakeRegistry(), settings, profileName: "profile-a" },
+			{ persistDefault: true },
+		);
 
 		expect(setCalls).toEqual(["modelProfile.default"]);
 		expect(settings.get("modelProfile.default")).toBe("profile-a");
@@ -207,7 +210,9 @@ describe("model profile activation", () => {
 			throw new Error("flush failed");
 		};
 
-		await expect(applyPreparedModelProfileActivation(prepared, { persistDefault: true })).rejects.toThrow("flush failed");
+		await expect(applyPreparedModelProfileActivation(prepared, { persistDefault: true })).rejects.toThrow(
+			"flush failed",
+		);
 
 		expect(session.model?.id).toBe("initial");
 		expect(session.thinkingLevel).toBe(ThinkingLevel.Low);

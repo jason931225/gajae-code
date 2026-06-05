@@ -12,6 +12,7 @@ import {
 	Text,
 	type TUI,
 } from "@gajae-code/tui";
+import type { ModelProfileDefinition } from "../../config/model-profiles";
 import type { GjcModelAssignmentTargetId, ModelRegistry } from "../../config/model-registry";
 import { GJC_MODEL_ASSIGNMENT_TARGET_IDS, GJC_MODEL_ASSIGNMENT_TARGETS } from "../../config/model-registry";
 import {
@@ -19,7 +20,6 @@ import {
 	resolveModelRoleValue,
 	type ScopedModelSelection,
 } from "../../config/model-resolver";
-import type { ModelProfileDefinition } from "../../config/model-profiles";
 import type { Settings } from "../../config/settings";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
 import { formatModelOnboardingInlineHint } from "../../setup/model-onboarding-guidance";
@@ -689,7 +689,9 @@ export class ModelSelectorComponent extends Container {
 	}
 
 	#getVisibleProfiles(): ProfileItem[] {
-		return !this.#temporaryOnly && !this.#isCanonicalTab() && this.#getActiveTabId() === ALL_TAB ? this.#profileItems : [];
+		return !this.#temporaryOnly && !this.#isCanonicalTab() && this.#getActiveTabId() === ALL_TAB
+			? this.#profileItems
+			: [];
 	}
 
 	#updateList(): void {
@@ -898,7 +900,9 @@ export class ModelSelectorComponent extends Container {
 
 		// Up arrow - navigate list (wrap to bottom when at top)
 		if (matchesKey(keyData, "up")) {
-			const itemCount = this.#getVisibleProfiles().length + (this.#isCanonicalTab() ? this.#filteredCanonicalModels.length : this.#filteredModels.length);
+			const itemCount =
+				this.#getVisibleProfiles().length +
+				(this.#isCanonicalTab() ? this.#filteredCanonicalModels.length : this.#filteredModels.length);
 			if (itemCount === 0) return;
 			this.#selectedIndex = this.#selectedIndex === 0 ? itemCount - 1 : this.#selectedIndex - 1;
 			this.#updateList();
@@ -907,7 +911,9 @@ export class ModelSelectorComponent extends Container {
 
 		// Down arrow - navigate list (wrap to top when at bottom)
 		if (matchesKey(keyData, "down")) {
-			const itemCount = this.#getVisibleProfiles().length + (this.#isCanonicalTab() ? this.#filteredCanonicalModels.length : this.#filteredModels.length);
+			const itemCount =
+				this.#getVisibleProfiles().length +
+				(this.#isCanonicalTab() ? this.#filteredCanonicalModels.length : this.#filteredModels.length);
 			if (itemCount === 0) return;
 			this.#selectedIndex = this.#selectedIndex === itemCount - 1 ? 0 : this.#selectedIndex + 1;
 			this.#updateList();
@@ -972,7 +978,11 @@ export class ModelSelectorComponent extends Container {
 			this.#pendingActionItem = undefined;
 			if ((item as unknown as ProfileItem).kind === "profile") {
 				const profile = item as unknown as ProfileItem;
-				this.#onSelectCallback({ kind: "profile", profileName: profile.name, setDefault: this.#selectedActionIndex === 1 });
+				this.#onSelectCallback({
+					kind: "profile",
+					profileName: profile.name,
+					setDefault: this.#selectedActionIndex === 1,
+				});
 			} else {
 				const role = GJC_MODEL_ASSIGNMENT_TARGET_IDS[this.#selectedActionIndex];
 				if (role) {

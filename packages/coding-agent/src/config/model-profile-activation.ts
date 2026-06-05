@@ -14,7 +14,14 @@ export interface PrepareModelProfileActivationOptions {
 	session: Pick<AgentSession, "model" | "thinkingLevel" | "sessionId">;
 	modelRegistry: Pick<
 		ModelRegistry,
-		"getModelProfile" | "getModelProfiles" | "getAvailableModelProfileNames" | "getApiKeyForProvider" | "getAll"
+		| "getModelProfile"
+		| "getModelProfiles"
+		| "getAvailableModelProfileNames"
+		| "getApiKeyForProvider"
+		| "getAll"
+		| "resolveCanonicalModel"
+		| "getCanonicalVariants"
+		| "getCanonicalId"
 	>;
 	settings: Pick<Settings, "get">;
 	profileName: string;

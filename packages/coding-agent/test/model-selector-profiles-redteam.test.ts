@@ -1,18 +1,24 @@
+import { beforeAll, describe, expect, test, vi } from "bun:test";
 import { ThinkingLevel } from "@gajae-code/agent-core";
 import type { Model } from "@gajae-code/ai";
 import type { ModelProfileDefinition } from "@gajae-code/coding-agent/config/model-profiles";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
-import { ModelSelectorComponent, type ModelSelectorSelection } from "@gajae-code/coding-agent/modes/components/model-selector";
+import {
+	ModelSelectorComponent,
+	type ModelSelectorSelection,
+} from "@gajae-code/coding-agent/modes/components/model-selector";
 import { SelectorController } from "@gajae-code/coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@gajae-code/coding-agent/modes/theme/theme";
 import type { TUI } from "@gajae-code/tui";
-import { beforeAll, describe, expect, test, vi } from "bun:test";
 
 const model = (provider: string, id: string): Model =>
-	({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 } as Model);
+	({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 }) as Model;
 
 function normalizeRenderedText(text: string): string {
-	return text.replace(/\x1b\[[0-9;]*m/g, "").replace(/\s+/g, " ").trim();
+	return text
+		.replace(/\x1b\[[0-9;]*m/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 let testTheme = await getThemeByName("red-claw");
@@ -95,7 +101,7 @@ function createControllerContext(options: { missingCredentials?: boolean } = {})
 	}) as typeof settings.override;
 	const session = {
 		model: alternateModel as Model | undefined,
-		thinkingLevel: ThinkingLevel.Low,
+		thinkingLevel: ThinkingLevel.Low as ThinkingLevel | undefined,
 		sessionId: "session-1",
 		scopedModels: [],
 		modelRegistry: createRegistry(options),
@@ -163,12 +169,16 @@ describe("model selector profile red-team", () => {
 
 	test("profile actions wire Apply for this session to persistDefault false and Set as default to true", async () => {
 		const selections: ModelSelectorSelection[] = [];
-		const applySelector = createSelector(selection => selections.push(selection));
+		const applySelector = createSelector(selection => {
+			selections.push(selection);
+		});
 		await renderSelector(applySelector);
 		applySelector.handleInput("\n");
 		applySelector.handleInput("\n");
 
-		const defaultSelector = createSelector(selection => selections.push(selection));
+		const defaultSelector = createSelector(selection => {
+			selections.push(selection);
+		});
 		await renderSelector(defaultSelector);
 		defaultSelector.handleInput("\n");
 		defaultSelector.handleInput("\x1b[B");

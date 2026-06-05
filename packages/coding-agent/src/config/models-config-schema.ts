@@ -92,10 +92,12 @@ function isValidProfileModelSelector(value: string): boolean {
 	return suffix === undefined || ["minimal", "low", "medium", "high", "xhigh"].includes(suffix);
 }
 
-export const ProfileModelSelectorSchema = z.string().min(1).refine(
-	value => isValidProfileModelSelector(value),
-	{ message: "Expected provider/modelId with optional :effort suffix" },
-);
+export const ProfileModelSelectorSchema = z
+	.string()
+	.min(1)
+	.refine(value => isValidProfileModelSelector(value), {
+		message: "Expected provider/modelId with optional :effort suffix",
+	});
 
 export const ProfileModelMappingSchema = z.partialRecord(ProfileRoleSchema, ProfileModelSelectorSchema);
 
@@ -107,7 +109,6 @@ export const ProfileDefinitionSchema = z
 	.strict();
 
 export const ProfilesSchema = z.record(z.string().min(1), ProfileDefinitionSchema);
-
 
 const ModelDefinitionSchema = z
 	.object({

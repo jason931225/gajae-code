@@ -5,10 +5,13 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@gajae-code/ai";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { CustomProviderWizardComponent } from "@gajae-code/coding-agent/modes/components/custom-provider-wizard";
-import { ProviderOnboardingSelectorComponent, type ProviderOnboardingAction } from "@gajae-code/coding-agent/modes/components/provider-onboarding-selector";
+import {
+	type ProviderOnboardingAction,
+	ProviderOnboardingSelectorComponent,
+} from "@gajae-code/coding-agent/modes/components/provider-onboarding-selector";
 import { SelectorController } from "@gajae-code/coding-agent/modes/controllers/selector-controller";
-import type { InteractiveModeContext } from "@gajae-code/coding-agent/modes/types";
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
+import type { InteractiveModeContext } from "@gajae-code/coding-agent/modes/types";
 import { getAgentDir, setAgentDir } from "@gajae-code/utils";
 
 const originalAgentDir = getAgentDir();
@@ -34,7 +37,10 @@ function typeText(component: { handleInput(input: string): void }, text: string)
 	for (const char of text) component.handleInput(char);
 }
 
-function driveEnvWizard(component: CustomProviderWizardComponent, options?: { providerId?: string; model?: string }): void {
+function driveEnvWizard(
+	component: CustomProviderWizardComponent,
+	options?: { providerId?: string; model?: string },
+): void {
 	component.handleInput("\n");
 	typeText(component, options?.providerId ?? "custom-openai");
 	component.handleInput("\n");
@@ -50,7 +56,10 @@ function driveEnvWizard(component: CustomProviderWizardComponent, options?: { pr
 describe("provider onboarding wizard", () => {
 	it("shows Add custom provider as the first /login onboarding option", () => {
 		const actions: ProviderOnboardingAction[] = [];
-		const selector = new ProviderOnboardingSelectorComponent(action => actions.push(action), () => undefined);
+		const selector = new ProviderOnboardingSelectorComponent(
+			action => actions.push(action),
+			() => undefined,
+		);
 
 		const rendered = visibleText(selector);
 		expect(rendered.indexOf("Add custom provider")).toBeLessThan(rendered.indexOf("Login with OAuth/subscription"));
@@ -62,7 +71,10 @@ describe("provider onboarding wizard", () => {
 
 	it("emits the expected addApiCompatibleProvider input", () => {
 		const submissions: unknown[] = [];
-		const wizard = new CustomProviderWizardComponent(input => submissions.push(input), () => undefined);
+		const wizard = new CustomProviderWizardComponent(
+			input => submissions.push(input),
+			() => undefined,
+		);
 
 		driveEnvWizard(wizard);
 		wizard.handleInput("\n");
@@ -82,11 +94,16 @@ describe("provider onboarding wizard", () => {
 
 	it("requires explicit force confirmation before overwrite", () => {
 		const submissions: unknown[] = [];
-		const wizard = new CustomProviderWizardComponent(input => submissions.push(input), () => undefined);
+		const wizard = new CustomProviderWizardComponent(
+			input => submissions.push(input),
+			() => undefined,
+		);
 
 		driveEnvWizard(wizard);
 		wizard.handleInput("\n");
-		wizard.setSubmitError("Provider setup failed: Provider 'custom-openai' already exists. Use --force to replace it.");
+		wizard.setSubmitError(
+			"Provider setup failed: Provider 'custom-openai' already exists. Use --force to replace it.",
+		);
 		wizard.handleInput("\x1b[B");
 		wizard.handleInput("\n");
 
@@ -151,13 +168,19 @@ describe("provider onboarding wizard", () => {
 	});
 });
 
-function createControllerContext(modelRegistry: Pick<ModelRegistry, "refresh">, notifyConfigChanged?: () => void): InteractiveModeContext & { statuses: string[]; ui: { focused?: unknown; requestRender: () => void; setFocus: (component: unknown) => void } } {
+function createControllerContext(
+	modelRegistry: Pick<ModelRegistry, "refresh">,
+	notifyConfigChanged?: () => void,
+): InteractiveModeContext & {
+	statuses: string[];
+	ui: { focused?: unknown; requestRender: () => void; setFocus: (component: unknown) => void };
+} {
 	const children: unknown[] = [];
 	const editor = {};
 	const statuses: string[] = [];
 	return {
 		ui: {
-			focused: undefined,
+			focused: undefined as unknown,
 			requestRender: () => undefined,
 			setFocus(component: unknown) {
 				this.focused = component;
@@ -180,5 +203,8 @@ function createControllerContext(modelRegistry: Pick<ModelRegistry, "refresh">, 
 		showWarning: (message: string) => statuses.push(message),
 		notifyConfigChanged,
 		statuses,
-	} as unknown as InteractiveModeContext & { statuses: string[]; ui: { focused?: unknown; requestRender: () => void; setFocus: (component: unknown) => void } };
+	} as unknown as InteractiveModeContext & {
+		statuses: string[];
+		ui: { focused?: unknown; requestRender: () => void; setFocus: (component: unknown) => void };
+	};
 }

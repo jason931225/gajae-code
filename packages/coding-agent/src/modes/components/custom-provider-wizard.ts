@@ -6,7 +6,15 @@ import { DynamicBorder } from "./dynamic-border";
 
 export type CustomProviderCredentialSource = "env" | "literal";
 
-type WizardStep = "compatibility" | "provider-id" | "base-url" | "credential-source" | "credential" | "models" | "confirm" | "force-confirm";
+type WizardStep =
+	| "compatibility"
+	| "provider-id"
+	| "base-url"
+	| "credential-source"
+	| "credential"
+	| "models"
+	| "confirm"
+	| "force-confirm";
 
 interface WizardState {
 	compatibility: ProviderCompatibility;
@@ -37,7 +45,11 @@ export class CustomProviderWizardComponent extends Container {
 	#onCancel: () => void;
 	#onRender: () => void;
 
-	constructor(onSubmit: (input: CustomProviderWizardSubmit) => void, onCancel: () => void, onRender: () => void = () => {}) {
+	constructor(
+		onSubmit: (input: CustomProviderWizardSubmit) => void,
+		onCancel: () => void,
+		onRender: () => void = () => {},
+	) {
 		super();
 		this.#onSubmit = onSubmit;
 		this.#onCancel = onCancel;
@@ -46,7 +58,9 @@ export class CustomProviderWizardComponent extends Container {
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 		this.addChild(new TruncatedText(theme.bold("Add custom provider")));
-		this.addChild(new TruncatedText(theme.fg("muted", "  Configure an OpenAI- or Anthropic-compatible API provider."), 0, 0));
+		this.addChild(
+			new TruncatedText(theme.fg("muted", "  Configure an OpenAI- or Anthropic-compatible API provider."), 0, 0),
+		);
 		this.addChild(new Spacer(1));
 		this.#contentContainer = new Container();
 		this.addChild(this.#contentContainer);
@@ -105,10 +119,20 @@ export class CustomProviderWizardComponent extends Container {
 				this.#renderCompatibilityStep();
 				break;
 			case "provider-id":
-				this.#renderInputStep("Step 2: Provider id", "Enter a provider id:", this.#state.providerId, "e.g. my-openai-proxy");
+				this.#renderInputStep(
+					"Step 2: Provider id",
+					"Enter a provider id:",
+					this.#state.providerId,
+					"e.g. my-openai-proxy",
+				);
 				break;
 			case "base-url":
-				this.#renderInputStep("Step 3: Base URL", "Enter the API base URL:", this.#state.baseUrl, "e.g. https://api.example.com/v1");
+				this.#renderInputStep(
+					"Step 3: Base URL",
+					"Enter the API base URL:",
+					this.#state.baseUrl,
+					"e.g. https://api.example.com/v1",
+				);
 				break;
 			case "credential-source":
 				this.#renderCredentialSourceStep();
@@ -116,13 +140,22 @@ export class CustomProviderWizardComponent extends Container {
 			case "credential":
 				this.#renderInputStep(
 					"Step 5: Credential",
-					this.#state.credentialSource === "env" ? "Enter the API key environment variable name:" : "Paste the API key:",
+					this.#state.credentialSource === "env"
+						? "Enter the API key environment variable name:"
+						: "Paste the API key:",
 					this.#state.credential,
-					this.#state.credentialSource === "env" ? "e.g. OPENAI_API_KEY" : "The key will be stored in models.yml and redacted in output.",
+					this.#state.credentialSource === "env"
+						? "e.g. OPENAI_API_KEY"
+						: "The key will be stored in models.yml and redacted in output.",
 				);
 				break;
 			case "models":
-				this.#renderInputStep("Step 6: Model id(s)", "Enter model ids, comma-separated:", this.#state.models, "e.g. gpt-5, claude-sonnet-4-5");
+				this.#renderInputStep(
+					"Step 6: Model id(s)",
+					"Enter model ids, comma-separated:",
+					this.#state.models,
+					"e.g. gpt-5, claude-sonnet-4-5",
+				);
 				break;
 			case "confirm":
 				this.#renderConfirmStep(false);
@@ -166,7 +199,9 @@ export class CustomProviderWizardComponent extends Container {
 	}
 
 	#renderConfirmStep(force: boolean): void {
-		this.#contentContainer.addChild(new Text(theme.fg("accent", force ? "Provider exists — replace it?" : "Confirm custom provider")));
+		this.#contentContainer.addChild(
+			new Text(theme.fg("accent", force ? "Provider exists — replace it?" : "Confirm custom provider")),
+		);
 		this.#contentContainer.addChild(new Spacer(1));
 		if (this.#lastSubmitError) {
 			this.#contentContainer.addChild(new Text(theme.fg(force ? "warning" : "error", this.#lastSubmitError), 0, 0));
@@ -175,7 +210,13 @@ export class CustomProviderWizardComponent extends Container {
 		this.#contentContainer.addChild(new Text(`Compatibility: ${this.#state.compatibility}`, 0, 0));
 		this.#contentContainer.addChild(new Text(`Provider: ${this.#state.providerId}`, 0, 0));
 		this.#contentContainer.addChild(new Text(`Base URL: ${this.#state.baseUrl}`, 0, 0));
-		this.#contentContainer.addChild(new Text(`Credential: ${this.#state.credentialSource === "env" ? this.#state.credential : "pasted API key"}`, 0, 0));
+		this.#contentContainer.addChild(
+			new Text(
+				`Credential: ${this.#state.credentialSource === "env" ? this.#state.credential : "pasted API key"}`,
+				0,
+				0,
+			),
+		);
 		this.#contentContainer.addChild(new Text(`Models: ${this.#state.models}`, 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#addOption(0, force ? "Replace existing provider" : "Add provider");
@@ -242,13 +283,22 @@ export class CustomProviderWizardComponent extends Container {
 			baseUrl: this.#state.baseUrl,
 			apiKeyEnv: this.#state.credentialSource === "env" ? this.#state.credential : undefined,
 			apiKey: this.#state.credentialSource === "literal" ? this.#state.credential : undefined,
-			models: this.#state.models.split(",").map(model => model.trim()).filter(Boolean),
+			models: this.#state.models
+				.split(",")
+				.map(model => model.trim())
+				.filter(Boolean),
 			force,
 		};
 	}
 
 	#moveSelection(delta: number): void {
-		const maxIndex = this.#step === "confirm" || this.#step === "force-confirm" || this.#step === "compatibility" || this.#step === "credential-source" ? 1 : 0;
+		const maxIndex =
+			this.#step === "confirm" ||
+			this.#step === "force-confirm" ||
+			this.#step === "compatibility" ||
+			this.#step === "credential-source"
+				? 1
+				: 0;
 		this.#selectedIndex = (this.#selectedIndex + delta + maxIndex + 1) % (maxIndex + 1);
 		this.#renderStep();
 		this.#onRender();

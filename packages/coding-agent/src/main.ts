@@ -236,7 +236,9 @@ export async function applyStartupModelProfiles(args: {
 	}
 }
 
-export async function applyStartupModelProfilesOrExit(args: Parameters<typeof applyStartupModelProfiles>[0]): Promise<void> {
+export async function applyStartupModelProfilesOrExit(
+	args: Parameters<typeof applyStartupModelProfiles>[0],
+): Promise<void> {
 	try {
 		await applyStartupModelProfiles(args);
 	} catch (error) {

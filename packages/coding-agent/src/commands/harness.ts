@@ -22,10 +22,13 @@ import { GajaeCodeRpc } from "../harness-control-plane/rpc-adapter";
 import { classifyLeaseStatus, readLease } from "../harness-control-plane/session-lease";
 import { buildResponse, buildStateView } from "../harness-control-plane/state-machine";
 import {
+	canonicalWorkspacePath,
 	generateSessionId,
 	readEvents,
 	readSessionState,
+	rememberHarnessSessionRoot,
 	resolveHarnessRoot,
+	resolveHarnessSessionRoot,
 	sessionPaths,
 	writeReceiptImmutable,
 	writeSessionState,
@@ -126,8 +129,12 @@ function gitOutput(workspace: string, args: string[]): string | null {
 	}
 }
 
+function resolveInputWorkspace(input: Record<string, unknown>): string {
+	return canonicalWorkspacePath(typeof input.workspace === "string" ? input.workspace : process.cwd());
+}
+
 function buildPreflight(input: Record<string, unknown>): HarnessPreflight {
-	const workspace = typeof input.workspace === "string" ? input.workspace : process.cwd();
+	const workspace = resolveInputWorkspace(input);
 	const declaredBranch = typeof input.branch === "string" && input.branch.trim() ? input.branch.trim() : null;
 	const blockers: string[] = [];
 	const gitRoot = gitOutput(workspace, ["rev-parse", "--show-toplevel"]);
@@ -442,9 +449,14 @@ export default class Harness extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Harness);
 		const verb = String(args.verb);
-		const root = resolveHarnessRoot();
+		let root = resolveHarnessRoot();
 		try {
 			const input = parseInput(flags.input);
+			const sessionId = flags.session ?? (typeof input.sessionId === "string" ? input.sessionId : undefined);
+			const expectedWorkspace = typeof input.workspace === "string" ? resolveInputWorkspace(input) : undefined;
+			if (verb !== "start" && sessionId) {
+				root = await resolveHarnessSessionRoot(root, sessionId, process.env, { expectedWorkspace });
+			}
 			switch (verb) {
 				case "start":
 					return await this.#start(root, input);
@@ -583,6 +595,9 @@ export default class Harness extends Command {
 		if (process.env.GJC_HARNESS_RPC_COMMAND) {
 			envAssignments.push(`GJC_HARNESS_RPC_COMMAND=${shellQuote(process.env.GJC_HARNESS_RPC_COMMAND)}`);
 		}
+		if (process.env.GJC_HARNESS_TEST_NODE_MODULES) {
+			envAssignments.push(`GJC_HARNESS_TEST_NODE_MODULES=${shellQuote(process.env.GJC_HARNESS_TEST_NODE_MODULES)}`);
+		}
 		const ownerCommand = this.#buildOwnerCommand(sessionId).map(shellQuote).join(" ");
 		const shellCommand = `exec env ${envAssignments.join(" ")} ${ownerCommand}`;
 		const created = Bun.spawnSync([tmuxCommand, "new-session", "-d", "-s", sessionName, "-c", cwd, shellCommand], {
@@ -613,7 +628,13 @@ export default class Harness extends Command {
 		const cmd = this.#buildOwnerCommand(sessionId);
 		const child = Bun.spawn(cmd, {
 			cwd,
-			env: { ...process.env, GJC_HARNESS_STATE_ROOT: root },
+			env: {
+				...process.env,
+				GJC_HARNESS_STATE_ROOT: root,
+				...(process.env.GJC_HARNESS_TEST_NODE_MODULES
+					? { GJC_HARNESS_TEST_NODE_MODULES: process.env.GJC_HARNESS_TEST_NODE_MODULES }
+					: {}),
+			},
 			stdout: "ignore",
 			stderr: "ignore",
 			stdin: "ignore",
@@ -655,7 +676,7 @@ export default class Harness extends Command {
 			process.exitCode = 1;
 			return;
 		}
-		const workspace = typeof input.workspace === "string" ? input.workspace : process.cwd();
+		const workspace = resolveInputWorkspace(input);
 		const sessionId = typeof input.sessionId === "string" ? input.sessionId : generateSessionId();
 		const eventsPath = `${root}/sessions/${sessionId}/events.jsonl`;
 		const leasePath = `${root}/sessions/${sessionId}/lease.json`;
@@ -688,6 +709,7 @@ export default class Harness extends Command {
 			updatedAt: startedAt,
 		};
 		await writeSessionState(root, state);
+		await rememberHarnessSessionRoot(root, sessionId);
 		let ownerLive = false;
 		let ownerRuntime: OwnerSpawnResult["runtime"] = "manual";
 		let ownerFallbackReason: string | null = null;

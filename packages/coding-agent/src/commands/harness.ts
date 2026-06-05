@@ -27,6 +27,7 @@ import {
 } from "../harness-control-plane/storage";
 import {
 	DEFAULT_RETRY_BUDGET,
+	type EventEnvelope,
 	type GitDelta,
 	type Harness as HarnessKind,
 	type Observation,
@@ -76,25 +77,189 @@ function gitDeltaFor(workspace: string): { gitDelta: GitDelta; branch: string | 
 		return { gitDelta: "unknown", branch, deleted: false };
 	}
 }
+interface HarnessPreflight {
+	ok: boolean;
+	blockers: string[];
+	workspace: string;
+	actualBranch: string | null;
+	declaredBranch: string | null;
+	normalizedIssueOrPr: string | null;
+}
 
-/** Owner liveness — always false in the foundation build (RuntimeOwner is M3). */
+function normalizeIssueOrPr(value: unknown): string | null {
+	if (value === undefined || value === null) return null;
+	if (typeof value === "number") {
+		if (Number.isSafeInteger(value) && value > 0) return String(value);
+		throw new Error(`invalid_issue_or_pr:${value}`);
+	}
+	if (typeof value !== "string") throw new Error("invalid_issue_or_pr:not-string-or-number");
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	const patterns = [
+		/^#?(\d+)$/i,
+		/^(?:pr|pull|issue)[-_#]?(\d+)$/i,
+		/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#(\d+)$/,
+		/^(?:https?:\/\/github\.com\/)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:pull|issues)\/(\d+)\/?$/i,
+	];
+	for (const pattern of patterns) {
+		const match = trimmed.match(pattern);
+		if (match?.[1]) return match[1];
+	}
+	throw new Error(`invalid_issue_or_pr:${trimmed}`);
+}
+
+function gitOutput(workspace: string, args: string[]): string | null {
+	try {
+		return execFileSync("git", args, {
+			cwd: workspace,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+	} catch {
+		return null;
+	}
+}
+
+function buildPreflight(input: Record<string, unknown>): HarnessPreflight {
+	const workspace = typeof input.workspace === "string" ? input.workspace : process.cwd();
+	const declaredBranch = typeof input.branch === "string" && input.branch.trim() ? input.branch.trim() : null;
+	const blockers: string[] = [];
+	const gitRoot = gitOutput(workspace, ["rev-parse", "--show-toplevel"]);
+	const actualBranch = gitRoot ? gitOutput(workspace, ["rev-parse", "--abbrev-ref", "HEAD"]) : null;
+	let normalizedIssueOrPr: string | null = null;
+
+	if (!gitRoot) blockers.push("workspace-not-git-repo");
+	if (gitRoot && actualBranch === "HEAD") blockers.push("detached-head");
+	if (declaredBranch && actualBranch && actualBranch !== "HEAD" && declaredBranch !== actualBranch) {
+		blockers.push("branch-mismatch");
+	}
+	try {
+		normalizedIssueOrPr = normalizeIssueOrPr(input.issueOrPr ?? input.pr ?? input.issue);
+	} catch (error) {
+		blockers.push(error instanceof Error ? error.message : String(error));
+	}
+
+	return {
+		ok: blockers.length === 0,
+		blockers,
+		workspace,
+		actualBranch: actualBranch === "HEAD" ? null : actualBranch,
+		declaredBranch,
+		normalizedIssueOrPr,
+	};
+}
+
+function startFatalPreflightBlockers(input: Record<string, unknown>, preflight: HarnessPreflight): string[] {
+	const strict = input.strictPreflight === true || typeof input.branch === "string";
+	return preflight.blockers.filter(blocker => {
+		if (blocker === "branch-mismatch") return true;
+		if (blocker.startsWith("invalid_issue_or_pr:")) return true;
+		if (strict && (blocker === "workspace-not-git-repo" || blocker === "detached-head")) return true;
+		return false;
+	});
+}
+
+/** Fallback liveness after owner routing failed: no reachable owner handled this CLI call. */
 function ownerLiveFor(_state: SessionState): boolean {
 	return false;
 }
 
-function buildObservation(state: SessionState, ownerLive: boolean): Observation {
+function pushUnique(out: string[], value: unknown): void {
+	if (typeof value === "string" && !out.includes(value)) out.push(value);
+}
+
+interface CompletedTerminalEvent {
+	cursor: number;
+	createdAt: string;
+	kind: string;
+}
+
+function completedTerminalEvent(events: EventEnvelope[]): CompletedTerminalEvent | null {
+	for (const event of [...events].reverse()) {
+		const signal = (event.evidence as { signal?: unknown } | undefined)?.signal;
+		if (event.kind === "rpc_agent_completed" || signal === "completed") {
+			return { cursor: event.cursor, createdAt: event.createdAt, kind: event.kind };
+		}
+	}
+	return null;
+}
+
+async function buildObservation(
+	root: string,
+	state: SessionState,
+	ownerLive: boolean,
+): Promise<{
+	observation: Observation;
+	completedTerminalEvent: CompletedTerminalEvent | null;
+}> {
 	const workspace = state.handle.workspace;
 	const { gitDelta, branch, deleted } = gitDeltaFor(workspace);
+	const events = await readEvents(root, state.sessionId, 0);
+	const observedSignals = ["SessionStart"];
+	for (const event of events.slice(-200)) {
+		pushUnique(observedSignals, (event.evidence as { signal?: unknown } | undefined)?.signal);
+	}
+	const terminalEvent = completedTerminalEvent(events);
+	const lastEventAt = events.at(-1)?.createdAt;
 	return {
-		lifecycle: state.lifecycle,
-		ownerLive,
-		cwd: workspace,
-		branch: branch ?? state.handle.branch,
-		gitDelta,
-		lastActivityAt: state.updatedAt,
-		observedSignals: ["SessionStart"],
-		risk: deleted ? "deleted-worktree" : "normal",
+		observation: {
+			lifecycle: state.lifecycle,
+			ownerLive,
+			cwd: workspace,
+			branch: branch ?? state.handle.branch,
+			gitDelta,
+			lastActivityAt: lastEventAt ?? state.updatedAt,
+			observedSignals,
+			risk: deleted ? "deleted-worktree" : !ownerLive && gitDelta === "dirty" ? "vanished-dirty" : "normal",
+		},
+		completedTerminalEvent: terminalEvent,
 	};
+}
+
+function isOwnerLivenessBlocker(blocker: string): boolean {
+	return blocker === "detached-owner-not-live" || blocker.startsWith("owner-vanished:");
+}
+
+async function reconcileCompletedOwnerExited(
+	root: string,
+	state: SessionState,
+	observation: Observation,
+	completedTerminal: CompletedTerminalEvent | null,
+): Promise<SessionState> {
+	if (!completedTerminal || observation.ownerLive || observation.gitDelta !== "clean") return state;
+	if (state.lifecycle === "completed" || state.lifecycle === "retired") return state;
+	state.lifecycle = "completed";
+	state.blockers = state.blockers.filter(blocker => !isOwnerLivenessBlocker(blocker));
+	state.updatedAt = nowIso();
+	await writeSessionState(root, state);
+	return state;
+}
+
+function needsVanishedOwnerBlock(
+	state: SessionState,
+	observation: Observation,
+	completedTerminal: CompletedTerminalEvent | null,
+): boolean {
+	if (observation.ownerLive || state.lifecycle !== "observing") return false;
+	if (completedTerminal || observation.observedSignals.includes("completed")) return false;
+	return observation.observedSignals.some(
+		signal => signal === "prompt-accepted" || signal === "tool-call" || signal === "streaming",
+	);
+}
+
+async function markVanishedOwnerBlocked(
+	root: string,
+	state: SessionState,
+	observation: Observation,
+	completedTerminal: CompletedTerminalEvent | null,
+): Promise<SessionState> {
+	if (!needsVanishedOwnerBlock(state, observation, completedTerminal)) return state;
+	const blocker = `owner-vanished:${observation.gitDelta}`;
+	state.lifecycle = "blocked";
+	state.blockers = state.blockers.includes(blocker) ? state.blockers : [...state.blockers, blocker];
+	state.updatedAt = nowIso();
+	await writeSessionState(root, state);
+	return state;
 }
 
 function resolveRetryBudget(input: Record<string, unknown>): RetryBudget {
@@ -139,7 +304,7 @@ export default class Harness extends Command {
 
 	static args = {
 		verb: Args.string({
-			description: "start|submit|observe|classify|recover|validate|finalize|retire|events|monitor|operate",
+			description: "start|preflight|submit|observe|classify|recover|validate|finalize|retire|events|monitor|operate",
 			required: true,
 		}),
 	};
@@ -168,6 +333,8 @@ export default class Harness extends Command {
 			switch (verb) {
 				case "start":
 					return await this.#start(root, input);
+				case "preflight":
+					return this.#preflight(input);
 				case "observe":
 					return await this.#observe(root, input, flags.session);
 				case "classify":
@@ -196,6 +363,20 @@ export default class Harness extends Command {
 		}
 	}
 
+	#preflight(input: Record<string, unknown>): void {
+		const preflight = buildPreflight(input);
+		writeJson({
+			ok: preflight.ok,
+			evidence: {
+				preflight,
+				guidance: preflight.ok
+					? "workspace metadata is normalized"
+					: "fix blockers before gjc harness start; branch must match the actual checkout and issueOrPr must be numeric or a recognized PR/issue form",
+			},
+		});
+		if (!preflight.ok) process.exitCode = 1;
+	}
+
 	async #finalizeVerb(root: string, input: Record<string, unknown>, flagSession: string | undefined): Promise<void> {
 		const sessionId = requireSessionId(input, flagSession);
 		if (await this.#tryOwnerRoute(root, sessionId, "finalize", { ...input, sessionId })) return;
@@ -214,6 +395,7 @@ export default class Harness extends Command {
 	): Promise<void> {
 		const sessionId = flagSession ?? (typeof input.sessionId === "string" ? input.sessionId : undefined);
 		if (sessionId && (await this.#tryOwnerRoute(root, sessionId, verb, { ...input, sessionId }))) return;
+		if (verb === "recover" && sessionId) return this.#recoverWithoutOwner(root, sessionId, input);
 		return this.#pending(root, verb, input, flagSession);
 	}
 
@@ -343,6 +525,21 @@ export default class Harness extends Command {
 			process.exitCode = 1;
 			return;
 		}
+		const preflight = buildPreflight(input);
+		const fatalBlockers = startFatalPreflightBlockers(input, preflight);
+		if (fatalBlockers.length > 0) {
+			writeJson({
+				ok: false,
+				error: "harness_preflight_failed",
+				evidence: {
+					preflight: { ...preflight, blockers: fatalBlockers, ok: false },
+					guidance:
+						"fix blockers before start; run gjc harness preflight with the same input for branch and issue/PR diagnostics",
+				},
+			});
+			process.exitCode = 1;
+			return;
+		}
 		const workspace = typeof input.workspace === "string" ? input.workspace : process.cwd();
 		const sessionId = typeof input.sessionId === "string" ? input.sessionId : generateSessionId();
 		const eventsPath = `${root}/sessions/${sessionId}/events.jsonl`;
@@ -353,9 +550,9 @@ export default class Harness extends Command {
 			harness,
 			repo: typeof input.repo === "string" ? input.repo : null,
 			workspace,
-			branch: typeof input.branch === "string" ? input.branch : null,
+			branch: preflight.declaredBranch ?? preflight.actualBranch,
 			base: typeof input.base === "string" ? input.base : null,
-			issueOrPr: typeof input.issueOrPr === "string" ? input.issueOrPr : null,
+			issueOrPr: preflight.normalizedIssueOrPr,
 			processHandle: { kind: "runtime-owner", ownerId: null, pid: null },
 			rpcHandle: { kind: "rpc-subprocess", pid: null, sessionDir: `${root}/sessions/${sessionId}/gjc-session` },
 			ownerHandle: { leasePath, endpoint: null, heartbeatAt: null },
@@ -408,6 +605,25 @@ export default class Harness extends Command {
 			}
 		}
 		if (ownerBlockerReason) {
+			const resolved = await resolveOwner(root, sessionId);
+			if (resolved.live && resolved.socketPath) {
+				ownerLive = true;
+				ownerBlockerReason = null;
+				handle.processHandle = {
+					kind: "runtime-owner",
+					ownerId: resolved.lease?.ownerId ?? null,
+					pid: resolved.lease?.pid ?? null,
+				};
+				handle.ownerHandle = {
+					leasePath,
+					endpoint: resolved.socketPath,
+					heartbeatAt: resolved.lease?.heartbeatAt ?? null,
+				};
+				state.handle = handle;
+				await writeSessionState(root, state);
+			}
+		}
+		if (ownerBlockerReason) {
 			state.lifecycle = "blocked";
 			state.blockers = [...state.blockers, ownerBlockerReason];
 			state.handle = handle;
@@ -421,6 +637,7 @@ export default class Harness extends Command {
 				{
 					handle,
 					ownerRuntime,
+					preflight,
 					...(ownerFallbackReason ? { ownerFallbackReason } : {}),
 					...(ownerBlockerReason ? { reason: ownerBlockerReason } : {}),
 				},
@@ -453,10 +670,24 @@ export default class Harness extends Command {
 	async #observe(root: string, input: Record<string, unknown>, flagSession: string | undefined): Promise<void> {
 		const sessionId = requireSessionId(input, flagSession);
 		if (await this.#tryOwnerRoute(root, sessionId, "observe", { ...input, sessionId })) return;
-		const state = await loadState(root, sessionId);
+		let state = await loadState(root, sessionId);
 		const ownerLive = ownerLiveFor(state);
-		const observation = buildObservation(state, ownerLive);
-		writeJson(buildResponse(state, ownerLive, { observation, readOnly: !ownerLive }));
+		const { observation, completedTerminalEvent } = await buildObservation(root, state, ownerLive);
+		state = await reconcileCompletedOwnerExited(root, state, observation, completedTerminalEvent);
+		const vanishedOwnerBlock = needsVanishedOwnerBlock(state, observation, completedTerminalEvent);
+		state = await markVanishedOwnerBlocked(root, state, observation, completedTerminalEvent);
+		writeJson(
+			buildResponse(state, ownerLive, {
+				observation: { ...observation, lifecycle: state.lifecycle },
+				readOnly: !ownerLive,
+				...(vanishedOwnerBlock
+					? { ownerVanished: true, blockerReason: `owner-vanished:${observation.gitDelta}` }
+					: {}),
+				...(completedTerminalEvent && !ownerLive
+					? { completedOwnerExited: true, terminalResult: completedTerminalEvent }
+					: {}),
+			}),
+		);
 	}
 
 	async #classify(root: string, input: Record<string, unknown>, flagSession: string | undefined): Promise<void> {
@@ -466,7 +697,16 @@ export default class Harness extends Command {
 		const sessionId = flagSession ?? (typeof input.sessionId === "string" ? input.sessionId : undefined);
 		if (sessionId) {
 			stateView = await loadState(root, sessionId);
-			if (!observation) observation = buildObservation(stateView, ownerLiveFor(stateView));
+			if (!observation) {
+				const built = await buildObservation(root, stateView, ownerLiveFor(stateView));
+				observation = built.observation;
+				stateView = await markVanishedOwnerBlocked(
+					root,
+					stateView,
+					built.observation,
+					built.completedTerminalEvent,
+				);
+			}
 		}
 		if (!observation) throw new Error("classify_requires_observation_or_session");
 		const full: Observation = {
@@ -481,7 +721,12 @@ export default class Harness extends Command {
 		};
 		const decision = classifyRecovery({ observation: full, retryBudget: budget });
 		if (stateView) {
-			writeJson(buildResponse(stateView, ownerLiveFor(stateView), { decision, observation: full }));
+			writeJson(
+				buildResponse(stateView, ownerLiveFor(stateView), {
+					decision,
+					observation: { ...full, lifecycle: stateView.lifecycle },
+				}),
+			);
 			return;
 		}
 		// Pure classify without a session: synthesize a minimal state view.
@@ -531,7 +776,7 @@ export default class Harness extends Command {
 		const sessionId = requireSessionId(input, flagSession);
 		if (await this.#tryOwnerRoute(root, sessionId, "retire", { ...input, sessionId })) return;
 		const state = await loadState(root, sessionId);
-		const observation = buildObservation(state, ownerLiveFor(state));
+		const { observation } = await buildObservation(root, state, ownerLiveFor(state));
 		if (observation.gitDelta === "dirty" || observation.gitDelta === "unknown") {
 			writeJson(
 				buildResponse(
@@ -552,6 +797,31 @@ export default class Harness extends Command {
 		state.updatedAt = nowIso();
 		await writeSessionState(root, state);
 		writeJson(buildResponse(state, false, { retired: true }));
+	}
+
+	async #recoverWithoutOwner(root: string, sessionId: string, input: Record<string, unknown>): Promise<void> {
+		const budget = resolveRetryBudget(input);
+		let state = await loadState(root, sessionId);
+		const { observation, completedTerminalEvent } = await buildObservation(root, state, false);
+		state = await markVanishedOwnerBlocked(root, state, observation, completedTerminalEvent);
+		const decision = classifyRecovery({
+			observation: { ...observation, lifecycle: state.lifecycle },
+			retryBudget: budget,
+		});
+		writeJson(
+			buildResponse(
+				state,
+				false,
+				{
+					pending: false,
+					reason: "owner-not-live",
+					decision,
+					observation: { ...observation, lifecycle: state.lifecycle },
+				},
+				false,
+			),
+		);
+		process.exitCode = 1;
 	}
 
 	async #pending(

@@ -12,6 +12,33 @@ describe("model profile schema", () => {
 		expect(result.success).toBe(true);
 	});
 
+	test("provider model and override cacheRetention values parse", () => {
+		const result = ModelsConfigSchema.safeParse({
+			providers: {
+				openai: {
+					cacheRetention: "long",
+					models: [
+						{ id: "custom", api: "openai-responses", baseUrl: "https://example.com/v1", cacheRetention: "short" },
+					],
+					modelOverrides: { "gpt-5-mini": { cacheRetention: "none" } },
+				},
+			},
+		});
+
+		expect(result.success).toBe(true);
+	});
+
+	// Runtime defaulting treats any non-"long" GJC_CACHE_RETENTION value as short;
+	// config is stricter so typos fail before dispatch.
+	test("invalid cacheRetention config values are rejected", () => {
+		const result = ModelsConfigSchema.safeParse({
+			providers: { openai: { cacheRetention: "forever" } },
+		});
+
+		expect(result.success).toBe(false);
+		if (!result.success) expect(issuePaths(result.error)).toContain("providers.openai.cacheRetention");
+	});
+
 	test("full and partial mappings parse", () => {
 		const result = ModelsConfigSchema.safeParse({
 			profiles: {
@@ -28,6 +55,18 @@ describe("model profile schema", () => {
 				partial: {
 					required_providers: ["opencode-go"],
 					model_mapping: { default: "opencode-go/kimi-k2.6" },
+				},
+			},
+		});
+		expect(result.success).toBe(true);
+	});
+
+	test("max effort selector parses explicitly", () => {
+		const result = ModelsConfigSchema.safeParse({
+			profiles: {
+				opus: {
+					required_providers: ["anthropic"],
+					model_mapping: { default: "anthropic/claude-opus-4.7:max" },
 				},
 			},
 		});

@@ -9,6 +9,7 @@ export const BRIDGE_CLIENT_COMMAND_TYPES = [
 	"set_todos",
 	"set_host_tools",
 	"set_host_uri_schemes",
+	"workflow_gate_response",
 	"set_model",
 	"cycle_model",
 	"get_available_models",
@@ -34,6 +35,7 @@ export const BRIDGE_CLIENT_COMMAND_TYPES = [
 	"get_messages",
 	"get_login_providers",
 	"login",
+	"negotiate_unattended",
 ] as const;
 
 export type BridgeClientCommandType = (typeof BRIDGE_CLIENT_COMMAND_TYPES)[number];
@@ -92,4 +94,11 @@ export interface BridgeCommandHelpers {
 	getMessages(sessionId: string, options?: BridgeCommandOptions): Promise<unknown>;
 	getLoginProviders(sessionId: string, options?: BridgeCommandOptions): Promise<unknown>;
 	login(sessionId: string, providerId: string, options?: BridgeCommandOptions): Promise<unknown>;
+	respondGate(
+		sessionId: string,
+		gateId: string,
+		ownerToken: string,
+		answer: unknown,
+		options?: BridgeCommandOptions,
+	): Promise<unknown>;
 }

@@ -16,6 +16,7 @@ const ReasoningEffortMapSchema = z.object({
 	medium: z.string().optional(),
 	high: z.string().optional(),
 	xhigh: z.string().optional(),
+	max: z.string().optional(),
 });
 
 export const OpenAICompatSchema = z.object({
@@ -45,7 +46,8 @@ export const OpenAICompatSchema = z.object({
 	toolStrictMode: z.enum(["all_strict", "none"]).optional(),
 });
 
-const EffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
+const EffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]);
+const CacheRetentionSchema = z.enum(["none", "short", "long"]);
 
 const ThinkingControlModeSchema = z.enum([
 	"effort",
@@ -89,7 +91,7 @@ function isValidProfileModelSelector(value: string): boolean {
 	if (parts.length > 2) return false;
 	const [base, suffix] = parts;
 	if (!base) return false;
-	return suffix === undefined || ["minimal", "low", "medium", "high", "xhigh"].includes(suffix);
+	return suffix === undefined || ["minimal", "low", "medium", "high", "xhigh", "max"].includes(suffix);
 }
 
 export const ProfileModelSelectorSchema = z
@@ -149,6 +151,7 @@ const ModelDefinitionSchema = z
 		contextPromotionTarget: z.string().min(1).optional(),
 		wireModelId: z.string().min(1).optional(),
 		requestTransform: RequestTransformSchema.optional(),
+		cacheRetention: CacheRetentionSchema.optional(),
 	})
 	.strict();
 
@@ -174,6 +177,7 @@ export const ModelOverrideSchema = z
 		contextPromotionTarget: z.string().min(1).optional(),
 		wireModelId: z.string().min(1).optional(),
 		requestTransform: RequestTransformSchema.optional(),
+		cacheRetention: CacheRetentionSchema.optional(),
 	})
 	.strict();
 
@@ -225,6 +229,7 @@ const ProviderConfigSchema = z
 		 * and `apiKey` must carry the gateway bearer.
 		 */
 		transport: z.literal("pi-native").optional(),
+		cacheRetention: CacheRetentionSchema.optional(),
 	})
 	.strict();
 

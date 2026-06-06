@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ThinkingLevel } from "@gajae-code/agent-core";
-import modelsJson from "@gajae-code/ai/models.json" with { type: "json" };
+import { type GeneratedProvider, getBundledModel } from "@gajae-code/ai/models";
 import {
 	BUILTIN_MODEL_PROFILES,
 	type ModelProfileDefinition,
@@ -31,8 +31,7 @@ function builtIn(name: string): ModelProfileDefinition {
 function selectorExists(selector: string): boolean {
 	const parsed = parseModelString(selector);
 	if (!parsed) return false;
-	const providerModels = modelsJson[parsed.provider as keyof typeof modelsJson] as Record<string, unknown> | undefined;
-	return providerModels?.[parsed.id] !== undefined;
+	return getBundledModel(parsed.provider as GeneratedProvider, parsed.id) !== undefined;
 }
 
 function effortOf(selector: string): number {
@@ -58,6 +57,15 @@ describe("built-in model profile catalog", () => {
 				throw new Error(`Unexpected built-in profile ${profile.name}`);
 			}
 		}
+	});
+
+	test("models.json package export is a plain relative path", async () => {
+		const manifest = (await Bun.file(new URL("../../ai/package.json", import.meta.url)).json()) as {
+			exports?: Record<string, { import?: string }>;
+		};
+		const exportTarget = manifest.exports?.["./models.json"]?.import;
+		expect(exportTarget).toBe("./src/models.json");
+		expect(exportTarget).not.toMatch(/^file:(?:file:)+/u);
 	});
 
 	test("every selector parses with schema validation and exists in models.json", () => {
@@ -99,6 +107,17 @@ describe("built-in model profile catalog", () => {
 			expect(parsed?.id).toBe("gpt-5.4");
 			expect(parsed?.thinkingLevel).toBe(expected[role]);
 		}
+	});
+
+	test("codex-pro default is GPT-5.5 xhigh", () => {
+		const profile = builtIn("codex-pro");
+		const parsed = parseModelString(profile.modelMapping.default ?? "");
+
+		expect(parsed?.provider).toBe("openai-codex");
+		expect(parsed?.id).toBe("gpt-5.5");
+		expect(parsed?.thinkingLevel).toBeUndefined();
+		const model = getBundledModel("openai-codex", "gpt-5.5");
+		expect(model?.thinking?.defaultLevel).toBe(ThinkingLevel.XHigh);
 	});
 
 	test("user same-name profile overrides builtin via mergeModelProfiles", () => {

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-06
+
 ### Added
 
 - Added a native `diffLines(oldStr, newStr)` export — a byte-identical Rust port of jsdiff's line diff (`crates/pi-natives/src/linediff.rs`) for the coding-agent edit tool, avoiding the pure-JS Myers blowup on large files.

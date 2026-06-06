@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-06
+
 ### Changed
 
 - Released the GJC 0.4.0 CLI wrapper for the lockstep release.

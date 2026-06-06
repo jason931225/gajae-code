@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-06
+
 ### Added
 
 - Added an agent-driven RPC workflow lifecycle control plane and a `workflow_gate` contract: `negotiate_unattended`, `workflow_gate`, and `workflow_gate_response` frames are validated by an answer-schema validator, persisted through a durable gate broker, and wired into live session dispatch (#314).

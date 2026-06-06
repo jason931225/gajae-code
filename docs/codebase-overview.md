@@ -90,13 +90,6 @@ Local observability dashboard for session and model usage.
 - `packages/stats/src/server.ts` serves local dashboard API routes and static SPA assets.
 - `packages/stats/src/types.ts` and `packages/stats/src/shared-types.ts` define dashboard and aggregate metric shapes.
 
-### `packages/swarm-extension/`
-
-Optional YAML/DAG multi-agent extension outside the fixed default workflow surface.
-
-- `packages/swarm-extension/README.md` documents standalone `gjc-swarm` execution and in-TUI `/swarm` commands.
-- Swarm workflows define agents, tasks, dependency edges, waves, and shared workspace state under `.swarm_<name>/`.
-
 ### `packages/typescript-edit-benchmark/`
 
 Private benchmark package for TypeScript edit tasks.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Refreshed agent-core package metadata for the GJC 0.4.0 release.
+
 ## [0.3.1] - 2026-06-05
 
 ### Fixed

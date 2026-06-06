@@ -42,7 +42,7 @@ interface PackageManifest extends JsonObject {
 
 const repoRoot = path.join(import.meta.dir, "..");
 const isDryRun = process.argv.includes("--dry-run");
-const packages: PublishPackage[] = [
+export const packages: PublishPackage[] = [
 	{ dir: "packages/utils", kind: "typescript" },
 	{ dir: "packages/ai", kind: "typescript" },
 	{ dir: "packages/natives", kind: "native" },
@@ -56,6 +56,7 @@ const packages: PublishPackage[] = [
 	},
 	{ dir: "packages/agent", kind: "typescript" },
 	{ dir: "packages/coding-agent", kind: "typescript" },
+	{ dir: "packages/bridge-client", kind: "typescript" },
 	{ dir: "packages/gajae-code", kind: "manifest" },
 ];
 const dependencyFieldNames = [

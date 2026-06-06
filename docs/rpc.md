@@ -394,20 +394,34 @@ A valid answer resolves the pending gate and returns:
 { "id": "resp_1", "type": "response", "command": "workflow_gate_response", "success": true }
 ```
 
-Unknown gates and schema mismatches are recoverable command failures with a typed `errorCode`:
+A schema mismatch is **not** a command failure: the response succeeds and the
+resolution data carries `status: "rejected"` plus a typed validation `error`
+with code `invalid_workflow_gate_answer`:
 
 ```json
 {
   "id": "resp_1",
   "type": "response",
   "command": "workflow_gate_response",
-  "success": false,
-  "error": "invalid_workflow_gate_response: answer must be a boolean",
-  "errorCode": "invalid_workflow_gate_response"
+  "success": true,
+  "data": {
+    "gate_id": "wg_1",
+    "status": "rejected",
+    "answer_hash": "…",
+    "resolved_at": "…",
+    "error": {
+      "code": "invalid_workflow_gate_answer",
+      "gate_id": "wg_1",
+      "schema_hash": "…",
+      "errors": [{ "path": "/answer", "keyword": "type", "message": "must be boolean" }]
+    }
+  }
 }
 ```
 
-The other typed code is `workflow_gate_not_found`.
+Answering a gate that does not exist is a recoverable command failure carrying
+the broker error code `unknown_gate` (other broker codes are `already_resolved`,
+`idempotency_conflict`, and `invalid_workflow_stage`).
 ## Extension UI Sub-Protocol
 
 Extensions in RPC mode use request/response UI frames.
@@ -760,12 +774,15 @@ audit enforcement are layered on this contract by the unattended control plane
 `negotiate_unattended` keep the existing extension-UI / permission behavior.
 
 
-> **Status (contract foundation, #315):** the `workflow_gate` /
+> **Status (live, #315/#318/#321):** the `workflow_gate` /
 > `workflow_gate_response` / `negotiate_unattended` frames, the answer-schema
-> validator, and the durable gate broker are defined and tested at the contract
-> layer. Wiring these commands into live session dispatch and the bridge frame
-> transport is delivered by #318 (budget/controller) and #321 (bridge). Until
-> then `dispatchRpcCommand` does not yet route them through a live session.
+> validator, and the durable gate broker are defined, tested, and wired into
+> live session dispatch. When an unattended control plane is attached to the
+> session, `dispatchRpcCommand` routes `negotiate_unattended` and
+> `workflow_gate_response` through it (see
+> `packages/coding-agent/src/modes/shared/agent-wire/command-dispatch.ts`); a
+> session without that control plane returns a typed "not available" error for
+> these frames rather than silently dropping them.
 
 
 ### Answering gates from a client (#322)

@@ -138,22 +138,6 @@
         "postcss": "catalog:",
       },
     },
-    "packages/swarm-extension": {
-      "name": "@gajae-code/swarm-extension",
-      "version": "0.3.2",
-      "bin": {
-        "gjc-swarm": "src/cli.ts",
-      },
-      "dependencies": {
-        "@gajae-code/utils": "workspace:*",
-      },
-      "devDependencies": {
-        "@types/bun": "^1.3.14",
-      },
-      "peerDependencies": {
-        "@gajae-code/coding-agent": "workspace:*",
-      },
-    },
     "packages/tui": {
       "name": "@gajae-code/tui",
       "version": "0.3.2",
@@ -425,8 +409,6 @@
     "@gajae-code/orchestration-token-benchmark": ["@gajae-code/orchestration-token-benchmark@workspace:packages/orchestration-token-benchmark"],
 
     "@gajae-code/stats": ["@gajae-code/stats@workspace:packages/stats"],
-
-    "@gajae-code/swarm-extension": ["@gajae-code/swarm-extension@workspace:packages/swarm-extension"],
 
     "@gajae-code/tui": ["@gajae-code/tui@workspace:packages/tui"],
 

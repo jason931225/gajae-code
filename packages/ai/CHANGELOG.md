@@ -12,6 +12,7 @@
 ### Changed
 
 - Pinned the OpenAI Codex provider default to GPT-5.5 at `xhigh` reasoning effort (#352). This changes the default model and effort for Codex users (latency/cost/quality impact) and is a behavior change, not an API break; pass an explicit model/effort to override.
+- Bumped the spoofed Gemini CLI user-agent version to 0.45.2 to track the upstream release.
 
 ## [0.3.0] - 2026-06-03
 

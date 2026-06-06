@@ -19,6 +19,7 @@ StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
 TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned"]
+WorkflowGateKind: TypeAlias = Literal["question", "approval", "execution"]
 ExtensionUiMethod: TypeAlias = Literal[
     "select",
     "confirm",
@@ -43,6 +44,7 @@ INTERACTIVE_EXTENSION_UI_METHODS: Final[frozenset[InteractiveExtensionUiMethod]]
 )
 VALUE_EXTENSION_UI_METHODS: Final[frozenset[ValueExtensionUiMethod]] = frozenset({"select", "input", "editor"})
 _THINKING_LEVEL_VALUES: Final[frozenset[str]] = frozenset({"off", "minimal", "low", "medium", "high", "xhigh"})
+_WORKFLOW_GATE_KIND_VALUES: Final[frozenset[str]] = frozenset({"question", "approval", "execution"})
 _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"})
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
 _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset({"stop", "length", "toolUse", "error", "aborted"})
@@ -811,6 +813,17 @@ class ExtensionUiRequest:
 
 
 @dataclass(slots=True, frozen=True)
+class WorkflowGateEvent:
+    gate_id: str
+    stage: str
+    kind: WorkflowGateKind
+    schema: JsonObject
+    options: tuple[str, ...] | None = None
+    context: JsonObject | None = None
+    type: Literal["workflow_gate"] = "workflow_gate"
+
+
+@dataclass(slots=True, frozen=True)
 class ExtensionError:
     extension_path: str
     event: str
@@ -1306,6 +1319,20 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
             ),
         ),
         text=_optional_str(payload, "text"),
+    )
+
+
+def parse_workflow_gate_event(payload: JsonObject) -> WorkflowGateEvent:
+    return WorkflowGateEvent(
+        gate_id=_require_str(payload, "gate_id"),
+        stage=_require_str(payload, "stage"),
+        kind=cast(
+            WorkflowGateKind,
+            _require_literal(payload.get("kind"), _WORKFLOW_GATE_KIND_VALUES, field="workflow_gate.kind"),
+        ),
+        schema=_clone_json_object(payload.get("schema"), field="workflow_gate.schema"),
+        options=_tuple_of_strings(payload.get("options"), field="workflow_gate.options"),
+        context=_optional_json_object(payload.get("context"), field="workflow_gate.context") or {},
     )
 
 

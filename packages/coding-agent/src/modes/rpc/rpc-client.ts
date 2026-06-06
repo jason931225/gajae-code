@@ -22,6 +22,7 @@ import type {
 	RpcSessionState,
 	RpcWorkflowGate,
 	RpcWorkflowGateResolution,
+	RpcWorkflowGateResponse,
 } from "./rpc-types";
 
 /** Distributive Omit that works with union types */
@@ -846,7 +847,10 @@ export class RpcClient {
 		}
 	}
 
-	#writeFrame(frame: RpcCommand | RpcHostToolResult | RpcHostToolUpdate, onError?: (error: Error) => void): void {
+	#writeFrame(
+		frame: RpcCommand | RpcWorkflowGateResponse | RpcHostToolResult | RpcHostToolUpdate,
+		onError?: (error: Error) => void,
+	): void {
 		if (!this.#process?.stdin) {
 			throw new Error("Client not started");
 		}

@@ -20,9 +20,9 @@ import { UnattendedAuditLog } from "@gajae-code/coding-agent/modes/shared/agent-
 import {
 	ActionDeniedError,
 	ScopeDeniedError,
+	type UnattendedAuditEvent,
 	UnattendedBudgetExceededError,
 	UnattendedRunController,
-	type UnattendedAuditEvent,
 } from "@gajae-code/coding-agent/modes/shared/agent-wire/unattended-run-controller";
 import {
 	FileGateStore,
@@ -51,7 +51,9 @@ class ScriptedMemoryAgent {
 	answer(gate: RpcWorkflowGate): unknown {
 		if (gate.stage === "deep-interview") {
 			const first = gate.options?.[0]?.value;
-			return first !== undefined ? { selected: [first], other: false } : { selected: [], other: true, custom: "memory" };
+			return first !== undefined
+				? { selected: [first], other: false }
+				: { selected: [], other: true, custom: "memory" };
 		}
 		if (gate.kind === "approval") return { decision: "approve", comments: "approved from memory" };
 		if (gate.kind === "execution") return { decision: "approve", reason: "criteria met" };
@@ -187,13 +189,19 @@ describe("#323 unattended lifecycle red-team guardrails", () => {
 		expect(executeBashCalls).toBe(0);
 		const denied = harness.auditLog.query({ run_id: harness.runId, event: "action_denied" });
 		expect(denied).toHaveLength(2);
-		expect(denied.every(r => r.outcome === "denied" && r.error && (r.error as { pre_side_effect?: boolean }).pre_side_effect)).toBe(true);
+		expect(
+			denied.every(
+				r => r.outcome === "denied" && r.error && (r.error as { pre_side_effect?: boolean }).pre_side_effect,
+			),
+		).toBe(true);
 	});
 
 	it("denies out-of-allowlist command scope", () => {
 		const harness = makeHarness({ scopes: ["prompt", "control"] });
 
-		expect(() => harness.controller.authorizeScope("bash", "bash requested outside declared scope")).toThrow(ScopeDeniedError);
+		expect(() => harness.controller.authorizeScope("bash", "bash requested outside declared scope")).toThrow(
+			ScopeDeniedError,
+		);
 		const denied = harness.auditLog.query({ run_id: harness.runId, event: "scope_denied" });
 		expect(denied).toHaveLength(1);
 		expect(denied[0]!.scope).toBe("bash");
@@ -204,7 +212,10 @@ describe("#323 unattended lifecycle red-team guardrails", () => {
 		const harness = makeHarness();
 		const gate = harness.broker.openGate(approvalGate({ summary: "red-team malformed gate" }));
 
-		const malformed = await harness.broker.resolve({ gate_id: gate.gate_id, answer: { decision: "approve", extra: "skip" } });
+		const malformed = await harness.broker.resolve({
+			gate_id: gate.gate_id,
+			answer: { decision: "approve", extra: "skip" },
+		});
 		expect(malformed.status).toBe("rejected");
 		expect(harness.brokerAudit.filter(e => e.event === "gate_response_rejected")).toHaveLength(1);
 

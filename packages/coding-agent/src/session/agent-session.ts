@@ -179,9 +179,9 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { ensureWorkflowSkillActivationState } from "../hooks/skill-state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { resolveMemoryBackend } from "../memory-backend";
+import type { WorkflowGateEmitter } from "../modes/shared/agent-wire/unattended-session";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import type { PlanModeState } from "../plan-mode/state";
-import type { WorkflowGateEmitter } from "../modes/shared/agent-wire/unattended-session";
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
@@ -4217,7 +4217,6 @@ export class AgentSession {
 	setGoalModeState(state: GoalModeState | undefined): void {
 		this.#goalModeState = state;
 	}
-
 
 	getWorkflowGateEmitter(): WorkflowGateEmitter | undefined {
 		return this.#workflowGateEmitter;

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-06
+
 ### Changed
 
 - Ranked slash command-name suggestions by stronger prefix/token matches before fuzzy fallback ordering, while keeping priority as an intra-tier tie-breaker.

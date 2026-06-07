@@ -1,8 +1,8 @@
 # Bridge Protocol Reference (Experimental, Fail-Closed)
 
 Bridge mode runs the coding agent as an experimental network control surface over
-HTTPS. For the 0.3.1 release train, the session-control surface is intentionally
-**fail-closed by default** while the bridge security model is hardened.
+HTTPS. The session-control surface is intentionally **fail-closed by default**
+while the bridge security model is hardened.
 
 Default availability:
 
@@ -99,7 +99,7 @@ and requested scopes. Version mismatch returns `status: "rejected"`,
 `reason: "incompatible_version"`. Malformed request bodies return
 `400 invalid_request`.
 
-In the default 0.3.1 fail-closed configuration, a successful authenticated
+In the default fail-closed configuration, a successful authenticated
 handshake returns:
 
 - `protocol_version` — the server protocol version (`BRIDGE_PROTOCOL_VERSION`, `1`).
@@ -140,7 +140,7 @@ re-enable work has a stable baseline.
 
 When internally enabled for compatibility tests, event replay still uses `last_seq` and the bounded replay reset marker `replay_window_exceeded`; command and UI response retries still use `Idempotency-Key`. These mechanisms are dormant for default external bridge clients because the endpoint matrix rejects the endpoints before they reach replay, body parsing, idempotency, scope, or dispatch logic.
 
-Workflow-gate responses are part of the UI-response surface, not the dormant command surface: when internally enabled, a controller answers `workflow_gate` frame `wg_...` by posting `{ "gate_id": "wg_...", "answer": ... }` to `POST /v1/sessions/{session_id}/ui-responses/{gate_id}`. The request must carry the current controller token in `X-GJC-Bridge-Owner-Token`; `Idempotency-Key` is optional and is also forwarded as `idempotency_key` when supplied by SDK helpers.
+Workflow-gate responses are part of the UI-response surface, not the dormant command surface: when internally enabled, an answerer responds to `workflow_gate` frame `wg_...` by posting `{ "gate_id": "wg_...", "answer": ... }` to `POST /v1/sessions/{session_id}/ui-responses/{gate_id}`. Gate answers are authorized by bearer auth plus the `control` scope on this (default-disabled) endpoint; `X-GJC-Bridge-Owner-Token` may be carried by SDK helpers and participates in idempotency/cache correlation, but — unlike UI/permission responses — gate resolution does not separately validate it as the current controller token. `Idempotency-Key` is optional and is also forwarded as `idempotency_key` when supplied by SDK helpers.
 
 ### Scopes
 
@@ -235,11 +235,13 @@ continue to report typed unsupported results instead of silent defaults:
 
 `@gajae-code/bridge-client` exposes `BridgeClient` with handshake, command
 helpers mirroring the full RPC command catalog, an `events()` async generator,
-controller/UI/host-callback helpers, and an idempotency-key helper. In 0.3.1,
-those helpers should be expected to fail against the default bridge because the
-server endpoint matrix disables the corresponding session endpoints.
+controller/UI/host-callback helpers, and an idempotency-key helper. The bridge
+session-control surface remains fail-closed by default, so against an
+unconfigured bridge those helpers should be expected to fail because the server
+endpoint matrix disables the corresponding session endpoints until they are
+explicitly enabled.
 
-`BridgeClient.respondGate(sessionId, gateId, ownerToken, answer, options)` posts to the owner-token protected UI-response endpoint and returns the gate resolution envelope emitted by the bridge. It deliberately does not send `workflow_gate_response` through `/commands`, because gate answers share controller ownership semantics with UI responses.
+`BridgeClient.respondGate(sessionId, gateId, ownerToken, answer, options)` posts to the fail-closed UI-response endpoint and returns the gate resolution envelope emitted by the bridge. It deliberately does not send `workflow_gate_response` through `/commands`. Gate answers are authorized by bearer auth plus the `control` scope on the (by-default-disabled) `ui-responses` endpoint; the owner token is carried for idempotency/controller correlation, but — unlike UI/permission responses — gate resolution itself is gated by `control` scope rather than a separately enforced controller-owner-token check.
 
 > Response typing: in this experimental version, `command()` and the typed
 > command helpers return `Promise<unknown>`. Callers narrow the response
@@ -254,7 +256,7 @@ server endpoint matrix disables the corresponding session endpoints.
   ordering and future additive multiplexing, but multi-session multiplexing is
   **not** implemented in v1.
 - Session events, commands, controller ownership, UI responses, host tool
-  results, and host URI results are disabled by default in 0.3.1.
+  results, and host URI results are disabled by default.
 - Coarse per-token scopes only (no fine-grained per-command policy yet).
 - UI parity is semantic, not pixel-perfect (see UI Capability Parity).
 
@@ -270,6 +272,6 @@ Public orchestration boundaries:
 4. Use `gjc team ...` only when coordinated parallel tmux workers help with implementation or verification; single-lane work should stay in the leader session.
 5. Collect the handoff state: whether the session stopped cleanly, changed files, commands/checks run, failures, unresolved risks, and evidence summaries.
 
-Bridge mode remains the public remote-control protocol for an already-running GJC session, but the session-control endpoints are fail-closed by default in 0.3.1. Keep lifecycle, worktree selection, and evidence policy above the bridge frames, and avoid documenting private deployment, routing, or credential internals. Introducing another authenticated remote-control protocol for the same purpose should require ADR-level rationale.
+Bridge mode remains the public remote-control protocol for an already-running GJC session, but the session-control endpoints are fail-closed by default. Keep lifecycle, worktree selection, and evidence policy above the bridge frames, and avoid documenting private deployment, routing, or credential internals. Introducing another authenticated remote-control protocol for the same purpose should require ADR-level rationale.
 
 The same external-runner workflow is summarized in the README section [Using GJC with other coding agents](../README.md#using-gjc-with-other-coding-agents).

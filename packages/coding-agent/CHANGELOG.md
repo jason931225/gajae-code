@@ -2,14 +2,33 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-06
+
+### Added
+
+- Added an agent-driven RPC workflow lifecycle control plane and a `workflow_gate` contract: `negotiate_unattended`, `workflow_gate`, and `workflow_gate_response` frames are validated by an answer-schema validator, persisted through a durable gate broker, and wired into live session dispatch (#314).
+- Added a binding-only `gjc-plugins` sub-skill plugin framework that loads, validates, and activates declarative plugin packs without granting implicit arbitrary execution surface (#347).
+- Added generated JSON Schemas for the config and models files (`schemas/config.schema.json`, `schemas/models.schema.json`) with a `check:schemas` drift gate (#377).
+- Added `cacheRetention` support in the models config (#381).
+- Added an Opus max reasoning preset (#372).
+
 ### Changed
 
 - Improved slash command and `skill:*` suggestion ranking so `/team` surfaces the matching skill before weaker fallback candidates.
+
+### Removed
+
+- Removed the optional `@gajae-code/swarm-extension` package and its `gjc-swarm` CLI. The YAML/DAG swarm orchestration extension was a standalone optional feature not imported by any other package; it is no longer built or published.
 
 ### Fixed
 
 - Routed unattended deep-interview ask-tool questions through `workflow_gate { kind: "question" }` events, including Round 0 topology and challenge-mode metadata, free-text option/schema shape, headless RPC answers, and synchronous response race handling (#316).
 - Preserved harness owner-vanish evidence after prompt acceptance: no-owner `recover` now either restores a detached owner when a prior endpoint exists or returns a public-safe concrete owner-exit reason plus a vanish receipt, and no-owner `observe`/`events` expose the preserved owner-exit summary.
+- Fixed LSP and MCP server lifecycle cleanup so clients/servers and their child processes are torn down on abort/exit instead of leaking (#389).
+- Preserved session retention across resident session rewrites.
+- Fixed harness session lookup testability without changing runtime owner-routing behavior.
+- Prevented release catalog file specs from recursing during catalog resolution (#351).
+- Reconciled the ultragoal skill mode-state and HUD with the plan/ledger so status reflects real goal progress (#342/#346).
 
 ## [0.3.2] - 2026-06-05
 

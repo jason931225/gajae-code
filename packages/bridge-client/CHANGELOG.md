@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-06
+
+### Added
+
+- Added typed `workflow_gate` receive and respond helpers so a client can detect a gate frame and answer it from its own memory via a callback (#322).
+- The SDK is now published to npm as part of the public release set.
+
 ## [0.3.1] - 2026-06-05
 
 ### Added

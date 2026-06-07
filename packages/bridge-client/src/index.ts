@@ -431,8 +431,10 @@ export class BridgeClient implements BridgeCommandHelpers {
 	}
 
 	/**
-	 * Answer a `workflow_gate` through the owner-token protected UI response
-	 * endpoint and return the gate resolution envelope.
+	 * Answer a `workflow_gate` by posting to the UI-response endpoint and return
+	 * the gate resolution envelope. Authorization is bearer auth plus the
+	 * `control` scope; `ownerToken` is carried for idempotency/controller
+	 * correlation, not as the gate authorization boundary.
 	 */
 	respondGate(
 		sessionId: string,

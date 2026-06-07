@@ -1,4 +1,4 @@
-import { type ResolvedThinkingLevel, ThinkingLevel } from "@gajae-code/agent-core";
+import { type ResolvedThinkingLevel, ThinkingLevel } from "@gajae-code/agent-core/thinking";
 import { clampThinkingLevelForModel, type Effort, THINKING_EFFORTS } from "@gajae-code/ai/model-thinking";
 import type { Model } from "@gajae-code/ai/types";
 

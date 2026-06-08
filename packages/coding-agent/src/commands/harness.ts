@@ -974,9 +974,27 @@ export default class Harness extends Command {
 			observation: { ...observation, lifecycle: state.lifecycle },
 			retryBudget: budget,
 		});
-		const vanishReceiptId = await writeVanishReceiptForDecision(root, state, observation, decision.classification);
+		// A session persisted as `started` whose owner was never spawned (no lease,
+		// no endpoint, no owner-run evidence) is not a vanish — it simply never had
+		// an owner. Bootstrap a fresh owner instead of deadlocking on the missing
+		// prior endpoint (which `start` without `--detach` never records).
+		const ownerNeverStarted =
+			state.lifecycle === "started" &&
+			!beforeExit.endpointPresent &&
+			!beforeExit.promptAcceptedSeen &&
+			!beforeExit.completedSeen &&
+			beforeExit.lastEventKind === null &&
+			observation.risk !== "deleted-worktree";
+		// Bootstrapping a never-started owner is not a vanish, so it needs no vanish receipt.
+		const vanishReceiptId = ownerNeverStarted
+			? null
+			: await writeVanishReceiptForDecision(root, state, observation, decision.classification);
+		// A never-started owner has no in-flight work to preserve, so bootstrapping it does not
+		// depend on the vanish classifier's `ownerRequired` verdict — that gate exists to protect a
+		// vanished owner's worktree. Without this, a session started in a non-git workspace (git
+		// delta `unknown` → classifier `human-check` with `ownerRequired: false`) would stay stuck.
 		const restoredOwner =
-			decision.ownerRequired && beforeExit.endpointPresent
+			ownerNeverStarted || (decision.ownerRequired && beforeExit.endpointPresent)
 				? await this.#spawnDetachedOwner(root, sessionId, state.handle.workspace)
 				: null;
 		if (restoredOwner?.live) {
@@ -989,7 +1007,7 @@ export default class Harness extends Command {
 				writeJson(
 					buildResponse(state, true, {
 						pending: false,
-						restoredOwner: true,
+						...(ownerNeverStarted ? { bootstrappedOwner: true } : { restoredOwner: true }),
 						decision,
 						observation: { ...observation, lifecycle: state.lifecycle, ownerLive: true },
 						ownerExit: beforeExit,

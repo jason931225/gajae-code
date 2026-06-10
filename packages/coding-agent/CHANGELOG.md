@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-06-10
+
 ### Added
 
 - Added a `busyPromptMode` setting (`steer` | `queue`, default `steer`) so a prompt submitted while the agent is busy can either steer the active turn or be queued to run after it completes, keeping steering and queued-next-turn semantics distinct. Ctrl+Enter still always queues as a follow-up (#434).

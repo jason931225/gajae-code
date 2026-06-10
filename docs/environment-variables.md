@@ -240,7 +240,7 @@ providers:
 
 ### Hermes MCP bridge
 
-`gjc mcp-serve coordinator` exposes a GJC-native outward MCP bridge for Hermes-style coordinators. The bridge is read-only by default and fails closed until roots and mutation classes are explicitly configured.
+`gjc mcp-serve coordinator` exposes a GJC-native outward MCP bridge for Hermes-style coordinators. `gjc mcp-serve hermes` is a compatibility alias for the same bridge. The bridge is read-only by default and fails closed until roots and mutation classes are explicitly configured.
 
 | Variable | Behavior |
 | --- | --- |
@@ -250,7 +250,7 @@ providers:
 | `GJC_COORDINATOR_MCP_STATE_ROOT` | Bridge coordination state root (default `<cwd>/.gjc/state/coordinator-mcp`). |
 | `GJC_COORDINATOR_MCP_PROFILE` | Optional profile namespace for session/question/report state. Missing scope never widens to global session enumeration. |
 | `GJC_COORDINATOR_MCP_REPO` | Optional repo namespace for session/question/report state. Missing scope never widens to global session enumeration. |
-| `GJC_COORDINATOR_MCP_SESSION_COMMAND` | Optional GJC-compatible command used by mutating session startup to launch a detached tmux session. When unset, startup records a bridge session without tmux actuation unless a service adapter is injected. `gjc setup hermes` omits this by default and never hard-codes a provider/model; explicit values are preserved as user intent. |
+| `GJC_COORDINATOR_MCP_SESSION_COMMAND` | GJC-compatible command used by mutating session startup to launch a detached tmux session. `gjc setup hermes` renders this to `gjc --worktree` by default so Hermes-installed configs start real GJC work in a GJC-managed worktree while preserving GJC project/session resume identity. Explicit values are preserved as user intent. When manually omitted, mutating session startup fails closed unless a service adapter is injected. |
 | `GJC_COORDINATOR_MCP_SETUP_MANAGED_BY` | Marker written by `gjc setup hermes` for safe managed config updates. |
 | `GJC_COORDINATOR_MCP_SETUP_SCHEMA_VERSION` | Managed setup schema version written by `gjc setup hermes`. |
 | `GJC_COORDINATOR_MCP_SETUP_SIGNATURE` | Deterministic managed setup signature used to detect safe updates versus unmanaged conflicts. |

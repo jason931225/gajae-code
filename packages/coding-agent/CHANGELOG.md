@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-06-10
+
+### Added
+
+- Added a Hermes MCP bridge and an event-backed coordinator MCP server, exposed via the `gjc coordinator` and `gjc mcp-serve` commands, with coordinator turns backed by durable turn/session state (#401, #479).
+- Surfaced awaited sub-agent live streaming status in the await panel (#475).
+
+### Fixed
+
+- Persisted ralplan role-agent artifacts via the CLI, returning receipt-only output to the caller (#474).
+- Collected the `ask` tool "Other" custom input inline below the option list (#476).
+
 ## [0.4.3] - 2026-06-10
 
 ### Added

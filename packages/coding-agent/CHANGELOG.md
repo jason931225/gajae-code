@@ -6,6 +6,22 @@
 
 - Preserved provider abort root causes in the final TUI abort label, kept replay rendering idempotent, and added a `PI_STREAM_IDLE_TIMEOUT_MS` remediation hint when stream idle watchdogs fire.
 
+## [0.4.4] - 2026-06-10
+
+### Added
+
+- Made coordinator turns event-backed, adding an MCP coordinator server and the `gjc coordinator` / `gjc mcp-serve` commands backed by durable turn/session state (#479).
+- Surfaced awaited sub-agent live streaming status in the await panel (#475).
+
+### Changed
+
+- Refreshed the README brand images (#477).
+
+### Fixed
+
+- Persisted ralplan role-agent artifacts via the CLI, returning receipt-only output to the caller (#474).
+- Collected the `ask` tool "Other" custom input inline below the option list (#476).
+
 ## [0.4.3] - 2026-06-10
 
 ### Added

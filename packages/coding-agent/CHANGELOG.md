@@ -6,8 +6,12 @@
 
 ### Added
 
-- Added a Hermes MCP bridge and an event-backed coordinator MCP server, exposed via the `gjc coordinator` and `gjc mcp-serve` commands, with coordinator turns backed by durable turn/session state (#401, #479).
+- Made coordinator turns event-backed, adding an MCP coordinator server and the `gjc coordinator` / `gjc mcp-serve` commands backed by durable turn/session state (#479).
 - Surfaced awaited sub-agent live streaming status in the await panel (#475).
+
+### Changed
+
+- Refreshed the README brand images (#477).
 
 ### Fixed
 

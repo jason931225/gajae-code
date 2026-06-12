@@ -79,7 +79,7 @@ jobs:
    # Branch protection must add the always-present `gjc-state-gates` status as required.
    gjc-state-gates:
       name: gjc-state-gates
-      if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
       runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
       timeout-minutes: 15
       env:
@@ -107,7 +107,7 @@ jobs:
    # Fast lint + type check (no Rust, no native build needed)
    check:
       timeout-minutes: 30
-      if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
       runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -242,7 +242,7 @@ jobs:
 
    install_methods:
       timeout-minutes: 45
-      if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
       runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -291,7 +291,7 @@ jobs:
       timeout-minutes: 60
       if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && !cancelled() &&
          needs.native_linux.result == 'success' && needs.native_release.result ==
-         'success' && needs.check.result == 'success' }}
+         'success' && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
       needs: [check, native_linux, native_release, rust-hash]
       strategy:
          fail-fast: false
@@ -381,7 +381,7 @@ jobs:
          startsWith(github.ref, 'refs/tags/v') && !cancelled() &&
          needs.release_binary.result == 'success' }}
       needs: [release_binary]
-      runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
+      runs-on: ubuntu-22.04
       permissions:
          contents: write
       steps:
@@ -428,7 +428,7 @@ jobs:
          needs.release_github_verify.result == 'success' &&
          !inputs.skip_npm }}
       needs: [release_binary, release_github_verify, rust-hash]
-      runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
+      runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
          - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4

@@ -36,10 +36,9 @@ describe("issue #490 - SqliteAuthCredentialStore startup lock ordering", () => {
 		const db = new Database(dbPath);
 		const ranSql: string[] = [];
 		const originalRun = db.run.bind(db);
-		db.run = ((sql: string, ...args: unknown[]) => {
+		db.run = ((sql: string) => {
 			ranSql.push(String(sql));
-			// biome-ignore lint/suspicious/noExplicitAny: passthrough spy
-			return (originalRun as any)(sql, ...args);
+			return originalRun(sql);
 		}) as typeof db.run;
 
 		const store = new SqliteAuthCredentialStore(db);

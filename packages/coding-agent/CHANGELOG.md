@@ -2,20 +2,29 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-06-12
+
 ### Added
 
 - Added a dim `(ctrl+s to observe sessions)` discoverability hint under the `subagent` await panel header while any awaited subagent is still running, pointing to the full session observer overlay; the hint shows in both collapsed and expanded states and disappears once no subagent is running.
-- Added a `phase-rollup` receipt family (receipt-of-receipts) to the harness control plane: a hash-sealed rollup that supersedes N child task receipts at a lifecycle boundary, preserving per-child `{id, status, outputUri, outputSha256, receiptSha256, tokens, costTotal, clonedTokens, lowRoi}` pointers plus aggregate ROI totals, with a pure deterministic builder (`buildPhaseRollupReceipt`) and fail-closed semantic validation (duplicate ids, status vocabulary, two-sided outputUri/outputSha256 pairing, and aggregate ROI totals recomputed/reconciled from per-child evidence rather than trusted as self-reported).
+- Added a `phase-rollup` receipt family (receipt-of-receipts) to the harness control plane: a hash-sealed rollup that supersedes N child task receipts at a lifecycle boundary, preserving per-child `{id, status, outputUri, outputSha256, receiptSha256, tokens, costTotal, clonedTokens, lowRoi}` pointers plus aggregate ROI totals, with a pure deterministic builder (`buildPhaseRollupReceipt`) and fail-closed semantic validation.
 - Added a pure receipt-ingestion fast path (`ingestReceipts`): fail-closed batch validation + lifecycle transition computation via the existing state machine, plus a deterministic model-facing digest hard-capped at 280 chars — groundwork for LLM-free receipt routing.
-- Added an advisory spawn-ROI reconciliation module (`reconcileSpawnRoi`): compares the spawn-plan `maxInlineTokens` promise against each child receipt's actual inline-token proxy and surfaces a deterministic `SpawnRoiReconciliation` (per-child overage, lowRoi ids, advisory flags) as optional `TaskToolDetails.roiReconciliation`; advisory-only, never changes task success semantics.
-- Added a deterministic fork-context mode advisory (`adviseForkContextMode`): recommends `none`/`receipt`/`last-turn` from assignment-text dependence signals with parent-capped per-mode cloned-token estimates, never overrides an explicit caller mode, and is surfaced receipt-visible-only as `TaskResultReceipt.forkContextAdvisory` (no change to actual mode selection).
+- Added advisory spawn-ROI reconciliation (`reconcileSpawnRoi`) and deterministic fork-context mode advice (`adviseForkContextMode`) surfaced in task receipts without changing task success semantics.
+- Added the Grok Build provider contract design document.
+
+### Changed
+
+- Reduced compiled CLI startup and native bundle pressure with default-small grammar loading, tokenizer tiering, and compiled fast-help paths.
+- Preserved dev/main release metadata and changelog consistency for the 0.4.5 lockstep release.
 
 ### Fixed
+
 - Kept the unified `goal` tool registered and active by default whenever `goal.enabled` is true, including explicit tool subsets and `gjc ultragoal create-goals` arming flows.
-
-- Tool-output pruning no longer rewrites already-sent provider-facing history mid prompt-cache epoch: `#checkCompaction` now invokes pruning only when un-pruned context already crosses the compaction threshold (a sanctioned maintenance boundary), preserving the prefix-stability invariant. Also fixed a latent no-op where pruning mutated materialized branch copies and never persisted; `SessionManager.applyEntryMessageUpdates` now writes pruned messages back into the canonical store.
-
+- Restored no-argument `gjc` interactive startup instead of launching help.
+- Rendered and executed Cursor-native tool calls, including detached/native handler paths and empty-pattern composer grep guards.
+- Tool-output pruning no longer rewrites already-sent provider-facing history mid prompt-cache epoch and now persists pruned message updates back into canonical session storage.
 - Preserved provider abort root causes in the final TUI abort label, kept replay rendering idempotent, and added a `PI_STREAM_IDLE_TIMEOUT_MS` remediation hint when stream idle watchdogs fire.
+- Hardened harness owner recovery/finalize paths and submit-prompt-file handling.
 
 ## [0.4.4] - 2026-06-10
 

@@ -66,10 +66,6 @@ async function installRuntimeGlobals(): Promise<void> {
 	procmgr.scrubProcessEnv();
 }
 
-async function loadLaunchCommand() {
-	return import("./commands/launch").then(m => m.default);
-}
-
 class RootHelpCommand extends Command {
 	static description = "Red-claw AI coding assistant";
 	static hidden = true;

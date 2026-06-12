@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-06-12
+
+- Version aligned with the 0.4.5 monorepo release; no functional changes in this package.
+
 ## [0.4.4] - 2026-06-10
 
 - Version aligned with the 0.4.4 monorepo release; no functional changes in this package.

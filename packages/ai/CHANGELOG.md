@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-06-12
+
+### Changed
+
+- Bumped the spoofed Gemini CLI User-Agent version to 0.46.0 to track the upstream release.
+
 ### Fixed
 
 - Fixed direct Anthropic requests for Claude Fable/Mythos-style models that support tools but reject forced tool use by omitting forced `tool_choice` while preserving `auto`/`none` choices.
+- Preserved catalog transport metadata for opencode-go `qwen3.7-max` model resolution.
+- Set SQLite auth-store `busy_timeout` before enabling WAL so initialization is reliable under contention.
+- Resolved provider credentials from inherited or GJC-owned environment sources instead of trusting the caller project's `.env` overlays.
+- Rendered and executed Cursor-native tool calls without dropping provider-specific call details.
 
 ## [0.4.4] - 2026-06-10
 

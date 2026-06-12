@@ -180,6 +180,25 @@ export function $inheritedEnv(name: string): string | undefined {
 	return resolveFileEnvValue(inheritedEnv, name);
 }
 
+function resolveLiveCredentialEnvValue(name: string): string | undefined {
+	if (!isSafeEnvName(name)) return undefined;
+	const value = Bun.env[name];
+	if (value === undefined || !isSafeEnvValue(value)) return undefined;
+	const trimmed = value.trim();
+	if (trimmed.length === 0) return undefined;
+
+	const projectValue = resolveFileEnvValue(projectEnv, name);
+	if (
+		projectValue !== undefined &&
+		projectValue === trimmed &&
+		resolveFileEnvValue(inheritedEnv, name) === undefined
+	) {
+		return undefined;
+	}
+
+	return trimmed;
+}
+
 for (const file of [projectEnv, agentEnv, piEnv, homeEnv, homeShellEnv]) {
 	for (const key in file) {
 		if (!Bun.env[key]) {
@@ -223,6 +242,7 @@ export function $pickenv(...keys: string[]): string | undefined {
  */
 export function $credentialEnv(name: string): string | undefined {
 	return (
+		resolveLiveCredentialEnvValue(name) ??
 		$inheritedEnv(name) ??
 		resolveFileEnvValue(agentEnv, name) ??
 		resolveFileEnvValue(piEnv, name) ??

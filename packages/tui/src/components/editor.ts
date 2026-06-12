@@ -44,7 +44,6 @@ function insertTextNfcAt(line: string, cursorCol: number, text: string): { line:
 
 const segmenter = getSegmenter();
 
-
 /**
  * Represents a chunk of text for word-wrap layout.
  * Tracks both the text content and its position in the original line.
@@ -64,7 +63,6 @@ interface CachedWrappedLine extends WrappedLine {
 	lineRef: string;
 	contentWidth: number;
 }
-
 
 function wordWrapAsciiLine(line: string, maxWidth: number): TextChunk[] {
 	if (line.length <= maxWidth) {
@@ -1386,7 +1384,10 @@ export class Editor implements Component, Focusable {
 		if (cached?.lineRef === line && cached.contentWidth === contentWidth) return cached;
 
 		const width = isPrintableAscii(line) ? line.length : visibleWidth(line);
-		const chunks = width <= contentWidth ? [{ text: line, startIndex: 0, endIndex: line.length }] : wordWrapLine(line, contentWidth);
+		const chunks =
+			width <= contentWidth
+				? [{ text: line, startIndex: 0, endIndex: line.length }]
+				: wordWrapLine(line, contentWidth);
 		const wrapped = { lineRef: line, contentWidth, width, chunks };
 		this.#wrappedLineCache[lineIndex] = wrapped;
 		return wrapped;
@@ -2435,7 +2436,6 @@ export class Editor implements Component, Focusable {
 		}
 
 		if (deltaCol !== 0) {
-
 			if (deltaCol > 0) {
 				// Moving right - move by one grapheme (handles emojis, combining characters, etc.)
 				if (this.#state.cursorCol < currentLine.length) {

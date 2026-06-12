@@ -1118,7 +1118,9 @@ export class TUI extends Container {
 	}
 
 	#lineFitsWidth(normalizedLine: string, width: number): boolean {
-		return isPrintableAscii(normalizedLine) && normalizedLine.length <= width ? true : visibleWidth(normalizedLine) <= width;
+		return isPrintableAscii(normalizedLine) && normalizedLine.length <= width
+			? true
+			: visibleWidth(normalizedLine) <= width;
 	}
 
 	#truncateNormalizedLine(normalizedLine: string, width: number): string {
@@ -1147,7 +1149,12 @@ export class TUI extends Container {
 		}
 	}
 
-	getLineRenderCacheStats(): { normalizationSize: number; truncationSize: number; normalizationLimit: number; truncationLimit: number } {
+	getLineRenderCacheStats(): {
+		normalizationSize: number;
+		truncationSize: number;
+		normalizationLimit: number;
+		truncationLimit: number;
+	} {
 		return {
 			normalizationSize: this.#lineNormalizationCache.size,
 			truncationSize: this.#lineTruncationCache.size,
@@ -1161,7 +1168,9 @@ export class TUI extends Container {
 			const line = lines[i];
 			if (TERMINAL.isImageLine(line)) continue;
 			const { normalized, terminated } = this.#normalizeLineForRender(line);
-			lines[i] = this.#lineFitsWidth(normalized, width) ? terminated : this.#truncateNormalizedLine(normalized, width);
+			lines[i] = this.#lineFitsWidth(normalized, width)
+				? terminated
+				: this.#truncateNormalizedLine(normalized, width);
 		}
 		this.#trimLineCachesForRender(lines.length);
 		return lines;

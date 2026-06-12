@@ -1,3 +1,5 @@
+// MUST be first: pins terminal-capability env before @gajae-code/tui evaluates.
+import { GOLDEN_BASELINE_ENV } from "./render-goldens-env";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -54,7 +56,6 @@ interface GoldenFixture {
 const encoder = new TextEncoder();
 const BASE64_ONE_PIXEL_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
-
 
 class MutableLinesComponent implements Component {
 	#lines: string[];
@@ -307,9 +308,9 @@ export async function captureRenderGolden(fixture: GoldenFixture): Promise<Rende
 	let previousImageProtocol: ImageProtocol | null | undefined;
 	let tui: TUI | null = null;
 	try {
-		for (const key of Object.keys(fixture.env ?? {})) {
+		const pinnedEnv: Record<string, string | undefined> = { ...GOLDEN_BASELINE_ENV, ...(fixture.env ?? {}) };
+		for (const [key, value] of Object.entries(pinnedEnv)) {
 			previousEnv.set(key, Bun.env[key]);
-			const value = fixture.env?.[key];
 			if (value === undefined) delete Bun.env[key];
 			else Bun.env[key] = value;
 		}

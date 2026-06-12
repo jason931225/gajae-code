@@ -283,7 +283,7 @@ describe("OutputSink", () => {
 	test("artifact mirror keeps raw ANSI controls and sixel bytes while metadata stays stable", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "raw-output.log");
-		const sixel = "\x1bPq\"1;1;1;1#0;2;0;0;0#0!4~\x1b\\";
+		const sixel = '\x1bPq"1;1;1;1#0;2;0;0;0#0!4~\x1b\\';
 		const input = `head\n\x1b[31mred\x1b[0m\x00\x07${sixel}\n${"M".repeat(200)}\ntail`;
 		const sink = new OutputSink({
 			artifactPath,
@@ -388,7 +388,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "late-open.log");
 		const sink = new OutputSink({ artifactPath, artifactId: "late-open", spillThreshold: 10, headBytes: 4 });
-		const input = "HEAD-" + "m".repeat(64) + "-TAIL";
+		const input = `HEAD-${"m".repeat(64)}-TAIL`;
 
 		for (let offset = 0; offset < input.length; offset += 7) sink.push(input.slice(offset, offset + 7));
 		await sink.dump();
@@ -407,12 +407,12 @@ describe("OutputSink", () => {
 				const file = originalFile(filePath, ...(args as []));
 				if (String(filePath) !== artifactPath) return file;
 				return new Proxy(file, {
-					get(target, prop, receiver) {
+					get(target, prop, _receiver) {
 						if (prop !== "writer") return Reflect.get(target, prop, target);
 						return () => {
 							const sink = target.writer();
 							return new Proxy(sink, {
-								get(sinkTarget, sinkProp, sinkReceiver) {
+								get(sinkTarget, sinkProp, _sinkReceiver) {
 									if (sinkProp === "end") return sinkTarget.end.bind(sinkTarget);
 									if (sinkProp !== "write") return Reflect.get(sinkTarget, sinkProp, sinkTarget);
 									return (chunk: string | Uint8Array) => {
@@ -445,10 +445,11 @@ describe("OutputSink", () => {
 	test("artifact abort writes a clean raw prefix", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "abort.log");
-		const input = "prefix-" + "x".repeat(128) + "-suffix";
+		const input = `prefix-${"x".repeat(128)}-suffix`;
 		const sink = new OutputSink({ artifactPath, artifactId: "abort", spillThreshold: 12 });
 
-		for (let offset = 0; offset < 73; offset += 11) sink.push(input.slice(offset, Math.min(input.length, offset + 11)));
+		for (let offset = 0; offset < 73; offset += 11)
+			sink.push(input.slice(offset, Math.min(input.length, offset + 11)));
 		await sink.dump();
 
 		const artifactText = await Bun.file(artifactPath).text();
@@ -684,7 +685,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 	});
 
 	test("middle-elided single overlong line matches HEAD column-cap oracle", async () => {
-		const input = "0123456789" + "x".repeat(80) + "TAIL";
+		const input = `0123456789${"x".repeat(80)}TAIL`;
 		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 12, headBytes: 10 });
 		await sink.push(input);
 		const dumped = await sink.dump();

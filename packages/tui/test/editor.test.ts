@@ -430,7 +430,9 @@ describe("Editor component", () => {
 					return { lines, cursorLine, cursorCol };
 				},
 				trySyncInlineReplace(textBeforeCursor) {
-					return textBeforeCursor.endsWith(":watch:") ? { replaceLen: ":watch:".length, insert: "⌚".repeat(8) } : null;
+					return textBeforeCursor.endsWith(":watch:")
+						? { replaceLen: ":watch:".length, insert: "⌚".repeat(8) }
+						: null;
 				},
 			});
 

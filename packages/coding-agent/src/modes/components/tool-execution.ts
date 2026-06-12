@@ -51,7 +51,6 @@ function cloneToolArgs<T>(args: T): T {
 	}
 }
 
-
 /**
  * Drop trailing removal/hunk-header lines that appear in a streaming diff
  * before the matching `+added` lines have arrived. Without this, a partial
@@ -730,7 +729,11 @@ export class ToolExecutionComponent extends Container {
 		const content = this.#result.content;
 		const terminalImageProtocol = TERMINAL.imageProtocol;
 		const cached = this.#textOutputCache;
-		if (cached?.content === content && cached.showImages === this.#showImages && cached.terminalImageProtocol === terminalImageProtocol) {
+		if (
+			cached?.content === content &&
+			cached.showImages === this.#showImages &&
+			cached.terminalImageProtocol === terminalImageProtocol
+		) {
 			return cached.output;
 		}
 

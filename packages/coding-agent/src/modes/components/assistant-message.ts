@@ -1,5 +1,5 @@
 import type { AssistantMessage, ImageContent, Usage } from "@gajae-code/ai";
-import { Container, Image, ImageProtocol, Markdown, Spacer, TERMINAL, Text } from "@gajae-code/tui";
+import { type Component, Container, Image, ImageProtocol, Markdown, Spacer, TERMINAL, Text } from "@gajae-code/tui";
 import { formatNumber } from "@gajae-code/utils";
 import { settings } from "../../config/settings";
 import { renderDeepInterviewAssistantText } from "../../deep-interview/render-middleware";
@@ -18,7 +18,7 @@ export class AssistantMessageComponent extends Container {
 	#convertedKittyImages = new Map<string, ImageContent>();
 	#kittyConversionsInFlight = new Set<string>();
 	#responseHeader = new Text(theme.bold(theme.fg("statusLineModel", "gajae")), 1, 0);
-	#contentBlocksCache = new WeakMap<object, { source: string; component: Text | Markdown }>();
+	#contentBlocksCache = new WeakMap<object, { source: string; component: Component }>();
 
 	constructor(
 		message?: AssistantMessage,
@@ -107,11 +107,12 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	#renderTextBlock(content: { text: string }): Text | Markdown {
+	#renderTextBlock(content: { text: string }): Component {
 		const cached = this.#contentBlocksCache.get(content);
 		if (cached?.source === content.text) return cached.component;
 		const trimmed = content.text.trim();
-		const component = renderDeepInterviewAssistantText(trimmed, theme) ?? new Markdown(trimmed, 1, 0, getMarkdownTheme());
+		const component =
+			renderDeepInterviewAssistantText(trimmed, theme) ?? new Markdown(trimmed, 1, 0, getMarkdownTheme());
 		this.#contentBlocksCache.set(content, { source: content.text, component });
 		return component;
 	}

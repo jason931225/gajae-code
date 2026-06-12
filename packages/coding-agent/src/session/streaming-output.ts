@@ -4,7 +4,6 @@ import { sanitizeText } from "@gajae-code/utils";
 import { formatBytes } from "../tools/render-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
 
-
 function sanitizeOutputChunk(rawChunk: string): string {
 	return sanitizeWithOptionalSixelPassthrough(rawChunk, sanitizeText);
 }
@@ -18,7 +17,6 @@ export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
 export const DEFAULT_MAX_COLUMN = 1024; // Max chars per grep match line
 
 const NL = "\n";
-
 
 const ELLIPSIS = "…";
 
@@ -143,7 +141,6 @@ function countNewlines(text: string): number {
 	}
 	return count;
 }
-
 
 /** Zero-copy view of a Uint8Array as a Buffer (copies only if already a Buffer). */
 function asBuffer(data: Uint8Array): Buffer {
@@ -690,8 +687,6 @@ export class OutputSink {
 	#pendingFileWriteBytes = 0;
 	#finalized = false;
 
-
-
 	#fileReady = false;
 
 	readonly #artifactPath?: string;
@@ -747,7 +742,6 @@ export class OutputSink {
 		this.#headBytes += bytes;
 	}
 
-
 	#trimTailTo(maxBytes: number): void {
 		if (this.#bufferBytes <= maxBytes) return;
 		const { text, bytes } = truncateTailBytes(this.#buffer, maxBytes);
@@ -791,9 +785,6 @@ export class OutputSink {
 		// open, keep an independent raw replay prefix because retained head/tail
 		// windows are trimmed and cannot reconstruct byte-correct artifacts.
 		if (this.#artifactPath && this.#maxColumns === 0) this.#enqueueFileWrite(rawChunk, rawBytes);
-
-
-
 
 		if (rawBytes === 0) return;
 
@@ -885,8 +876,6 @@ export class OutputSink {
 		return { text, bytes: Buffer.byteLength(text, "utf-8"), lines: text.length > 0 ? countNewlines(text) : 0 };
 	}
 
-
-
 	#willOverflow(dataBytes: number): boolean {
 		// Triggers file mirroring as soon as the next chunk would push us over
 		// the tail budget (head retention does not change spill-to-artifact).
@@ -923,7 +912,6 @@ export class OutputSink {
 		else this.#pendingFileWrites.push(chunk);
 
 		this.#pendingFileWriteBytes += bytes;
-
 	}
 
 	#enqueueFileWrite(chunk: string, bytes: number): void {
@@ -966,7 +954,6 @@ export class OutputSink {
 			this.#pendingFileWrites = undefined;
 			this.#pendingFileWriteBytes = 0;
 
-
 			return true;
 		} catch {
 			try {
@@ -981,11 +968,8 @@ export class OutputSink {
 				? this.#pendingFileWrites.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0)
 				: 0;
 			return false;
-
-
 		}
 	}
-
 
 	createInput(): WritableStream<Uint8Array | string> {
 		const dec = new TextDecoder("utf-8", { ignoreBOM: true });

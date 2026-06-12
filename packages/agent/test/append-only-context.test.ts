@@ -29,7 +29,7 @@ function makeTool(name: string, description?: string, parameters?: Record<string
 const BUILD_OPTS = { intentTracing: false } as const;
 
 function expectContextSnapshot(
-	result: { systemPrompt: string[]; tools?: Tool[] },
+	result: { systemPrompt?: string[]; tools?: Tool[] },
 	expectedPrompt: string,
 	expectedTool: string,
 ): void {
@@ -783,9 +783,9 @@ describe("message sync", () => {
 			mutate(changedMessage);
 			mgr.syncMessages([changedMessage] as unknown as Message[]);
 
-			expect((mgr.build(makeContext(), BUILD_OPTS).messages[0] as Record<string, unknown>)[field]).toEqual(
-				changedMessage[field],
-			);
+			expect(
+				(mgr.build(makeContext(), BUILD_OPTS).messages[0] as unknown as Record<string, unknown>)[field],
+			).toEqual(changedMessage[field]);
 		}
 	});
 

@@ -574,7 +574,6 @@ export function buildSessionContext(
 	}
 	path.reverse();
 
-
 	// Extract settings and find compaction
 	let thinkingLevel: string | undefined = "off";
 	let serviceTier: ServiceTier | undefined;

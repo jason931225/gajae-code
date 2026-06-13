@@ -1,5 +1,6 @@
 name: "Gajae-Code"
 aliases: ["GJC", "gajae-code", "gjc"]
+romanizations: []
 category: "coding-agent harness and review workflow runtime"
 description: "Gajae-Code provides the harness/session path for coding, review, PR verdicts, receipts, and operator-visible AI development workflows."
 competitors: ["Claude Code", "Codex CLI", "OpenCode", "Aider", "Cursor"]

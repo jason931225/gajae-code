@@ -209,6 +209,40 @@ if ($credentialEnv("ANTHROPIC_API_KEY") !== undefined) {
 			dir,
 		);
 	});
+
+	it("resolves credential env values set after module import without trusting project dotenv", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-live-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		fs.writeFileSync(path.join(dir, ".env"), "LIVE_PROVIDER_KEY=project-live\n");
+
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import { $credentialEnv } from ${JSON.stringify(envSourceUrl)};
+
+if ($credentialEnv("LIVE_PROVIDER_KEY") !== undefined) {
+	throw new Error("project dotenv should not be used before live override");
+}
+
+Bun.env.LIVE_PROVIDER_KEY = "runtime-live";
+if ($credentialEnv("LIVE_PROVIDER_KEY") !== "runtime-live") {
+	throw new Error("runtime env override should be accepted as credential env");
+}
+
+Bun.env.LIVE_PROVIDER_KEY = "project-live";
+if ($credentialEnv("LIVE_PROVIDER_KEY") !== undefined) {
+	throw new Error("runtime value indistinguishable from project dotenv should remain excluded");
+}
+`,
+			{
+				HOME: home,
+				GJC_CODING_AGENT_DIR: agentDir,
+			},
+			dir,
+		);
+	});
 });
 
 describe("$pickCredentialEnv", () => {

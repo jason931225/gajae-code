@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Expanded coordinator MCP coordination status into a canonical polling snapshot for sessions, session states, turns, questions, reports, and bounded event summaries, and documented that Hermes/coordinator consumption is polling/await rather than push subscription.
+
 ### Fixed
 
 - Fixed forced `tool_choice` 400s ("tool_choice forces tool use is not compatible with this model") looping after `ast_edit` previews: named queue directives (resolve protocol, eager `todo_write` enforcement, subagent `yield` reminders) now enqueue only when the model supports exact named forcing; otherwise they degrade silently to the existing steer reminder without a forced `tool_choice`, and a runtime-discovered incapability drops the in-flight directive instead of requeueing it.
@@ -65,6 +69,7 @@
 - Rendered and executed Cursor-native tool calls, including detached/native handler paths and empty-pattern composer grep guards.
 - Tool-output pruning no longer rewrites already-sent provider-facing history mid prompt-cache epoch and now persists pruned message updates back into canonical session storage.
 - Preserved provider abort root causes in the final TUI abort label, kept replay rendering idempotent, and added a `PI_STREAM_IDLE_TIMEOUT_MS` remediation hint when stream idle watchdogs fire.
+- Honored the documented `GJC_RPC_EMIT_TITLE` flag for RPC title events while preserving `PI_RPC_EMIT_TITLE` as a legacy alias.
 - Hardened harness owner recovery/finalize paths and submit-prompt-file handling.
 
 ## [0.4.4] - 2026-06-10

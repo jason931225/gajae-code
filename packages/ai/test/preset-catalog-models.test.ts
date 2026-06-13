@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Effort } from "../src/model-thinking";
 import { getBundledModel } from "../src/models";
 
 describe("preset catalog model entries", () => {
@@ -10,7 +11,7 @@ describe("preset catalog model entries", () => {
 		expect(model.name).toBe("Kimi K2.7 Code");
 		expect(model.reasoning).toBe(true);
 		expect(model.input).toContain("text");
-		expect(model.thinking).toEqual({ mode: "effort", minLevel: "minimal", maxLevel: "high" });
+		expect(model.thinking).toEqual({ mode: "effort", minLevel: Effort.Minimal, maxLevel: Effort.High });
 	});
 
 	test("bundles minimax-code/minimax-v3", () => {
@@ -22,6 +23,6 @@ describe("preset catalog model entries", () => {
 		expect(model.reasoning).toBe(true);
 		expect(model.contextWindow).toBe(512_000);
 		expect(model.maxTokens).toBe(128_000);
-		expect(model.thinking).toEqual({ mode: "effort", minLevel: "minimal", maxLevel: "high" });
+		expect(model.thinking).toEqual({ mode: "effort", minLevel: Effort.Minimal, maxLevel: Effort.High });
 	});
 });

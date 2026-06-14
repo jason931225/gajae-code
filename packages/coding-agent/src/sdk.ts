@@ -115,6 +115,7 @@ import {
 	FindTool,
 	getSearchTools,
 	HIDDEN_TOOLS,
+	isConfigurableSearchProviderId,
 	isSearchProviderPreference,
 	type LspStartupServerInfo,
 	loadSshTool,
@@ -124,6 +125,7 @@ import {
 	SearchTool,
 	setPreferredImageProvider,
 	setPreferredSearchProvider,
+	setSearchFallbackProviders,
 	type Tool,
 	type ToolSession,
 	WebSearchTool,
@@ -865,6 +867,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const webSearchProvider = settings.get("providers.webSearch");
 	if (typeof webSearchProvider === "string" && isSearchProviderPreference(webSearchProvider)) {
 		setPreferredSearchProvider(webSearchProvider);
+	}
+	const webSearchFallback = settings.get("web_search.fallback");
+	if (Array.isArray(webSearchFallback)) {
+		setSearchFallbackProviders(
+			webSearchFallback.filter(value => typeof value === "string" && isConfigurableSearchProviderId(value)),
+		);
 	}
 
 	const imageProvider = settings.get("providers.image");

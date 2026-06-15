@@ -396,6 +396,57 @@ export async function writeJsonAtomic(
 	return filePath;
 }
 
+async function readPersistedPhase(filePath: string): Promise<string | undefined> {
+	try {
+		const existing = await readJsonIfPresent(filePath);
+		if (!isPlainObject(existing)) return undefined;
+		// Only an *active* prior envelope is a transition source. A cleared / handed-off
+		// envelope (`active: false`, terminal phase such as `complete` / `handoff`) is outside
+		// active workflow progression, so reactivation from it (e.g. a fresh kickoff) must not
+		// be reported as an invalid transition.
+		if (existing.active !== true) return undefined;
+		const phase = existing.current_phase;
+		return typeof phase === "string" ? phase : undefined;
+	} catch {
+		// Best-effort diagnostic read: a corrupt/unreadable prior envelope simply yields no
+		// `from` phase, so the transition invariant degrades to a no-op rather than failing
+		// the sanctioned write it is observing.
+		return undefined;
+	}
+}
+
+async function recordInvalidWorkflowTransition(args: {
+	filePath: string;
+	skill: CanonicalGjcWorkflowSkill;
+	fromPhase: string;
+	toPhase: string;
+	options?: StateWriterOptions;
+}): Promise<void> {
+	const { filePath, skill, fromPhase, toPhase, options } = args;
+	// Audit-only diagnostic: a successful sanctioned write must NOT emit to stderr — callers
+	// may treat any stderr output as failure or parse stdout/stderr as machine output. The
+	// `invalid_transition_detected` audit entry is the durable, non-intrusive evidence that an
+	// internal write skipped a manifest edge.
+	const cwd = path.resolve(options?.audit?.cwd ?? options?.cwd ?? process.cwd());
+	try {
+		await appendAuditEntry(cwd, {
+			ts: new Date().toISOString(),
+			skill,
+			category: "state",
+			verb: "invalid_transition_detected",
+			owner: options?.audit?.owner ?? "gjc-runtime",
+			mutation_id: options?.audit?.mutationId ?? `${skill}:invalid-transition:${new Date().toISOString()}`,
+			from_phase: fromPhase,
+			to_phase: toPhase,
+			forced: false,
+			paths: [filePath],
+		});
+	} catch {
+		// Audit logging is best-effort diagnostics; never fail a sanctioned write because the
+		// audit append failed (e.g. cwd is not a writable project root).
+	}
+}
+
 export async function writeWorkflowEnvelopeAtomic(
 	targetPath: string,
 	value: unknown,
@@ -411,6 +462,50 @@ export async function writeWorkflowEnvelopeAtomic(
 				.map(issue => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
 				.join("; ")}`,
 		);
+	}
+	// #658: internal runtime writers (ralplan/ultragoal/deep-interview/team) persist
+	// envelopes directly, bypassing the `gjc state` CLI transition gate (`isValidTransition`,
+	// historically the sole call site in state-runtime.ts). Re-assert that gate on every
+	// sanctioned envelope write so internal writes cannot persist invalid state-machine phase
+	// transitions silently. Forced writes (`gjc state ... --force`, reconcile repairs) carry
+	// `audit.forced` and bypass, mirroring the CLI's `use --force to bypass`.
+	//
+	// The gate governs ACTIVE workflow progression only. Deactivation/teardown writes
+	// (`active: false`, e.g. `gjc state clear`, which persists the universal `complete`
+	// sentinel that is not a per-skill manifest state) leave the transition graph and are
+	// intentionally exempt.
+	if (options?.audit?.forced !== true && parsed.data.active === true) {
+		const toPhase = parsed.data.current_phase.trim();
+		if (toPhase) {
+			// Lazy import: workflow-manifest dereferences CANONICAL_GJC_WORKFLOW_SKILLS at
+			// module load, and active-state -> state-writer -> workflow-manifest -> active-state
+			// is a load-time cycle. Importing at call time (after init) avoids the TDZ.
+			const { isKnownWorkflowState, isValidTransition } = await import("./workflow-manifest");
+			const skill = parsed.data.skill;
+			// Structural invariant (hard): a `current_phase` absent from the skill's manifest is
+			// never a legitimate internal write, matching the CLI/reconcile unknown-phase gate.
+			if (!isKnownWorkflowState(skill, toPhase)) {
+				throw new Error(
+					`Refusing to write unknown ${skill} phase "${toPhase}" to ${filePath}: not a known ${skill} manifest state (forced writes bypass via audit.forced)`,
+				);
+			}
+			// Transition invariant (#658, diagnostic-only safety net): resolve the prior phase
+			// (caller-supplied `audit.fromPhase`, else the active persisted envelope on disk) and
+			// flag edges the manifest does not define. Intentionally NON-blocking and audit-only
+			// — the CLI path already hard-fails invalid edges before reaching here, and legitimate
+			// internal repairs / ralplan short-mode stage skips move between valid states without a
+			// direct manifest edge. It records an `invalid_transition_detected` audit entry (no
+			// stderr) so such transitions are non-silent without breaking those flows.
+			const fromPhase = (options?.audit?.fromPhase ?? (await readPersistedPhase(filePath)))?.trim();
+			if (
+				fromPhase &&
+				fromPhase !== toPhase &&
+				isKnownWorkflowState(skill, fromPhase) &&
+				!isValidTransition(skill, fromPhase, toPhase)
+			) {
+				await recordInvalidWorkflowTransition({ filePath, skill, fromPhase, toPhase, options });
+			}
+		}
 	}
 	await atomicWrite(filePath, jsonText(stamped));
 	await maybeAudit(filePath, options);

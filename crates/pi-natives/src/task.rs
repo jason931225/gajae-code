@@ -27,8 +27,10 @@
 //! }
 //! ```
 
-use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::{
+	future::Future,
+	panic::{AssertUnwindSafe, catch_unwind},
+};
 
 use napi::{Env, Error, Result, Task, bindgen_prelude::*};
 use pi_shell::cancel as core_cancel;
@@ -94,19 +96,15 @@ impl CancelToken {
 			let aborted = object
 				.get_named_property::<bool>("aborted")
 				.unwrap_or(false);
-			match AbortSignal::from_unknown(signal) {
-				Ok(signal) => {
-					let abort_token = result.emplace_abort_token();
-					if aborted {
-						abort_token.abort(AbortReason::Signal);
-					} else {
-						signal.on_abort(move || abort_token.abort(AbortReason::Signal));
-					}
-				},
-				Err(_) => {
-					let abort_token = result.emplace_abort_token();
-					abort_token.abort(AbortReason::Unknown);
-				},
+			let abort_token = result.emplace_abort_token();
+			if let Ok(signal) = AbortSignal::from_unknown(signal) {
+				if aborted {
+					abort_token.abort(AbortReason::Signal);
+				} else {
+					signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+				}
+			} else {
+				abort_token.abort(AbortReason::Unknown);
 			}
 		}
 		result
@@ -171,9 +169,9 @@ pub struct Blocking<T>
 where
 	T: Send + 'static,
 {
-	tag: &'static str,
+	tag:          &'static str,
 	cancel_token: CancelToken,
-	work: Option<Box<dyn FnOnce(CancelToken) -> Result<T> + Send>>,
+	work:         Option<Box<dyn FnOnce(CancelToken) -> Result<T> + Send>>,
 }
 
 impl<T> Task for Blocking<T>
@@ -305,9 +303,9 @@ mod tests {
 	#[test]
 	fn blocking_compute_catches_non_string_panic_as_error() {
 		let mut task = Blocking {
-			tag: "test_non_string_panic",
+			tag:          "test_non_string_panic",
 			cancel_token: CancelToken::default(),
-			work: Some(Box::new(|_| -> Result<String> { std::panic::panic_any(42) })),
+			work:         Some(Box::new(|_| -> Result<String> { std::panic::panic_any(42) })),
 		};
 
 		let result = task.compute();
@@ -328,9 +326,9 @@ mod tests {
 	#[test]
 	fn blocking_compute_catches_panic_as_error() {
 		let mut task = Blocking {
-			tag: "test_panic",
+			tag:          "test_panic",
 			cancel_token: CancelToken::default(),
-			work: Some(Box::new(|_| -> Result<String> { panic!("native boom") })),
+			work:         Some(Box::new(|_| -> Result<String> { panic!("native boom") })),
 		};
 
 		let result = task.compute();
@@ -346,9 +344,11 @@ mod tests {
 	#[test]
 	fn blocking_compute_catches_string_panic_payload_as_error() {
 		let mut task = Blocking {
-			tag: "test_string_panic",
+			tag:          "test_string_panic",
 			cancel_token: CancelToken::default(),
-			work: Some(Box::new(|_| -> Result<String> { std::panic::panic_any(String::from("owned native boom")) })),
+			work:         Some(Box::new(|_| -> Result<String> {
+				std::panic::panic_any(String::from("owned native boom"))
+			})),
 		};
 
 		let result = task.compute();
@@ -408,7 +408,10 @@ mod tests {
 		let result = task.compute();
 
 		let err = result.expect_err("heartbeat should observe mid-work cancellation");
-		assert!(work_started.load(Ordering::SeqCst), "work closure should start before mid-work cancellation");
+		assert!(
+			work_started.load(Ordering::SeqCst),
+			"work closure should start before mid-work cancellation"
+		);
 		assert!(
 			err.reason.contains("Aborted: User"),
 			"heartbeat cancellation reason should be preserved, got: {}",

@@ -159,6 +159,10 @@ export function spawnOwnedProcess(cmd: string[], opts: SpawnOwnedOptions = {}): 
 	let disposed = false;
 	let disposePromise: Promise<void> | undefined;
 	let deregistered = false;
+	// Terminal once teardown/reconciliation has confirmed the group is gone. A
+	// late dispose() must then be a true no-op and never re-probe a pgid the OS
+	// may have recycled into an unrelated group.
+	let terminated = false;
 	let onAbort: (() => void) | undefined;
 
 	const removeAbort = (): void => {
@@ -171,6 +175,7 @@ export function spawnOwnedProcess(cmd: string[], opts: SpawnOwnedOptions = {}): 
 	const deregister = (): void => {
 		if (deregistered) return;
 		deregistered = true;
+		terminated = true;
 		liveOwners.delete(owner);
 		removeAbort();
 	};
@@ -228,6 +233,13 @@ export function spawnOwnedProcess(cmd: string[], opts: SpawnOwnedOptions = {}): 
 			}
 		},
 		dispose(): Promise<void> {
+			// Already terminal (e.g. clean drain reconciled and deregistered):
+			// never re-probe the pgid; treat dispose as a settled no-op.
+			if (terminated) {
+				disposed = true;
+				if (!disposePromise) disposePromise = Promise.resolve();
+				return disposePromise;
+			}
 			if (disposePromise) return disposePromise;
 			disposed = true;
 			removeAbort();

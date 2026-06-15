@@ -191,6 +191,50 @@ describe("process-lifecycle adversarial owned-process invariants", () => {
 			}
 		},
 	);
+	test.skipIf(!isPosix)(
+		"late dispose after a clean drain is a no-op and never re-signals a recycled pgid",
+		async () => {
+			const before = liveOwnedProcessCount();
+			// Root exits cleanly with no backgrounded descendants, so the group
+			// drains within ROOT_EXIT_DRAIN_MS and reconciliation deregisters it.
+			const owner = spawnOwnedProcess(["sh", "-c", "exit 0"], {
+				name: "redteam-late-dispose-recycled-pgid",
+			});
+			const pgid = owner.pid as number;
+			expect(pgid).toBeGreaterThan(0);
+
+			const exit = await owner.awaitExit({ timeoutMs: 2_000 });
+			expect(exit.exited).toBe(true);
+			await waitFor(
+				() => liveOwnedProcessCount() === before,
+				2_000,
+				"live count baseline after clean-drain reconciliation",
+			);
+
+			// Simulate the OS recycling the pgid into an unrelated group: sig-0
+			// probes report alive and we record any terminating signal aimed at it.
+			const realKill = process.kill;
+			const terminatingSignals: Array<string | number> = [];
+			process.kill = ((pid: number, signal?: string | number) => {
+				if (pid === -pgid) {
+					if (signal === 0) return true;
+					terminatingSignals.push(signal as string | number);
+					return true;
+				}
+				return (realKill as (p: number, s?: string | number) => boolean).call(process, pid, signal);
+			}) as typeof process.kill;
+
+			try {
+				await expect(owner.dispose()).resolves.toBeUndefined();
+				await expect(owner.dispose()).resolves.toBeUndefined();
+				expect(terminatingSignals).toEqual([]);
+				expect(owner.disposed).toBe(true);
+				expect(liveOwnedProcessCount()).toBe(before);
+			} finally {
+				process.kill = realKill;
+			}
+		},
+	);
 });
 
 describe("process-lifecycle adversarial resource-owner invariants", () => {

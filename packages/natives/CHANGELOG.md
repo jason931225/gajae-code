@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-06-16
+
+### Fixed
+
+- Hardened the native blocking-task boundary: work runs inside `catch_unwind` and panic payloads are converted to `napi::Error` so a panic can never unwind across the N-API/libuv boundary, cancellation is enforced before work starts, and `CancelToken` honors an already-aborted `AbortSignal`. The shipped `ci`/`local` build profiles now compile the addon with `panic = "unwind"` (instead of inheriting `release`'s `panic = "abort"`), so this guard actually engages in published binaries instead of aborting the process (U1).
+- Fixed PTY session lifecycle and native backpressure: dropping a JS `PtySession` kills the child (no orphaned PTY), setup-error paths terminate/reap the child and close handles via an RAII guard with a bounded reap loop, foreground-child exit terminates the PTY process group before the final reader drain, Windows `openpty` is single-flight to cap a hung ConPTY thread, and PTY/shell callback bridges use bounded channels with explicit truncation/loss markers guaranteed at EOF (U2).
+- Fixed pi-shell timeout/abort handling: the `timeout` builtin reaps its nested command's process group (captured PGID + TERM/KILL waves) before returning 124, top-level cancellation signals the captured process group so reparented same-group grandchildren are reaped, the `AbortToken` is published before any await to close the abort handoff window, streaming output is bounded with an `OutputBudget` and truncation is surfaced on the result, and `terminate_background_jobs` uses an awaited TERM→KILL escalation (U3).
+
 ## [0.5.1] - 2026-06-14
 
 - Version aligned with the 0.5.1 monorepo release; no functional changes in this package.

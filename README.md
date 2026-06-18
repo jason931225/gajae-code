@@ -59,15 +59,9 @@ bun install -g gajae-code
 
 The scoped package is also available as `@gajae-code/coding-agent`.
 
-### macOS Intel native binary install
+### macOS Intel install
 
-Release artifacts include both Apple Silicon (`gjc-darwin-arm64`) and Intel (`gjc-darwin-x64`) macOS standalone binaries. On Intel Macs, the binary installer selects `gjc-darwin-x64` automatically:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/main/scripts/install.sh | sh -s -- --binary
-```
-
-If an older release is missing `gjc-darwin-x64`, install through the npm/Bun package path instead, or choose a newer release that includes the Intel macOS asset:
+Standalone release binaries currently target Apple Silicon macOS (`gjc-darwin-arm64`), Linux, and Windows. Intel macOS (`darwin-x64`) is no longer built in release CI because GitHub's Intel macOS runner pool is deprecated and can remain queued for hours. On Intel Macs, install through the npm/Bun package path or build from source:
 
 ```sh
 bun install -g gajae-code

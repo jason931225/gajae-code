@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-18
+
 ### Fixed
 
 - Fixed computer-use supervisor liveness on macOS by refreshing the kill-switch heartbeat from the live event-tap run loop while idle and clearing liveness on tap/run-loop failure or teardown, preventing false `COMPUTER_SUPERVISOR_NOT_LIVE` rejections without weakening fail-closed input gating.

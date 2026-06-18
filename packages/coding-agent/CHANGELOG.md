@@ -10,6 +10,7 @@
 ### Fixed
 
 - Restored steer-by-default while the agent is busy: `busyPromptMode` now defaults to `steer`, so Enter on a normal prompt interrupts the active turn. Queueing for the next turn is reserved for the explicit Ctrl+Enter follow-up keystroke (or `busyPromptMode: "queue"`); existing steer/cancel plus explicit queue/dequeue controls remain separate (#829).
+- Fixed `gjc rlm "<question>"` consuming the seeded question as a one-shot autonomous run that exited immediately; a seeded prompt now lands in the interactive composer so the research session stays interactive.
 
 ### Added
 

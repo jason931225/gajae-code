@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-19
+
 ### Changed
 
 - Reconciled the planning-phase mutation guard into one uniform policy across skill states (`deep-interview-mutation-guard.ts`). Previously only `deep-interview` blocked product-code mutation (and it blocked *all* `write`/`edit`/`ast_edit` targets, including neutral `/tmp` scratch), while `ralplan`/`ultragoal` planning enforced nothing beyond the always-on `.gjc/**` runtime-owned block, and `bash` got a free pass to mutate product code during the interview. Now: (1) the phase-boundary block is shared by every pre-approval planning phase — `deep-interview`, `ralplan`, and `ultragoal`'s `goal-planning` phase (`team` and executing `ultragoal` are unaffected); (2) `bash` reaches parity with `write`/`edit`/`ast_edit` so product-mutating shell commands are blocked too; and (3) neutral scratch writes to a system temp directory (`os.tmpdir()`/`$TMPDIR`, `/tmp`, `/var/tmp`) outside the project tree are always allowed, so an agent can stage a draft and persist it through the sanctioned CLI (`gjc deep-interview --write --spec <temp-path>`, `gjc ralplan --write --artifact <temp-path>`). The `.gjc/**` block is unchanged. Each planning skill now emits its own block message.

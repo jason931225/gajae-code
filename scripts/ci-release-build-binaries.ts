@@ -14,6 +14,12 @@ interface BinaryTarget {
 const repoRoot = path.join(import.meta.dir, "..");
 const binariesDir = path.join(repoRoot, "packages", "coding-agent", "binaries");
 const entrypoint = "./packages/coding-agent/src/cli.ts";
+// Lazy native tokenizer entrypoint. `agent-core/compaction` loads this from
+// the explicit native entrypoint instead of a package-name dynamic require of
+// `@gajae-code/natives`, because those fail inside Bun standalone `$bunfs`.
+// Listing the module here makes the absolute target path exist in the compiled
+// bunfs.
+const nativeTokenizerEntrypoint = "./packages/natives/native/index.js";
 // Worker entrypoints. Bun's `--compile` static analyzer discovers the
 // literal in `new Worker("…", …)` at each spawn site, but only actually
 // emits the worker into the bunfs root when it is also listed here as an
@@ -36,13 +42,6 @@ const targets: BinaryTarget[] = [
 		arch: "arm64",
 		target: "bun-darwin-arm64",
 		outfile: "packages/coding-agent/binaries/gjc-darwin-arm64",
-	},
-	{
-		id: "darwin-x64",
-		platform: "darwin",
-		arch: "x64",
-		target: "bun-darwin-x64",
-		outfile: "packages/coding-agent/binaries/gjc-darwin-x64",
 	},
 	{
 		id: "linux-x64",
@@ -130,8 +129,8 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 	console.log(`Building ${target.outfile}...`);
 	await embedNative(target);
 	if (isDryRun) {
-		const compileEntrypoints = workerEntrypoints.join(" ");
-		console.log(`DRY RUN bun build --compile --minify --no-compile-autoload-bunfig --no-compile-autoload-dotenv --no-compile-autoload-tsconfig --no-compile-autoload-package-json --keep-names --define process.env.PI_COMPILED="true" --root . --external mupdf --target=${target.target} ${entrypoint} ${compileEntrypoints} --outfile ${target.outfile}`);
+		const compileEntrypoints = [...workerEntrypoints, nativeTokenizerEntrypoint].join(" ");
+		console.log(`DRY RUN bun build --compile --no-compile-autoload-bunfig --no-compile-autoload-dotenv --no-compile-autoload-tsconfig --no-compile-autoload-package-json --keep-names --define process.env.PI_COMPILED="true" --root . --external mupdf --target=${target.target} ${entrypoint} ${compileEntrypoints} --outfile ${target.outfile}`);
 		return;
 	}
 
@@ -143,7 +142,6 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 			"bun",
 			"build",
 			"--compile",
-			"--minify",
 			"--no-compile-autoload-bunfig",
 			"--no-compile-autoload-dotenv",
 			"--no-compile-autoload-tsconfig",
@@ -159,6 +157,7 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 			target.target,
 			entrypoint,
 			...workerEntrypoints,
+			nativeTokenizerEntrypoint,
 			"--outfile",
 			target.outfile,
 		],

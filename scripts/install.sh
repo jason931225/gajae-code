@@ -233,8 +233,7 @@ install_binary() {
         echo ""
         echo "No prebuilt GJC binary was found for ${PLATFORM}-${ARCH} in ${LATEST}."
         if [ "$PLATFORM" = "darwin" ] && [ "$ARCH" = "x64" ]; then
-            echo "Intel macOS native binaries are supported by releases that include the gjc-darwin-x64 asset."
-            echo "This release may predate that asset or the upload may have failed."
+            echo "Intel macOS standalone binaries are not built by current release CI because the macos-13 runner pool is deprecated."
         fi
         echo "Fallback options:"
         echo "  - Install via Bun/npm source package: bun install -g gajae-code"

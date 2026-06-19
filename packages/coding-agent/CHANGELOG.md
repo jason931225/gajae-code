@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-06-19
+
+### Fixed
+
+- Reverted the experimental minified npm-bundle distribution introduced in 0.6.2. The published `@gajae-code/coding-agent` shipped both `src/` and ~30MB of `dist/` bundles (`cli.js` plus stats/browser/eval worker bundles), which pushed the package past npm's registry payload limit (`E413 Payload Too Large`) and blocked publishing of `@gajae-code/coding-agent` and the `gajae-code` wrapper (so 0.6.2 only partially published the sibling libraries). The CLI `bin`/`./cli` export ships from `src/` again, matching the layout that published cleanly through 0.6.1; the embedded tiktoken/o200k tokenizer removal is unaffected. Local measurement showed the bundle gave no idle-RAM benefit over running from source.
+- Fixed `edit-mode.ts` importing the full `@gajae-code/utils` barrel (which re-exports native-addon-backed `ptree`/`procmgr`); it now imports `$env` from the `@gajae-code/utils/env` subpath, so schema generation and other lightweight paths no longer eagerly load the native addon.
+
+## [0.6.2] - 2026-06-19
+
 ### Changed
 
 - Reconciled the planning-phase mutation guard into one uniform policy across skill states (`deep-interview-mutation-guard.ts`). Previously only `deep-interview` blocked product-code mutation (and it blocked *all* `write`/`edit`/`ast_edit` targets, including neutral `/tmp` scratch), while `ralplan`/`ultragoal` planning enforced nothing beyond the always-on `.gjc/**` runtime-owned block, and `bash` got a free pass to mutate product code during the interview. Now: (1) the phase-boundary block is shared by every pre-approval planning phase — `deep-interview`, `ralplan`, and `ultragoal`'s `goal-planning` phase (`team` and executing `ultragoal` are unaffected); (2) `bash` reaches parity with `write`/`edit`/`ast_edit` so product-mutating shell commands are blocked too; and (3) neutral scratch writes to a system temp directory (`os.tmpdir()`/`$TMPDIR`, `/tmp`, `/var/tmp`) outside the project tree are always allowed, so an agent can stage a draft and persist it through the sanctioned CLI (`gjc deep-interview --write --spec <temp-path>`, `gjc ralplan --write --artifact <temp-path>`). The `.gjc/**` block is unchanged. Each planning skill now emits its own block message.
@@ -39,7 +48,7 @@
 
 - Added an opt-in `gjc rlm` research mode (v1, interactive): a Jupyter-notebook-style research session over the existing agent loop, backed by the shared persistent Python kernel. It loads a distinct research system prompt, restricts the toolset to a hard-gated allowlist (`python` + `read` + `web_search`, asserted after tool-registry assembly — no `bash`/edit/arbitrary mutation), optionally loads a project-root `DATA.md` (overridable via `--data <path>`), aggregates every executed cell live into `.gjc/rlm/<session>/notebook.ipynb` (single-queue atomic temp-rename writes with post-write validation), and synthesizes `.gjc/rlm/<session>/report.md` on session exit. Autonomous goal-arg runs, `--resume`, managed per-workspace venv provisioning, and the optional `>=N` completion gate are deferred follow-ups.
 - Added an experimental opt-in `computer` desktop-control tool surface for local macOS screenshot/input coordination, backed by native `ComputerController`/`computerScreenshot` bindings and gated through settings/tool registration so it can continue stabilizing on `dev` outside the 0.5.4 patch release.
-- Added Intel macOS (`darwin-x64`) native release-binary coverage and clearer installer/docs guidance for missing older release assets (#812).
+- Dropped deprecated GitHub Actions Intel macOS (`macos-13` / `darwin-x64`) release-binary coverage after the runner pool repeatedly blocked v0.6.0 publish; Intel macOS users should install through npm/Bun or build from source.
 
 ## [0.5.4] - 2026-06-17
 

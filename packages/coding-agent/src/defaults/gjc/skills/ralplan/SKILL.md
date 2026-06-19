@@ -45,6 +45,8 @@ gjc ralplan --write --stage <type> --stage_n <N> --artifact "markdown file path 
 
 Use stage values that match the producer or artifact kind, such as `planner`, `architect`, `critic`, `revision`, `adr`, or `final`. Increment `--stage_n` for each consensus-loop pass. The `--artifact` value may be either a markdown file path prepared outside `.gjc/` for ingestion or the markdown content string itself. The native `--write` handler persists markdown under `.gjc/plans/ralplan/<run-id>/stage-<NN>-<stage>.md`, maintains an `index.jsonl` audit log, and for `final` stages additionally writes a `pending-approval.md` copy. Direct `write`, `edit`, or `ast_edit` calls against `.gjc/specs`, `.gjc/plans`, `.gjc/state`, or any other `.gjc/` path are forbidden unless an explicit force override is active.
 
+While ralplan is active it is a pre-approval planning phase: product-code mutation tools (`write`/`edit`/`ast_edit`) and product-mutating `bash` (e.g. `tee src/...`, redirects into the project tree) are blocked, exactly like deep-interview. Prefer passing the `--artifact` markdown **inline** (the content string) so no scratch file is needed; this is mandatory for restricted role agents (see below). Only the leader, and only when an artifact is too large to pass inline, may stage it as a file in a system temp directory (`os.tmpdir()`/`$TMPDIR`, `/tmp`, `/var/tmp`) outside the project tree and pass that path — never write scratch files into the repo or `.gjc/`. Product code is mutated only after the plan is approved and execution begins.
+
 Restricted read-only role agents (`planner`, `architect`, and `critic`) must pass markdown content directly in `--artifact`; their restricted bash environment intentionally disables artifact file-path ingestion so a verdict command cannot persist arbitrary file contents.
 
 After a role agent persists a stage artifact, its model-facing response to the caller SHOULD be receipt-only: return the `gjc ralplan --write --json` receipt (`run_id`, `path`, `stage`, `stage_n`, `sha256`, `created_at`) plus the minimal verdict/status fields the caller needs for routing, and do **not** paste the full persisted markdown back into the parent conversation. Downstream reviewers should receive the artifact path/receipt and read the persisted file themselves when they actually need the body. This preserves the audit trail while preventing Planner/Architect/Critic verdict bodies from being duplicated into the main-agent context.
@@ -74,7 +76,7 @@ The consensus workflow:
    d. Return to Critic evaluation
    e. Repeat this loop until Critic returns `APPROVE` or 5 iterations are reached
    f. If 5 iterations are reached without `APPROVE`, present the best version to the user
-6. On Critic approval, mark the plan `pending approval` unless explicit execution approval has already been captured, persist the ADR/final plan via `gjc ralplan --write --stage final --stage_n <N> --artifact "..."`, and do not directly edit `.gjc/plans`. *(--interactive only)* If `--interactive` is set, use the `ask` tool to present the plan with approval options (Approve execution via ultragoal (Recommended) / Approve execution via team (only when tmux-based interactive worker parallelization is required) / Compact then return for execution approval / Request changes / Reject). Final plan must include ADR (Decision, Drivers, Alternatives considered, Why chosen, Consequences, Follow-ups) and a Harness-Style Execution Architecture section (see below). Otherwise, output the final plan and stop before any mutation or delegation.
+6. On Critic approval, mark the plan `pending approval` unless explicit execution approval has already been captured, persist the ADR/final plan via `gjc ralplan --write --stage final --stage_n <N> --artifact "..."`, and do not directly edit `.gjc/plans`. *(--interactive only)* If `--interactive` is set, use the `ask` tool to present the plan with approval options (Approve execution via ultragoal (Recommended) / Approve execution via team (only when tmux-based interactive worker parallelization is required) / Compact then return for execution approval / Request changes / Reject). Final plan must include ADR (Decision, Drivers, Alternatives considered, Why chosen, Consequences, Follow-ups). Otherwise, output the final plan and stop before any mutation or delegation.
 7. *(--interactive only)* User chooses: Approve ultragoal execution (recommended), Approve team execution (tmux parallelization only), Request changes, or Reject
 8. *(--interactive only)* On approval: invoke `/skill:ultragoal` for execution by default; invoke `/skill:team` only when the user explicitly needs tmux-based interactive worker parallelization -- never implement directly
 
@@ -89,20 +91,6 @@ The consensus workflow:
 > **Important:** Steps 3 and 4 MUST run sequentially. Do NOT issue both agent Task calls in the same parallel batch. Always await the Architect result before issuing the Critic Task.
 
 Follow the Plan skill's full documentation for consensus mode details.
-
-### Harness-Style Execution Architecture
-
-Every substantial final plan MUST include a Harness-Style Execution Architecture section so execution has an explicit task-to-agent design instead of relying on a single leader to improvise the whole run.
-
-Include:
-
-- **Pattern**: choose exactly one of `Pipeline`, `Fan-out/Fan-in`, `Expert Pool`, `Producer-Reviewer`, `Supervisor`, or `Hierarchical Delegation`.
-- **Agent roster**: list each lane/agent id, role, runtime target (`executor`, `architect`, `critic`, or a project `.gjc/agents` entry), model/skill hints, and constraints.
-- **Task lanes**: list each task id, owner agent, dependency or parallel group, inputs, outputs/artifacts, acceptance criteria, and verification evidence.
-- **Execution mode recommendation**: prefer `ultragoal-native-subagents`; recommend `team` only when durable visible tmux workers, worktrees, or long-running manual monitoring are required.
-- **Domain-specific decomposition**: when the task clearly calls for a specialized domain lens, explicitly consider bounded lanes for domain context/evidence, input or asset audit, method/design, implementation or production, evaluation/validation, reproducibility/operability, and failure/risk analysis.
-
-Do not invent unavailable runtime agents as guaranteed targets. When a specialist project agent is absent, map the lane to `executor` and write the specialist responsibility into the assignment. Reserve `architect` and `critic` for review, risk, and challenge lanes unless the project defines a more specific agent.
 
 ### Persisted Planner (consensus loop)
 

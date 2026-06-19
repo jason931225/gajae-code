@@ -59,6 +59,16 @@ bun install -g gajae-code
 
 The scoped package is also available as `@gajae-code/coding-agent`.
 
+### Supported platforms
+
+Prebuilt standalone release binaries are published only for:
+
+- **Linux** — x64 and arm64
+- **Windows** — x64
+- **macOS** — Apple Silicon (arm64)
+
+Other platforms (notably Intel macOS / `darwin-x64`) are not built in release CI; use the npm/Bun package path or build from source.
+
 ### macOS Intel install
 
 Standalone release binaries currently target Apple Silicon macOS (`gjc-darwin-arm64`), Linux, and Windows. Intel macOS (`darwin-x64`) is no longer built in release CI because GitHub's Intel macOS runner pool is deprecated and can remain queued for hours. On Intel Macs, install through the npm/Bun package path or build from source:

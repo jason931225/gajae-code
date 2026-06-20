@@ -16,10 +16,8 @@ describe("OpenAI Codex defaults", () => {
 			maxLevel: Effort.XHigh,
 			defaultLevel: Effort.XHigh,
 		});
-		// gpt-5.5 exposes a 272K context window, matching the rest of the codex family and
-		// the live discovery API (`context_window`/`max_context_window` both 272000).
-		// Whether it promotes to a larger model on overflow is governed by the Auto-Promote
-		// Context option, not pinned here.
-		expect(model.contextWindow).toBe(272000);
+		// gpt-5.5 is pinned to its true 400K context window so long sessions do not
+		// incorrectly look over-cap at the stale 272K discovery fallback.
+		expect(model.contextWindow).toBe(400000);
 	});
 });

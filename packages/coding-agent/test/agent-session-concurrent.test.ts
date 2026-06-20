@@ -132,7 +132,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		await waitFor(() => session.isStreaming);
 
 		// steer should work while streaming
-		expect(() => session.steer("Steering message")).not.toThrow();
+		await expect(session.steer("Steering message")).resolves.toBeUndefined();
 		expect(session.queuedMessageCount).toBe(1);
 
 		// Cleanup

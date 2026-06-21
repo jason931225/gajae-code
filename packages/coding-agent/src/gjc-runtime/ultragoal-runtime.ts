@@ -3712,7 +3712,8 @@ async function reconcileUltragoalState(cwd: string): Promise<void> {
 			.map(line => {
 				try {
 					const row = JSON.parse(line) as Record<string, unknown>;
-					const event = typeof row.event === "string" ? row.event : typeof row.type === "string" ? row.type : undefined;
+					const event =
+						typeof row.event === "string" ? row.event : typeof row.type === "string" ? row.type : undefined;
 					return event ? { ...row, event } : undefined;
 				} catch {
 					return undefined;

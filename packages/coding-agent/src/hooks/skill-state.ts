@@ -5,7 +5,11 @@ import type { SkillDiscoverySettings } from "../config/skill-settings-defaults";
 import { activeSnapshotPath, modeStatePath as sessionModeStatePath } from "../gjc-runtime/session-layout";
 import { resolveGjcSessionForRead } from "../gjc-runtime/session-resolution";
 import { ModeStateSchema, SkillActiveStateSchema } from "../gjc-runtime/state-schema";
-import { readExistingStateForMutation, writeGuardedJsonAtomic, writeGuardedWorkflowEnvelopeAtomic } from "../gjc-runtime/state-writer";
+import {
+	readExistingStateForMutation,
+	writeGuardedJsonAtomic,
+	writeGuardedWorkflowEnvelopeAtomic,
+} from "../gjc-runtime/state-writer";
 import { isUltragoalBypassPrompt, readUltragoalVerificationState } from "../gjc-runtime/ultragoal-guard";
 import { getUltragoalRunCompletionState, readUltragoalPlan } from "../gjc-runtime/ultragoal-runtime";
 import { buildSessionContext, loadEntriesFromFile, type SessionEntry } from "../session/session-manager";
@@ -13,8 +17,8 @@ import {
 	readVisibleSkillActiveState as readCanonicalVisibleSkillActiveState,
 	type SkillActiveEntry,
 	type SkillActiveState,
+	syncSkillActiveState,
 } from "../skill-state/active-state";
-import { syncSkillActiveState } from "../skill-state/active-state";
 import { initialPhaseForSkill } from "../skill-state/initial-phase";
 
 // Re-export for existing callers and tests that imported it from this module.
@@ -241,7 +245,10 @@ function buildStateRecoveryMessage(diagnostic: StateRecoveryDiagnostic): string 
 export function buildStateRecoveryDiagnosticsContext(diagnostics: readonly StateRecoveryDiagnostic[]): string | null {
 	const unique = new Map<string, StateRecoveryDiagnostic>();
 	for (const diagnostic of diagnostics) {
-		unique.set(`${diagnostic.kind}:${diagnostic.skill ?? ""}:${diagnostic.statePath}:${diagnostic.reason}`, diagnostic);
+		unique.set(
+			`${diagnostic.kind}:${diagnostic.skill ?? ""}:${diagnostic.statePath}:${diagnostic.reason}`,
+			diagnostic,
+		);
 	}
 	const messages = [...unique.values()].map(buildStateRecoveryMessage);
 	return messages.length > 0 ? messages.join(" ") : null;
@@ -260,11 +267,17 @@ async function inspectJsonStateRecovery(
 		}
 		return { kind, statePath: filePath, reason: "unreadable", skill };
 	}
-	const validated = await readValidatedJsonFile(filePath, kind, kind === "mode-state" ? ModeStateSchema : SkillActiveStateSchema);
+	const validated = await readValidatedJsonFile(
+		filePath,
+		kind,
+		kind === "mode-state" ? ModeStateSchema : SkillActiveStateSchema,
+	);
 	return validated ? null : { kind, statePath: filePath, reason: "corrupt", skill };
 }
 
-export async function collectUserPromptStateRecoveryDiagnostics(input: UserPromptSubmitStateInput): Promise<StateRecoveryDiagnostic[]> {
+export async function collectUserPromptStateRecoveryDiagnostics(
+	input: UserPromptSubmitStateInput,
+): Promise<StateRecoveryDiagnostic[]> {
 	const resolvedSessionId = await resolveBoundarySessionId(input.cwd, input.sessionId);
 	const diagnostics: StateRecoveryDiagnostic[] = [];
 	const activePath = skillStatePath(input.cwd, resolvedSessionId);
@@ -307,8 +320,6 @@ async function readValidatedJsonFile<T>(
 	}
 	return value;
 }
-
-
 
 function entryMatchesContext(
 	entry: SkillActiveEntry,
@@ -416,11 +427,8 @@ async function seedSkillActivationState(
 		},
 		audit: { category: "state", verb: "write", owner: "gjc-hook", skill, sessionId: resolvedSessionId },
 	});
-	const persistedModeState = (await readValidatedJsonFile<ModeState>(
-		initializedStatePath,
-		"mode-state",
-		ModeStateSchema,
-	)) ?? modeState;
+	const persistedModeState =
+		(await readValidatedJsonFile<ModeState>(initializedStatePath, "mode-state", ModeStateSchema)) ?? modeState;
 	const sourceRevision =
 		typeof persistedModeState.state_revision === "number" && Number.isFinite(persistedModeState.state_revision)
 			? persistedModeState.state_revision

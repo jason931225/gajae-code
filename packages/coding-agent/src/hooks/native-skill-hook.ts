@@ -7,9 +7,9 @@ import { DEFAULT_DISABLED_EXTENSIONS, DEFAULT_SKILL_DISCOVERY_SETTINGS } from ".
 import { sessionLogsDir } from "../gjc-runtime/session-layout";
 import {
 	buildActiveUltragoalPromptContext,
-	buildStateRecoveryDiagnosticsContext,
 	buildSkillActivationAdditionalContext,
 	buildSkillStopOutput,
+	buildStateRecoveryDiagnosticsContext,
 	collectUserPromptStateRecoveryDiagnostics,
 	type EffectiveSkillConfigInput,
 	recordSkillActivation,

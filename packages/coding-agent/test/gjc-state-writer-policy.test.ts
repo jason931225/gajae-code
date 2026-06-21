@@ -90,7 +90,11 @@ describe("GJC state writer revision policy", () => {
 		const target = ".gjc/state/cache.json";
 
 		await writeGuardedJsonAtomic(target, { value: "newer" }, { cwd: root, policy: "cache", sourceRevision: 5 });
-		const result = await writeGuardedJsonAtomic(target, { value: "older" }, { cwd: root, policy: "cache", sourceRevision: 5 });
+		const result = await writeGuardedJsonAtomic(
+			target,
+			{ value: "older" },
+			{ cwd: root, policy: "cache", sourceRevision: 5 },
+		);
 
 		expect(result).toEqual({ path: path.join(root, target), written: false, reason: "stale-skip" });
 		await expect(readJson(root, target)).resolves.toMatchObject({
@@ -105,7 +109,11 @@ describe("GJC state writer revision policy", () => {
 		const target = ".gjc/state/cache-overwrite.json";
 
 		await writeGuardedJsonAtomic(target, { value: "old" }, { cwd: root, policy: "cache", sourceRevision: 2 });
-		const result = await writeGuardedJsonAtomic(target, { value: "new" }, { cwd: root, policy: "cache", sourceRevision: 3 });
+		const result = await writeGuardedJsonAtomic(
+			target,
+			{ value: "new" },
+			{ cwd: root, policy: "cache", sourceRevision: 3 },
+		);
 
 		expect(result).toEqual({ path: path.join(root, target), written: true });
 		await expect(readJson(root, target)).resolves.toMatchObject({
@@ -148,7 +156,10 @@ describe("GJC state writer revision policy", () => {
 		});
 
 		await expect(detectWorkflowEnvelopeIntegrityMismatch(path.join(root, target))).resolves.toBeUndefined();
-		await expect(readJson(root, target)).resolves.toMatchObject({ state_revision: 1, receipt: { content_sha256: {} } });
+		await expect(readJson(root, target)).resolves.toMatchObject({
+			state_revision: 1,
+			receipt: { content_sha256: {} },
+		});
 	});
 
 	it("deep-interview recorder conflict fails visibly for direct recorder writes", async () => {
@@ -222,9 +233,10 @@ describe("GJC state writer revision policy", () => {
 			});
 
 			expect(result.deleted).toBe(false);
-			await expect(
-				readJson(root, ".gjc/_session-sess/state/active/deep-interview.json"),
-			).resolves.toMatchObject({ skill: "deep-interview", source_state_revision: 5 });
+			await expect(readJson(root, ".gjc/_session-sess/state/active/deep-interview.json")).resolves.toMatchObject({
+				skill: "deep-interview",
+				source_state_revision: 5,
+			});
 		});
 
 		it("same or newer revision removal deletes the active entry", async () => {
@@ -243,7 +255,9 @@ describe("GJC state writer revision policy", () => {
 			});
 
 			expect(result.deleted).toBe(true);
-			await expect(fs.stat(path.join(root, ".gjc/_session-sess/state/active/deep-interview.json"))).rejects.toThrow();
+			await expect(
+				fs.stat(path.join(root, ".gjc/_session-sess/state/active/deep-interview.json")),
+			).rejects.toThrow();
 		});
 	});
 });

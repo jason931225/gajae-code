@@ -848,7 +848,6 @@ async function writeJsonAtomic(
 		await writeGuardedWorkflowEnvelopeAtomic(filePath, value, {
 			cwd,
 			policy: "source",
-			expectedRevision: existingStateRevision(value),
 			audit: {
 				sessionId: options?.sessionId ?? "",
 				category: "state",

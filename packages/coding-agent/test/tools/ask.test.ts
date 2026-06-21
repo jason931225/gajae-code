@@ -2,11 +2,11 @@ import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test"
 import type { AgentToolContext } from "@gajae-code/agent-core";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
 import * as deepInterviewRecorder from "@gajae-code/coding-agent/gjc-runtime/deep-interview-recorder";
-import { logger } from "@gajae-code/utils";
 import { getThemeByName, initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import type { ToolSession } from "@gajae-code/coding-agent/tools";
 import { AskTool, askSchema, askToolRenderer } from "@gajae-code/coding-agent/tools/ask";
 import { ToolAbortError } from "@gajae-code/coding-agent/tools/tool-errors";
+import { logger } from "@gajae-code/utils";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -85,7 +85,6 @@ function singleDeepInterviewQuestion() {
 		deepInterview: deepInterviewMeta(),
 	};
 }
-
 
 describe("AskTool cancellation", () => {
 	it("aborts the turn when the user cancels selection", async () => {
@@ -1405,7 +1404,13 @@ describe("AskTool deep-interview recorder persistence", () => {
 		const tool = new AskTool(createSession({ getSessionId: () => "session-ask" }));
 		const context = createContext({ select: async (_prompt, options) => options[1] });
 
-		const result = await tool.execute("call-recorder-reject", { questions: [singleDeepInterviewQuestion()] }, undefined, undefined, context);
+		const result = await tool.execute(
+			"call-recorder-reject",
+			{ questions: [singleDeepInterviewQuestion()] },
+			undefined,
+			undefined,
+			context,
+		);
 
 		expect(result.content[0]).toMatchObject({ type: "text", text: "User selected: Timeline" });
 		expect(result.details).toEqual({
@@ -1440,7 +1445,13 @@ describe("AskTool deep-interview recorder persistence", () => {
 		const context = createContext({ select: async (_prompt, options) => options[0] });
 		const started = performance.now();
 
-		const result = await tool.execute("call-recorder-timeout", { questions: [singleDeepInterviewQuestion()] }, undefined, undefined, context);
+		const result = await tool.execute(
+			"call-recorder-timeout",
+			{ questions: [singleDeepInterviewQuestion()] },
+			undefined,
+			undefined,
+			context,
+		);
 
 		expect(performance.now() - started).toBeLessThan(1000);
 		expect(result.content[0]).toMatchObject({ type: "text", text: "User selected: Budget" });
@@ -1457,7 +1468,13 @@ describe("AskTool deep-interview recorder persistence", () => {
 		const tool = new AskTool(createSession({ getSessionId: () => "session-ask" }));
 		const context = createContext({ select: async (_prompt, options) => options[0] });
 
-		const result = await tool.execute("call-hud-reject", { questions: [singleDeepInterviewQuestion()] }, undefined, undefined, context);
+		const result = await tool.execute(
+			"call-hud-reject",
+			{ questions: [singleDeepInterviewQuestion()] },
+			undefined,
+			undefined,
+			context,
+		);
 
 		expect(result.content[0]).toMatchObject({ type: "text", text: "User selected: Budget" });
 		expect(warn).toHaveBeenCalledWith(expect.stringContaining("deep-interview round recording failed"));
@@ -1483,7 +1500,11 @@ describe("AskTool deep-interview recorder persistence", () => {
 			{
 				questions: [
 					singleDeepInterviewQuestion(),
-					{ ...singleDeepInterviewQuestion(), id: "q-deep-2", deepInterview: { ...deepInterviewMeta(), round: 3 } },
+					{
+						...singleDeepInterviewQuestion(),
+						id: "q-deep-2",
+						deepInterview: { ...deepInterviewMeta(), round: 3 },
+					},
 				],
 			},
 			undefined,

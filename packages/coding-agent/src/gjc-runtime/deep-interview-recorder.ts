@@ -387,7 +387,6 @@ export async function syncDeepInterviewRecorderHud(
 	await syncRecorderHud(cwd, normalizeDeepInterviewEnvelope(read.value), sessionId);
 }
 
-
 /** Record an `answered` shell for one round (append-or-merge by durable key). */
 export async function appendOrMergeDeepInterviewRound(
 	cwd: string,

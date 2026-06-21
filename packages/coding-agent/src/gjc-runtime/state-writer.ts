@@ -545,7 +545,13 @@ export async function writeGuardedWorkflowEnvelopeAtomic(
 				if (options.expectedRevision !== undefined && options.expectedRevision !== currentRevision) {
 					throw new StateWriteConflictError(filePath, options.expectedRevision, currentRevision);
 				}
-				const next = stampWorkflowEnvelopeRevisionAndChecksum(value, filePath, currentRevision + 1, undefined, options);
+				const next = stampWorkflowEnvelopeRevisionAndChecksum(
+					value,
+					filePath,
+					currentRevision + 1,
+					undefined,
+					options,
+				);
 				const parsed = RequiredOnWriteEnvelopeSchema.safeParse(next);
 				if (!parsed.success) {
 					throw new Error(
@@ -951,11 +957,16 @@ export async function writeActiveEntry(
 	options?: StateWriterOptions,
 ): Promise<string> {
 	const filePath = activeEntryPath(path.resolve(cwd), sessionScope, skill);
-	await writeGuardedResolvedJsonAtomic(filePath, { ...entry, skill }, {
-		...options,
-		policy: "cache",
-		sourceRevision: persistedSourceRevision(entry) || persistedSourceRevision(await readJsonIfPresent(filePath)) + 1,
-	});
+	await writeGuardedResolvedJsonAtomic(
+		filePath,
+		{ ...entry, skill },
+		{
+			...options,
+			policy: "cache",
+			sourceRevision:
+				persistedSourceRevision(entry) || persistedSourceRevision(await readJsonIfPresent(filePath)) + 1,
+		},
+	);
 	return filePath;
 }
 
@@ -1021,7 +1032,10 @@ export async function rebuildActiveSnapshot(
 	await writeGuardedResolvedJsonAtomic(snapshotPath, buildActiveSnapshot(entries), {
 		...options,
 		policy: "cache",
-		sourceRevision: Math.max(persistedSourceRevision(await readJsonIfPresent(snapshotPath)) + 1, ...entries.map(entry => persistedSourceRevision(entry))),
+		sourceRevision: Math.max(
+			persistedSourceRevision(await readJsonIfPresent(snapshotPath)) + 1,
+			...entries.map(entry => persistedSourceRevision(entry)),
+		),
 	});
 	return snapshotPath;
 }

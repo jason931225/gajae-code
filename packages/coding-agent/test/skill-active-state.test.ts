@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeActiveEntry, writeActiveEntry, writeGuardedJsonAtomic } from "../src/gjc-runtime/state-writer";
 import {
 	applyHandoffToActiveState,
 	CANONICAL_GJC_WORKFLOW_SKILLS,
@@ -12,7 +13,6 @@ import {
 	syncSkillActiveState,
 } from "../src/skill-state/active-state";
 
-import { removeActiveEntry, writeActiveEntry, writeGuardedJsonAtomic } from "../src/gjc-runtime/state-writer";
 async function withTempCwd(fn: (cwd: string) => Promise<void>): Promise<void> {
 	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-skill-active-"));
 	try {
@@ -433,7 +433,6 @@ describe("GJC skill-active state", () => {
 		});
 	});
 
-
 	it("derived active-state HUD stale-skips when incoming source revision is not newer", async () => {
 		await withTempCwd(async cwd => {
 			const { sessionPath } = getSkillActiveStatePaths(cwd, "sess-rev");
@@ -552,7 +551,14 @@ describe("GJC skill-active state", () => {
 				{ cwd },
 			);
 
-			const activePath = path.join(cwd, ".gjc", "_session-sess-remove-rev", "state", "active", "deep-interview.json");
+			const activePath = path.join(
+				cwd,
+				".gjc",
+				"_session-sess-remove-rev",
+				"state",
+				"active",
+				"deep-interview.json",
+			);
 			const lockPath = `${activePath}.lock`;
 			await fs.mkdir(lockPath, { recursive: true });
 			await fs.writeFile(`${lockPath}/info`, JSON.stringify({ pid: process.pid, timestamp: Date.now() }));

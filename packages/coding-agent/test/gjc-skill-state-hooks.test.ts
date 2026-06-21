@@ -5,7 +5,13 @@ import * as path from "node:path";
 import { logger } from "@gajae-code/utils";
 import { DEFAULT_DISABLED_EXTENSIONS, DEFAULT_SKILL_DISCOVERY_SETTINGS } from "../src/config/skill-settings-defaults";
 import { activeSnapshotPath, modeStatePath, sessionSpecsDir, sessionStateDir } from "../src/gjc-runtime/session-layout";
+import { reconcileWorkflowSkillState } from "../src/gjc-runtime/state-runtime";
 import { RequiredOnWriteEnvelopeSchema } from "../src/gjc-runtime/state-schema";
+import {
+	detectWorkflowEnvelopeIntegrityMismatch,
+	writeGuardedJsonAtomic,
+	writeGuardedWorkflowEnvelopeAtomic,
+} from "../src/gjc-runtime/state-writer";
 import {
 	addUltragoalSubgoal,
 	checkpointUltragoalGoal,
@@ -24,8 +30,6 @@ import {
 } from "../src/hooks/skill-state";
 import { getDeepInterviewMutationDecision } from "../src/skill-state/deep-interview-mutation-guard";
 import { WORKFLOW_STATE_VERSION } from "../src/skill-state/workflow-state-contract";
-import { reconcileWorkflowSkillState } from "../src/gjc-runtime/state-runtime";
-import { detectWorkflowEnvelopeIntegrityMismatch, writeGuardedJsonAtomic, writeGuardedWorkflowEnvelopeAtomic } from "../src/gjc-runtime/state-writer";
 
 describe("GJC native skill-state hooks", () => {
 	let tempDir: string | undefined;
@@ -533,7 +537,9 @@ describe("GJC native skill-state hooks", () => {
 				undefined,
 			);
 			expect(allowed.outputJson).toMatchObject({ hookSpecificOutput: { hookEventName: "UserPromptSubmit" } });
-			expect(String((allowed.outputJson?.hookSpecificOutput as { additionalContext?: unknown }).additionalContext ?? "")).toContain("GJC state recovery");
+			expect(
+				String((allowed.outputJson?.hookSpecificOutput as { additionalContext?: unknown }).additionalContext ?? ""),
+			).toContain("GJC state recovery");
 			expect(warn).toHaveBeenCalledTimes(2);
 			expect(String(warn.mock.calls[0]?.[0] ?? "")).toContain("gjc skill-state: invalid mode-state at");
 			expect(String(warn.mock.calls[0]?.[0] ?? "")).toContain("current_phase");

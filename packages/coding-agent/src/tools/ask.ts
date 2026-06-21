@@ -129,7 +129,6 @@ async function awaitDeepInterviewRecorderPersistence(persistence: Promise<void>)
 	}
 }
 
-
 function getDoneOptionLabel(): string {
 	return `${theme.status.success} Done selecting`;
 }

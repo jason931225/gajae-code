@@ -828,39 +828,25 @@ async function writeJsonAtomic(
 	if (warning && !options?.force) {
 		throw new StateCommandError(2, `${warning}; use --force to overwrite tampered mode-state`);
 	}
-	if (verb === "reconcile") {
-		await writeGuardedWorkflowEnvelopeAtomic(filePath, value, {
-			cwd,
-			policy: "source",
-			audit: {
-				sessionId: options?.sessionId ?? "",
-				category: "state",
-				verb,
-				owner: options?.owner ?? "gjc-state-cli",
-				skill: options?.skill,
-				mutationId: options?.mutationId,
-				fromPhase: options?.fromPhase,
-				toPhase: options?.toPhase,
-				forced: options?.force ?? false,
-			},
-		});
-	} else {
-		await writeGuardedWorkflowEnvelopeAtomic(filePath, value, {
-			cwd,
-			policy: "source",
-			audit: {
-				sessionId: options?.sessionId ?? "",
-				category: "state",
-				verb,
-				owner: options?.owner ?? "gjc-state-cli",
-				skill: options?.skill,
-				mutationId: options?.mutationId,
-				fromPhase: options?.fromPhase,
-				toPhase: options?.toPhase,
-				forced: options?.force ?? false,
-			},
-		});
-	}
+	// Authoritative CLI/runtime write. Stamp the next state_revision under the
+	// writer lock; do not enforce an optimistic `expectedRevision` here (tamper
+	// detection is handled by warnAndAuditOutOfBandIfNeeded above, and a forced
+	// write must succeed over corrupt/missing prior state).
+	await writeGuardedWorkflowEnvelopeAtomic(filePath, value, {
+		cwd,
+		policy: "source",
+		audit: {
+			sessionId: options?.sessionId ?? "",
+			category: "state",
+			verb,
+			owner: options?.owner ?? "gjc-state-cli",
+			skill: options?.skill,
+			mutationId: options?.mutationId,
+			fromPhase: options?.fromPhase,
+			toPhase: options?.toPhase,
+			forced: options?.force ?? false,
+		},
+	});
 	return { warning, stamped: (await readJsonFile(filePath)) ?? {} };
 }
 

@@ -385,6 +385,18 @@ async function readJsonIfPresent(filePath: string): Promise<unknown | undefined>
 	}
 }
 
+// Corrupt-tolerant variant for the guarded writers' revision computation: a prior
+// file that is unparseable has no usable revision, so treat it as absent (revision 0)
+// rather than throwing. This lets an authoritative/forced write overwrite corrupt
+// state and a derived cache write overwrite (not stale-skip) corrupt cache.
+async function readJsonIfPresentTolerant(filePath: string): Promise<unknown | undefined> {
+	try {
+		return await readJsonIfPresent(filePath);
+	} catch {
+		return undefined;
+	}
+}
+
 export function persistedStateRevision(value: unknown): number {
 	if (!isPlainObject(value)) return 0;
 	const revision = value.state_revision;
@@ -489,7 +501,7 @@ async function writeGuardedResolvedJsonAtomic(
 	return lockResolvedWorkflowTarget(
 		filePath,
 		async () => {
-			const current = await readJsonIfPresent(filePath);
+			const current = await readJsonIfPresentTolerant(filePath);
 			const currentRevision = persistedStateRevision(current);
 
 			if (options.policy === "source") {
@@ -538,7 +550,7 @@ export async function writeGuardedWorkflowEnvelopeAtomic(
 	return lockResolvedWorkflowTarget(
 		filePath,
 		async () => {
-			const current = await readJsonIfPresent(filePath);
+			const current = await readJsonIfPresentTolerant(filePath);
 			const currentRevision = persistedStateRevision(current);
 
 			if (options.policy === "source") {

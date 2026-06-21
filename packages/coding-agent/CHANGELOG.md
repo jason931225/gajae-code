@@ -4,7 +4,23 @@
 
 ### Changed
 
-- Stopped including `bash` in the planning-phase mutation guard. The phase-boundary block (and the always-on `.gjc/**` runtime-owned block) now apply only to the fully-pathed `write`/`edit`/`ast_edit` tools; `bash` is never blocked by any workflow skill (`deep-interview`, `ralplan`, `ultragoal` goal-planning), so read-only shell commands run freely during planning. This reverts the `bash` parity added in 0.6.2; product-code and `.gjc/**` mutation are still gated through the dedicated edit tools.
+- Scoped all GJC workflow state by session ID: skill state, plans, specs, and ledgers now live under per-session `.gjc/_session-{id}/` directories, so concurrent or resumed sessions no longer collide on shared workflow state.
+- Hardened skill-state hooks with a writer revision policy, a force-ask on Stop, HUD reconciliation, and an fd-duplication guard; forced/authoritative state writes now survive corrupt prior state (#950).
+- Migrated the global debug shortcut into the keybinding registry and added `pasteImage` as a single source of truth with default-collision diagnostics (#925, #939).
+- Added safe import of custom skills and MCP servers via `migrate` (#944).
+- Trimmed the bundled agent roster to the four canonical role agents: planner, architect, critic, and executor (#922).
+- Added a research-plan ledger spike (#933).
+
+### Fixed
+
+- Stopped including `bash` in the planning-phase mutation guard. The phase-boundary block (and the always-on `.gjc/**` runtime-owned block) now apply only to the fully-pathed `write`/`edit`/`ast_edit` tools; `bash` is never blocked by any workflow skill (`deep-interview`, `ralplan`, `ultragoal` goal-planning), so read-only shell commands run freely during planning. This reverts the `bash` parity added in 0.6.2; product-code and `.gjc/**` mutation are still gated through the dedicated edit tools (#951).
+- Rejected counterexample-only claims in research-plan regardless of `dropCondition` wording (#942).
+- Bounded computer-use screenshot inline images to avoid oversized payloads.
+- Tolerated missing session env in guard reads (#930).
+
+### Documentation
+
+- Documented standalone MCP boundaries (#923).
 
 ## [0.6.4] - 2026-06-20
 

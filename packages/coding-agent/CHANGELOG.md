@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-06-21
+
 ### Changed
 
 - Scoped all GJC workflow state by session ID: skill state, plans, specs, and ledgers now live under per-session `.gjc/_session-{id}/` directories, so concurrent or resumed sessions no longer collide on shared workflow state.

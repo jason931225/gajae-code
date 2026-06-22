@@ -169,7 +169,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		// With no explicit deliverAs, a busy session should queue as steering
 		// rather than throw AgentBusyError.
 		const send = session.sendUserMessage("Busy message");
-		expect(session.queuedMessageCount).toBe(1);
+		expect(session.getQueuedMessages()).toEqual({ steering: ["Busy message"], followUp: [] });
 		await expect(send).resolves.toBeUndefined();
 
 		// Cleanup

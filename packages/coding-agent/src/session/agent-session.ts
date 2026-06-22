@@ -5459,10 +5459,12 @@ export class AgentSession {
 			return;
 		}
 
-		// No explicit delivery mode: start a fresh turn only when idle.
-		// While the agent is streaming or compacting, prompt() would throw
-		// AgentBusyError, so queue the message as steering instead.
-		if (this.isStreaming || this.isCompacting) {
+		// No explicit delivery mode: only a live stream makes prompt() throw
+		// AgentBusyError, so queue the message as steering while streaming.
+		// Compaction is intentionally NOT diverted here: prompt() handles an
+		// in-flight compaction internally, and #queueSteer would otherwise park
+		// the message in the steering queue with no turn to consume it.
+		if (this.isStreaming) {
 			await this.#queueSteer(text, images);
 			return;
 		}

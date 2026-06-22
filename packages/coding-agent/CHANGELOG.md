@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-22
+
 ### Added
 
 - Notifications SDK with configure-once Telegram UX: each session exposes a loopback WebSocket endpoint with a discovery file and a generic `action_needed`/`reply` JSON protocol, so any client (Telegram, Discord, Slack, mobile) can see action-needed signals and answer pending asks without RPC or terminal scraping (#874).

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-22
+
 ### Added
 
 - Added the bundled `google-gemini-cli/gemini-3.5-flash` model entry so Gemini CLI users can select the model from the static registry (#965).

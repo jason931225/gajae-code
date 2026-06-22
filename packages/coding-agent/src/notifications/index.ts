@@ -40,7 +40,7 @@ import {
 	imageAttachmentsFromMessage,
 	notificationActionPayload,
 	summaryFromMessage,
-	summaryFromMessages,
+
 } from "./helpers";
 import { ensureTelegramDaemonRunning } from "./telegram-daemon";
 
@@ -508,7 +508,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 							id: `idle:${id}#${seq}`,
 							kind: "idle",
 							sessionId: id,
-							summary: summaryFromMessages(event.messages),
+							summary: undefined,
 						},
 						{ redact: rt.redact, sessionTag: rt.sessionTag },
 					),
@@ -518,10 +518,10 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			logger.warn(`notifications: noteIdle failed: ${String(e)}`);
 		}
 
-		// On idle, also stream a context update (last message + working-tree diff
-		// stat) unless redaction is on. Best-effort + async; never blocks.
+		// On idle, stream a context update with metadata (token/model usage +
+		// working-tree diff) unless redaction is on. The agent's last message is
+		// NOT repeated here — it is already streamed once via `turn_stream`.
 		if (!rt.redact) {
-			const last = summaryFromMessages(event.messages, 600);
 			const usage = (
 				ctx as { getContextUsage?: () => { tokens: number | null; contextWindow: number } | undefined }
 			).getContextUsage?.();
@@ -529,13 +529,12 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			const tokenUsage = usage && usage.tokens != null ? `${usage.tokens}/${usage.contextWindow}` : undefined;
 			const modelId = model?.id;
 			void readGitDiffStat(ctx.cwd).then(diff => {
-				if (!last && !diff && !tokenUsage && !modelId) return;
+				if (!diff && !tokenUsage && !modelId) return;
 				try {
 					rt.server.pushFrame(
 						JSON.stringify({
 							type: "context_update",
 							sessionId: id,
-							lastMessage: last,
 							tokenUsage,
 							model: modelId,
 							diff,

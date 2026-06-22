@@ -591,16 +591,10 @@ export class TelegramNotificationDaemon {
 			if (!send) return;
 			const topicId = await this.ensureTopic(session.sessionId, this.topicNameFor(session.sessionId, msg));
 			if (!topicId) return;
-			this.pool.submit({
-				sessionId: session.sessionId,
-				lane: send.lane,
-				coalesceKey: send.coalesceKey,
-				payload: { send, topicId },
-			});
-			await this.flushPool();
 			if (send.identity) {
 				// Rename the topic if the title changed (e.g. the session title was
-				// auto-generated after the topic was first created).
+				// auto-generated after the topic was first created). This runs on
+				// every identity frame, but does NOT re-send the bulleted message.
 				const name = this.topicNameFor(session.sessionId, msg);
 				if (this.topics.applyName(session.sessionId, name)) {
 					try {
@@ -613,9 +607,27 @@ export class TelegramNotificationDaemon {
 						// Best-effort rename; never block delivery.
 					}
 				}
-				this.topics.markIdentitySent(session.sessionId);
+				// Send the full bulleted identity header EXACTLY ONCE per topic.
+				if (this.topics.needsIdentity(session.sessionId)) {
+					this.pool.submit({
+						sessionId: session.sessionId,
+						lane: send.lane,
+						coalesceKey: send.coalesceKey,
+						payload: { send, topicId },
+					});
+					await this.flushPool();
+					this.topics.markIdentitySent(session.sessionId);
+				}
 				await this.persistTopics();
+				return;
 			}
+			this.pool.submit({
+				sessionId: session.sessionId,
+				lane: send.lane,
+				coalesceKey: send.coalesceKey,
+				payload: { send, topicId },
+			});
+			await this.flushPool();
 			return;
 		}
 		if (msg.type === "action_needed" && msg.id) {

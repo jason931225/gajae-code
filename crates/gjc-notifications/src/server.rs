@@ -177,7 +177,9 @@ impl ServerHandle {
 	/// in-thread config commands). Returns the receiver exactly once; subsequent
 	/// calls return `None`.
 	#[must_use]
-	pub fn take_inbound_receiver(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<ClientMessage>> {
+	pub fn take_inbound_receiver(
+		&self,
+	) -> Option<tokio::sync::mpsc::UnboundedReceiver<ClientMessage>> {
 		self.inbound_rx.lock().take()
 	}
 
@@ -380,10 +382,9 @@ async fn handle_text<S>(text: &str, state: &Arc<ServerState>, write: &mut S) -> 
 where
 	S: SinkExt<Message> + Unpin,
 {
-	let msg = match serde_json::from_str::<ClientMessage>(text) {
-		Ok(m) => m,
+	let Ok(msg) = serde_json::from_str::<ClientMessage>(text) else {
 		// Ignore malformed frames without tearing down the connection.
-		Err(_) => return true,
+		return true;
 	};
 	let reply = match msg {
 		ClientMessage::Reply(reply) => reply,

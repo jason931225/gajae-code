@@ -28,22 +28,46 @@ describe("renderThreadedFrame", () => {
 	});
 
 	test("live turn_stream uses live lane and a coalesce key from messageRef", () => {
-		const send = renderThreadedFrame({ type: "turn_stream", sessionId: "s", phase: "live", text: "partial", messageRef: "m-7" });
+		const send = renderThreadedFrame({
+			type: "turn_stream",
+			sessionId: "s",
+			phase: "live",
+			text: "partial",
+			messageRef: "m-7",
+		});
 		expect(send?.lane).toBe("live");
 		expect(send?.coalesceKey).toBe("turn:m-7");
 	});
 
 	test("context_update omits empty fields and is undefined when fully empty", () => {
 		expect(renderThreadedFrame({ type: "context_update", sessionId: "s" })).toBeUndefined();
-		const send = renderThreadedFrame({ type: "context_update", sessionId: "s", tokenUsage: "12k/200k", model: "opus" });
+		const send = renderThreadedFrame({
+			type: "context_update",
+			sessionId: "s",
+			tokenUsage: "12k/200k",
+			model: "opus",
+		});
 		expect(send?.lane).toBe("live");
 		expect(send?.coalesceKey).toBe("ctx:s");
 		expect(send?.text).toContain("ctx: 12k/200k · opus");
 	});
 
 	test("image_attachment renders a sendPhoto with caption", () => {
-		const send = renderThreadedFrame({ type: "image_attachment", sessionId: "s", source: "computer", mime: "image/png", data: "AAAA", caption: "screen" });
-		expect(send).toMatchObject({ method: "sendPhoto", lane: "finalized", photoBase64: "AAAA", mime: "image/png", text: "screen" });
+		const send = renderThreadedFrame({
+			type: "image_attachment",
+			sessionId: "s",
+			source: "computer",
+			mime: "image/png",
+			data: "AAAA",
+			caption: "screen",
+		});
+		expect(send).toMatchObject({
+			method: "sendPhoto",
+			lane: "finalized",
+			photoBase64: "AAAA",
+			mime: "image/png",
+			text: "screen",
+		});
 	});
 
 	test("image_attachment without data renders nothing", () => {

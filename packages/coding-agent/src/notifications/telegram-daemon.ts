@@ -4,6 +4,8 @@ import * as path from "node:path";
 import { withFileLock } from "../config/file-lock";
 import type { Settings } from "../config/settings";
 import { getNotificationConfig, isGloballyConfigured, tokenFingerprint } from "./config";
+import { parseInThreadConfigCommand } from "./config-commands";
+import { RateLimitPool } from "./rate-limit-pool";
 import {
 	type AliasTable,
 	buildActionMessage,
@@ -13,10 +15,8 @@ import {
 	readEndpoint,
 	routeInboundUpdate,
 } from "./telegram-reference";
-import { parseInThreadConfigCommand } from "./config-commands";
-import { RateLimitPool } from "./rate-limit-pool";
 import { decideThreadedInbound } from "./threaded-inbound";
-import { type ThreadedSend, renderThreadedFrame } from "./threaded-render";
+import { renderThreadedFrame, type ThreadedSend } from "./threaded-render";
 import { TopicRegistry } from "./topic-registry";
 
 export type EnsureDaemonResult = "owner_spawned" | "attached" | "disabled";
@@ -505,7 +505,10 @@ export class TelegramNotificationDaemon {
 
 	async loadTopics(): Promise<void> {
 		const paths = daemonPaths(this.opts.settings.getAgentDir());
-		const raw = await readJson<{ topics?: Record<string, unknown> }>(this.fsImpl, path.join(paths.dir, "telegram-topics.json"));
+		const raw = await readJson<{ topics?: Record<string, unknown> }>(
+			this.fsImpl,
+			path.join(paths.dir, "telegram-topics.json"),
+		);
 		if (raw && typeof raw === "object") {
 			// Reconstruct via a fresh registry then copy in (TopicRegistry loads from state in ctor).
 			const restored = new TopicRegistry(raw as never);

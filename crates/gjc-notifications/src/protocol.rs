@@ -417,7 +417,9 @@ mod tests {
 	fn reply_index_answer_roundtrips() {
 		let raw = r#"{"type":"reply","id":"a1","answer":2,"token":"t"}"#;
 		let msg: ClientMessage = serde_json::from_str(raw).unwrap();
-		let ClientMessage::Reply(reply) = msg else { panic!("expected reply") };
+		let ClientMessage::Reply(reply) = msg else {
+			panic!("expected reply")
+		};
 		assert_eq!(reply.id, "a1");
 		assert_eq!(reply.answer, ReplyAnswer::Index(2));
 		assert_eq!(reply.token, "t");
@@ -635,11 +637,7 @@ mod tests {
 
 	#[test]
 	fn malformed_json_rejected_without_panic() {
-		for raw in [
-			"{",
-			"not json",
-			r#"{"type":"reply","id":"a1","answer":2,"token":"t""#,
-		] {
+		for raw in ["{", "not json", r#"{"type":"reply","id":"a1","answer":2,"token":"t""#] {
 			assert!(serde_json::from_str::<ClientMessage>(raw).is_err(), "accepted {raw:?}");
 			assert!(serde_json::from_str::<ServerMessage>(raw).is_err(), "accepted {raw:?}");
 		}
@@ -651,13 +649,10 @@ mod tests {
 		let ClientMessage::Reply(reply) = serde_json::from_str(object).unwrap() else {
 			panic!("expected reply")
 		};
-		assert_eq!(
-			reply.answer,
-			ReplyAnswer::Structured {
-				selected: vec![AnswerSelector::Index(0), AnswerSelector::Label("Maybe".into())],
-				custom: Some("x".into()),
-			}
-		);
+		assert_eq!(reply.answer, ReplyAnswer::Structured {
+			selected: vec![AnswerSelector::Index(0), AnswerSelector::Label("Maybe".into())],
+			custom:   Some("x".into()),
+		});
 
 		let max = r#"{"type":"reply","id":"a1","answer":4294967295,"token":"t"}"#;
 		let ClientMessage::Reply(reply) = serde_json::from_str(max).unwrap() else {
@@ -734,8 +729,10 @@ mod tests {
 
 	#[test]
 	fn unknown_type_deserializes_to_unknown() {
-		let server: ServerMessage = serde_json::from_str(r#"{"type":"future_server","payload":1}"#).unwrap();
-		let client: ClientMessage = serde_json::from_str(r#"{"type":"future_client","payload":1}"#).unwrap();
+		let server: ServerMessage =
+			serde_json::from_str(r#"{"type":"future_server","payload":1}"#).unwrap();
+		let client: ClientMessage =
+			serde_json::from_str(r#"{"type":"future_client","payload":1}"#).unwrap();
 		assert_eq!(server, ServerMessage::Unknown);
 		assert_eq!(client, ClientMessage::Unknown);
 	}

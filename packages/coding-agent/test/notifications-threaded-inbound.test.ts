@@ -16,7 +16,13 @@ describe("decideThreadedInbound (fail-closed injection)", () => {
 			{ update_id: 7, message: { text: "keep going", chat: { id: 42 }, message_thread_id: "topic-1" } },
 			ctx(),
 		);
-		expect(decision).toEqual({ kind: "inject", sessionId: "sess-1", text: "keep going", updateId: 7, threadId: "topic-1" });
+		expect(decision).toEqual({
+			kind: "inject",
+			sessionId: "sess-1",
+			text: "keep going",
+			updateId: 7,
+			threadId: "topic-1",
+		});
 	});
 
 	test("ignores updates from a non-paired chat", () => {

@@ -43,7 +43,11 @@ describe("TopicRegistry", () => {
 
 	test("round-trips through serialize and reload, preserving reuse + identity", async () => {
 		const reg = new TopicRegistry();
-		await reg.getOrCreateTopic("s1", async () => "t1", () => 5);
+		await reg.getOrCreateTopic(
+			"s1",
+			async () => "t1",
+			() => 5,
+		);
 		reg.markIdentitySent("s1");
 		const reloaded = new TopicRegistry(reg.serialize());
 		let created = false;

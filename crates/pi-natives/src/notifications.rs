@@ -13,7 +13,9 @@
 
 use std::path::PathBuf;
 
-use gjc_notifications::{ActionNeeded, ClientMessage, ReplyAnswer, ServerConfig, ServerHandle, ServerMessage, Verbosity};
+use gjc_notifications::{
+	ActionNeeded, ClientMessage, ReplyAnswer, ServerConfig, ServerHandle, ServerMessage, Verbosity,
+};
 use napi::{
 	bindgen_prelude::*,
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
@@ -68,9 +70,9 @@ pub struct InboundEvent {
 /// In-process notification server handle exposed to TypeScript.
 #[napi]
 pub struct NotificationServer {
-	config:   Mutex<Option<ServerConfig>>,
-	handle:   Mutex<Option<ServerHandle>>,
-	on_reply: Mutex<Option<ThreadsafeFunction<ReplyEvent>>>,
+	config:     Mutex<Option<ServerConfig>>,
+	handle:     Mutex<Option<ServerHandle>>,
+	on_reply:   Mutex<Option<ThreadsafeFunction<ReplyEvent>>>,
 	on_inbound: Mutex<Option<ThreadsafeFunction<InboundEvent>>>,
 }
 
@@ -94,9 +96,9 @@ impl NotificationServer {
 		// TS always owns gate resolution, so the core forwards replies.
 		config.forward_replies = true;
 		Self {
-			config:   Mutex::new(Some(config)),
-			handle:   Mutex::new(None),
-			on_reply: Mutex::new(None),
+			config:     Mutex::new(Some(config)),
+			handle:     Mutex::new(None),
+			on_reply:   Mutex::new(None),
 			on_inbound: Mutex::new(None),
 		}
 	}

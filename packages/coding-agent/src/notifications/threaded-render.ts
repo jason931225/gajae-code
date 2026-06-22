@@ -9,8 +9,8 @@
  * edit coalesce key), so rendering is unit-testable without a live Bot API.
  */
 
-import type { RateLimitLane } from "./rate-limit-pool";
 import { truncate } from "./helpers";
+import type { RateLimitLane } from "./rate-limit-pool";
 
 /** A Telegram send derived from a threaded frame (topic id is applied by the daemon). */
 export interface ThreadedSend {
@@ -63,7 +63,13 @@ function str(v: unknown): string | undefined {
 }
 
 /** Format the one-time identity header as pinned bullets. */
-export function formatIdentityHeader(frame: { repo?: unknown; branch?: unknown; machine?: unknown; sessionId?: unknown; title?: unknown }): string {
+export function formatIdentityHeader(frame: {
+	repo?: unknown;
+	branch?: unknown;
+	machine?: unknown;
+	sessionId?: unknown;
+	title?: unknown;
+}): string {
 	const title = str(frame.title) ?? "GJC session";
 	const bullets = [
 		`• repo: ${str(frame.repo) ?? "?"}`,
@@ -101,7 +107,9 @@ export function renderThreadedFrame(frame: ThreadedFrame): ThreadedSend | undefi
 			return { method: "sendMessage", lane: "finalized", text: formatIdentityHeader(frame), identity: true };
 		case "context_update": {
 			const text = formatContextUpdate(frame);
-			return text ? { method: "sendMessage", lane: "live", text, coalesceKey: `ctx:${str(frame.sessionId) ?? ""}` } : undefined;
+			return text
+				? { method: "sendMessage", lane: "live", text, coalesceKey: `ctx:${str(frame.sessionId) ?? ""}` }
+				: undefined;
 		}
 		case "turn_stream": {
 			const text = str(frame.text);
@@ -117,7 +125,13 @@ export function renderThreadedFrame(frame: ThreadedFrame): ThreadedSend | undefi
 		case "image_attachment": {
 			const data = str(frame.data);
 			if (!data) return undefined;
-			return { method: "sendPhoto", lane: "finalized", photoBase64: data, mime: str(frame.mime), text: str(frame.caption) };
+			return {
+				method: "sendPhoto",
+				lane: "finalized",
+				photoBase64: data,
+				mime: str(frame.mime),
+				text: str(frame.caption),
+			};
 		}
 		case "config_update": {
 			const verbosity = str(frame.verbosity);

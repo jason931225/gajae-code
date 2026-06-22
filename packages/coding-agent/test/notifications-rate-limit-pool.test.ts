@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { type RateLimitItem, RateLimitPool } from "../src/notifications/rate-limit-pool";
 
-function item(sessionId: string, lane: RateLimitItem["lane"], payload: string, coalesceKey?: string): RateLimitItem<string> {
+function item(
+	sessionId: string,
+	lane: RateLimitItem["lane"],
+	payload: string,
+	coalesceKey?: string,
+): RateLimitItem<string> {
 	return { sessionId, lane, payload, coalesceKey };
 }
 

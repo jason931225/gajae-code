@@ -204,7 +204,6 @@ function routeWithAnswer(route: CallbackRoute | Omit<CallbackRoute, "answer">, a
 	return { sessionId: route.sessionId, actionId: route.actionId, answer };
 }
 
-
 /** Route a Telegram update to a session/action without I/O. Fail closed under ambiguity. */
 export function routeInboundUpdate(update: unknown, ctx: RouteInboundContext): RouteDecision {
 	const u = update as TelegramUpdateShape;

@@ -22,6 +22,8 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { NotificationServer } from "@gajae-code/natives";
 import { logger } from "@gajae-code/utils";
 import { Settings } from "../config/settings";
@@ -71,6 +73,22 @@ function buildIdentity(cwd: string): {
 	const repo = path.basename(cwd) || cwd;
 	const branch = readGitBranch(cwd) ?? "(detached)";
 	return { repo, branch, machine: os.hostname(), title: `${repo} · ${branch}` };
+}
+
+const execFileAsync = promisify(execFile);
+
+/** Best-effort working-tree diff stat for the context update (no throw). */
+async function readGitDiffStat(cwd: string): Promise<string | undefined> {
+	try {
+		const { stdout } = await execFileAsync("git", ["-C", cwd, "diff", "--stat", "--no-color"], {
+			timeout: 3000,
+			maxBuffer: 256 * 1024,
+		});
+		const trimmed = stdout.trim();
+		return trimmed ? trimmed.slice(0, 1500) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 interface PendingInteractiveAsk {
@@ -467,6 +485,22 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			);
 		} catch (e) {
 			logger.warn(`notifications: noteIdle failed: ${String(e)}`);
+		}
+
+		// On idle, also stream a context update (last message + working-tree diff
+		// stat) unless redaction is on. Best-effort + async; never blocks.
+		if (!rt.redact) {
+			const last = summaryFromMessages(event.messages, 600);
+			void readGitDiffStat(ctx.cwd).then(diff => {
+				if (!last && !diff) return;
+				try {
+					rt.server.pushFrame(
+						JSON.stringify({ type: "context_update", sessionId: id, lastMessage: last, diff }),
+					);
+				} catch (e) {
+					logger.warn(`notifications: context_update failed: ${String(e)}`);
+				}
+			});
 		}
 	});
 

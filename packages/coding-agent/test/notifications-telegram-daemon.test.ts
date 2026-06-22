@@ -497,7 +497,6 @@ test("image_attachment frame uploads via sendPhoto into the session topic", asyn
 		ws: { readyState: 1, send() {} },
 		pending: new Map(),
 	};
-	// biome-ignore lint/suspicious/noExplicitAny: minimal SessionSocket stand-in for the test
 	await daemon.handleSessionMessage(session as any, {
 		type: "image_attachment",
 		sessionId: "S",

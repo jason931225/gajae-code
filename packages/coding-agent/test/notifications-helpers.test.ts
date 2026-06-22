@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
 	asksFromAskInput,
 	idleDedupeKey,
+	imageAttachmentsFromMessage,
 	notificationActionPayload,
 	summaryFromMessage,
-	imageAttachmentsFromMessage,
 	summaryFromMessages,
 	truncate,
 } from "../src/notifications/helpers";

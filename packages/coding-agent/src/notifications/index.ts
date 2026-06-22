@@ -501,8 +501,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 				ctx as { getContextUsage?: () => { tokens: number | null; contextWindow: number } | undefined }
 			).getContextUsage?.();
 			const model = (ctx as { getModel?: () => { id?: string } | undefined }).getModel?.();
-			const tokenUsage =
-				usage && usage.tokens != null ? `${usage.tokens}/${usage.contextWindow}` : undefined;
+			const tokenUsage = usage && usage.tokens != null ? `${usage.tokens}/${usage.contextWindow}` : undefined;
 			const modelId = model?.id;
 			void readGitDiffStat(ctx.cwd).then(diff => {
 				if (!last && !diff && !tokenUsage && !modelId) return;

@@ -18,11 +18,11 @@
  * generated), or `GJC_NOTIFICATIONS_TOKEN`.
  */
 
+import { execFile } from "node:child_process";
 import * as crypto from "node:crypto";
-import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { execFile } from "node:child_process";
+import * as path from "node:path";
 import { promisify } from "node:util";
 import { NotificationServer } from "@gajae-code/natives";
 import { logger } from "@gajae-code/utils";
@@ -44,7 +44,10 @@ function gitDir(cwd: string): string | undefined {
 	const dot = path.join(cwd, ".git");
 	try {
 		if (fs.statSync(dot).isDirectory()) return dot;
-		const m = fs.readFileSync(dot, "utf8").trim().match(/^gitdir:\s*(.+)$/);
+		const m = fs
+			.readFileSync(dot, "utf8")
+			.trim()
+			.match(/^gitdir:\s*(.+)$/);
 		if (m) return path.resolve(cwd, m[1]);
 	} catch {}
 	return undefined;
@@ -348,9 +351,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			// One-time identity header (repo/branch/machine/session) pinned at the top
 			// of the session thread by the daemon.
 			try {
-				server.pushFrame(
-					JSON.stringify({ type: "identity_header", sessionId: id, ...buildIdentity(ctx.cwd) }),
-				);
+				server.pushFrame(JSON.stringify({ type: "identity_header", sessionId: id, ...buildIdentity(ctx.cwd) }));
 			} catch (e) {
 				logger.warn(`notifications: identity_header failed: ${String(e)}`);
 			}
@@ -494,9 +495,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			void readGitDiffStat(ctx.cwd).then(diff => {
 				if (!last && !diff) return;
 				try {
-					rt.server.pushFrame(
-						JSON.stringify({ type: "context_update", sessionId: id, lastMessage: last, diff }),
-					);
+					rt.server.pushFrame(JSON.stringify({ type: "context_update", sessionId: id, lastMessage: last, diff }));
 				} catch (e) {
 					logger.warn(`notifications: context_update failed: ${String(e)}`);
 				}
@@ -518,9 +517,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		const text = summaryFromMessage(event.message, 3500);
 		if (!text) return;
 		try {
-			rt.server.pushFrame(
-				JSON.stringify({ type: "turn_stream", sessionId: id, phase: "finalized", text }),
-			);
+			rt.server.pushFrame(JSON.stringify({ type: "turn_stream", sessionId: id, phase: "finalized", text }));
 		} catch (e) {
 			logger.warn(`notifications: pushFrame (turn) failed: ${String(e)}`);
 		}

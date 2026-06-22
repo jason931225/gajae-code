@@ -72,6 +72,7 @@ export const HEARTBEAT_TTL_MS = 20_000;
 export const DAEMON_VERSION = 1;
 
 const nodeFs: TelegramDaemonFs = fs.promises as unknown as TelegramDaemonFs;
+const RATE_LIMIT_FLUSH_INTERVAL_MS = 1_000;
 
 export function daemonPaths(agentDir: string): DaemonPaths {
 	const dir = path.join(agentDir, "notifications");
@@ -390,6 +391,7 @@ export class TelegramNotificationDaemon {
 	private readonly topics = new TopicRegistry();
 	private readonly pool: RateLimitPool<{ send: ThreadedSend; topicId: string }>;
 	private readonly seenUpdateIds = new Set<number>();
+	private flushTimer: ReturnType<typeof setInterval> | undefined;
 
 	constructor(private readonly opts: TelegramDaemonOptions) {
 		this.fsImpl = opts.fs ?? nodeFs;
@@ -564,6 +566,22 @@ export class TelegramNotificationDaemon {
 				// Best-effort: a failed send must never stop the daemon.
 			}
 		}
+	}
+
+	private startFlushTimer(): void {
+		if (this.flushTimer) return;
+		const setIntervalImpl = this.opts.setIntervalImpl ?? setInterval;
+		this.flushTimer = setIntervalImpl(() => {
+			if (!this.running || this.pool.pending === 0) return;
+			void this.flushPool();
+		}, RATE_LIMIT_FLUSH_INTERVAL_MS);
+	}
+
+	private stopFlushTimer(): void {
+		if (!this.flushTimer) return;
+		const clearIntervalImpl = this.opts.clearIntervalImpl ?? clearInterval;
+		clearIntervalImpl(this.flushTimer);
+		this.flushTimer = undefined;
 	}
 
 	async handleSessionMessage(session: SessionSocket, msg: any): Promise<void> {

@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- Notifications SDK with configure-once Telegram UX: each session exposes a loopback WebSocket endpoint with a discovery file and a generic `action_needed`/`reply` JSON protocol, so any client (Telegram, Discord, Slack, mobile) can see action-needed signals and answer pending asks without RPC or terminal scraping (#874).
+- Managed Telegram reference daemon with a threaded per-session surface: one-time identity header, streamed `context_update` (last message, task, goal, token/model usage, diff), live/finalized turn output, and agent image streaming (`image_attachment` + multipart `sendPhoto`).
+- Typing indicator and native double-check acknowledgements for Telegram inbound messages (#989).
+- Scalable `gjc daemon` control plane with safe reload, enforcing one `getUpdates` poller per bot token so new sessions attach to the existing daemon instead of causing Telegram 409 conflicts (#993).
+
+### Changed
+
+- Asks are exempt from redaction so remote prompts stay readable and answerable; idle summaries are stripped and streamed content frames (`turn_stream`, `context_update`, `image_attachment`) are suppressed when redaction is enabled (#998, #1001).
+- Telegram replies are routed by their thread/topic; removed the legacy `/answer <session-tag>` command in favour of thread-native replies.
+- Pretty HTML formatting and markdown-table rendering for Telegram daemon output (#986, #997).
+
+### Fixed
+
+- Strip embedded option indexes from Telegram button labels and stop double-numbering inline buttons (#994, #996).
+- Free-text answers resolve pending asks and ask choices remain unredacted (#998, #1001).
+- Recover in-flight sessions after a connection drop and connect new sessions during the `getUpdates` long-poll (#988, #990).
+- Daemon hardening: deliver ask buttons at invocation, fix the topic-reuse race, write daemon logs to file with resilient frame handling, and de-duplicate idle output (#985, #991, and related).
+
 ## [0.6.5] - 2026-06-21
 
 ### Changed

@@ -119,6 +119,17 @@ or `timeout`.
 Reasons: `already_answered`, `unknown_action`, `invalid_answer`,
 `resolver_unavailable`, `idempotency_conflict`, `unauthorized`.
 
+The frames above are the minimal contract every client implements. Threaded
+clients (like the managed Telegram daemon) may also receive optional
+server → client frames they can render or ignore: `identity_header` (one-time
+per-session repo/branch/machine header), `context_update` (last message, task,
+goal, token usage, model, diff), `turn_stream` (live/finalized turn output),
+`image_attachment` (agent-produced images), `activity` (busy/idle, drives the
+typing indicator), `inbound_ack` (delivery state of an injected user message),
+`config_update` (current verbosity/redact), `hello` (server capability/version),
+and `pong`. A minimal client only needs `action_needed`, `action_resolved`, and
+`reply_rejected`.
+
 ### Client → server
 
 `reply` — answer a pending `ask`:
@@ -135,6 +146,11 @@ Reasons: `already_answered`, `unknown_action`, `invalid_answer`,
 
 Optional `idempotencyKey` makes retries safe: the same key + same body re-acks;
 the same key + different body is rejected with `idempotency_conflict`.
+
+Threaded clients may also send optional client → server frames: `user_message`
+(inject/steer a turn with free text), `config_command` (toggle verbosity/redact
+in-thread), `hello` (capability/version), and `ping`. A minimal client only
+needs `reply`.
 
 ## Answer semantics
 
@@ -244,9 +260,13 @@ sends guidance and does not guess a target session or action.
 
 ### Redaction
 
-`notifications.redact` strips sensitive ask/idle content before remote delivery.
-Ask option counts are preserved so index-based answers still resolve, but the
-question text, option labels, and idle summaries are not sent to Telegram.
+`notifications.redact` strips sensitive content before remote delivery, but
+**asks are exempt**: an ask is an interactive prompt the human must read and
+answer remotely, so its `question` and `options` are always sent unredacted
+(otherwise it would be unanswerable). When redaction is enabled, `idle`
+summaries are removed and streamed content frames (`turn_stream`,
+`context_update`, `image_attachment`) are suppressed at their emit sites. When
+redaction is disabled, all content is delivered unchanged.
 
 ### Local `/notify`
 

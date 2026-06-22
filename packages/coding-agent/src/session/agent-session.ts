@@ -5459,6 +5459,14 @@ export class AgentSession {
 			return;
 		}
 
+		// No explicit delivery mode: start a fresh turn only when idle.
+		// While the agent is streaming or compacting, prompt() would throw
+		// AgentBusyError, so queue the message as steering instead.
+		if (this.isStreaming || this.isCompacting) {
+			await this.#queueSteer(text, images);
+			return;
+		}
+
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
 		await this.prompt(text, {
 			expandPromptTemplates: false,

@@ -20,6 +20,8 @@
 
 import * as crypto from "node:crypto";
 import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import { NotificationServer } from "@gajae-code/natives";
 import { logger } from "@gajae-code/utils";
 import { Settings } from "../config/settings";
@@ -34,6 +36,42 @@ import {
 } from "./config";
 import { notificationActionPayload, summaryFromMessage, summaryFromMessages } from "./helpers";
 import { ensureTelegramDaemonRunning } from "./telegram-daemon";
+
+/** Resolve the git dir for `cwd`, handling worktrees where `.git` is a file. */
+function gitDir(cwd: string): string | undefined {
+	const dot = path.join(cwd, ".git");
+	try {
+		if (fs.statSync(dot).isDirectory()) return dot;
+		const m = fs.readFileSync(dot, "utf8").trim().match(/^gitdir:\s*(.+)$/);
+		if (m) return path.resolve(cwd, m[1]);
+	} catch {}
+	return undefined;
+}
+
+/** Best-effort current branch from `.git/HEAD` (no git spawn). */
+function readGitBranch(cwd: string): string | undefined {
+	const gd = gitDir(cwd);
+	if (!gd) return undefined;
+	try {
+		const head = fs.readFileSync(path.join(gd, "HEAD"), "utf8").trim();
+		const m = head.match(/^ref:\s*refs\/heads\/(.+)$/);
+		return m ? m[1] : head.slice(0, 12);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Build the one-time identity header fields for a session thread. */
+function buildIdentity(cwd: string): {
+	repo: string;
+	branch: string;
+	machine: string;
+	title: string;
+} {
+	const repo = path.basename(cwd) || cwd;
+	const branch = readGitBranch(cwd) ?? "(detached)";
+	return { repo, branch, machine: os.hostname(), title: `${repo} · ${branch}` };
+}
 
 interface PendingInteractiveAsk {
 	resolve: (label: string | undefined) => void;
@@ -287,6 +325,16 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 				} catch (e) {
 					logger.warn(`notifications: failed to ensure Telegram daemon: ${String(e)}`);
 				}
+			}
+
+			// One-time identity header (repo/branch/machine/session) pinned at the top
+			// of the session thread by the daemon.
+			try {
+				server.pushFrame(
+					JSON.stringify({ type: "identity_header", sessionId: id, ...buildIdentity(ctx.cwd) }),
+				);
+			} catch (e) {
+				logger.warn(`notifications: identity_header failed: ${String(e)}`);
 			}
 
 			// Unattended: a real ask emits a workflow gate; register it repliable by gate_id.

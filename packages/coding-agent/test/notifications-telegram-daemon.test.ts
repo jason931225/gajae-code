@@ -481,3 +481,34 @@ test("ensureTelegramDaemonRunning spawns the daemon subcommand with owner-id and
 	expect(ai).toBeGreaterThanOrEqual(0);
 	expect(captured!.args[ai + 1]).toBe(agentDir);
 });
+test("image_attachment frame uploads via sendPhoto into the session topic", async () => {
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+	});
+	const session = {
+		sessionId: "S",
+		token: "tok",
+		ws: { readyState: 1, send() {} },
+		pending: new Map(),
+	};
+	// biome-ignore lint/suspicious/noExplicitAny: minimal SessionSocket stand-in for the test
+	await daemon.handleSessionMessage(session as any, {
+		type: "image_attachment",
+		sessionId: "S",
+		source: "computer",
+		mime: "image/png",
+		data: "AAAA",
+	});
+	const createTopic = bot.calls.find(c => c.method === "createForumTopic");
+	const photo = bot.calls.find(c => c.method === "sendPhoto");
+	expect(createTopic).toBeTruthy();
+	expect(photo).toBeTruthy();
+	expect(photo!.body.photo).toBe("AAAA");
+	expect(Number(photo!.body.message_thread_id)).toBeGreaterThan(0);
+});

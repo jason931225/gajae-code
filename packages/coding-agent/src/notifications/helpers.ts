@@ -99,3 +99,37 @@ export function summaryFromMessages(messages: unknown, max = 280): string | unde
 	}
 	return undefined;
 }
+
+/** An agent-produced image extracted from a message's content. */
+export interface ExtractedImage {
+	source: string;
+	mime: string;
+	data: string;
+}
+
+/**
+ * Extract agent-produced images (`{ type: "image", data, mimeType }` blocks)
+ * from a message's content — e.g. computer-use/browser screenshots or tool
+ * image outputs — for `image_attachment` delivery.
+ */
+export function imageAttachmentsFromMessage(message: unknown, source = "agent"): ExtractedImage[] {
+	const content = (message as { content?: unknown } | null | undefined)?.content;
+	if (!Array.isArray(content)) return [];
+	const out: ExtractedImage[] = [];
+	for (const block of content) {
+		if (
+			block &&
+			typeof block === "object" &&
+			(block as { type?: unknown }).type === "image" &&
+			typeof (block as { data?: unknown }).data === "string" &&
+			typeof (block as { mimeType?: unknown }).mimeType === "string"
+		) {
+			out.push({
+				source,
+				mime: (block as { mimeType: string }).mimeType,
+				data: (block as { data: string }).data,
+			});
+		}
+	}
+	return out;
+}

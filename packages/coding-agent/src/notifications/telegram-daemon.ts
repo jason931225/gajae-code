@@ -396,14 +396,33 @@ export class TelegramNotificationDaemon {
 		this.aliasTable = createAliasTable();
 		this.botApi = opts.botApi ?? {
 			call: async (method, body) => {
-				const res = await (opts.fetchImpl ?? fetch)(
-					`${opts.apiBase ?? "https://api.telegram.org"}/bot${opts.botToken}/${method}`,
-					{
-						method: "POST",
-						headers: { "content-type": "application/json" },
-						body: JSON.stringify(body),
-					},
-				);
+				const apiBase = opts.apiBase ?? "https://api.telegram.org";
+				const url = `${apiBase}/bot${opts.botToken}/${method}`;
+				const fetchImpl = opts.fetchImpl ?? fetch;
+				// sendPhoto with base64 bytes must be a multipart upload (Telegram does
+				// not accept base64 in JSON). Other methods stay JSON.
+				const photoBody = body as { photo?: unknown; mime?: unknown } | null;
+				if (method === "sendPhoto" && photoBody && typeof photoBody.photo === "string") {
+					const b = body as {
+						chat_id: unknown;
+						message_thread_id?: unknown;
+						photo: string;
+						mime?: string;
+						caption?: string;
+					};
+					const form = new FormData();
+					form.set("chat_id", String(b.chat_id));
+					if (b.message_thread_id !== undefined) form.set("message_thread_id", String(b.message_thread_id));
+					if (b.caption) form.set("caption", b.caption);
+					form.set("photo", new Blob([Buffer.from(b.photo, "base64")], { type: b.mime ?? "image/png" }), "image");
+					const res = await fetchImpl(url, { method: "POST", body: form });
+					return res.json();
+				}
+				const res = await fetchImpl(url, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(body),
+				});
 				return res.json();
 			},
 		};
@@ -526,12 +545,13 @@ export class TelegramNotificationDaemon {
 			const thread = Number(topicId);
 			try {
 				if (send.method === "sendPhoto" && send.photoBase64) {
-					// The JSON Bot API transport cannot multipart-upload bytes; surface a
-					// captioned note in-thread (real upload needs a multipart transport).
-					await this.botApi.call("sendMessage", {
+					// Real photo upload (the default botApi multiparts base64 -> file).
+					await this.botApi.call("sendPhoto", {
 						chat_id: this.opts.chatId,
 						message_thread_id: thread,
-						text: send.text ? `🖼 ${send.text}` : "🖼 [image]",
+						photo: send.photoBase64,
+						mime: send.mime,
+						caption: send.text,
 					});
 				} else if (send.text) {
 					await this.botApi.call("sendMessage", {

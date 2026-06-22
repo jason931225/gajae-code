@@ -36,7 +36,12 @@ import {
 	type NotificationConfig,
 	sessionTag,
 } from "./config";
-import { notificationActionPayload, summaryFromMessage, summaryFromMessages } from "./helpers";
+import {
+	imageAttachmentsFromMessage,
+	notificationActionPayload,
+	summaryFromMessage,
+	summaryFromMessages,
+} from "./helpers";
 import { ensureTelegramDaemonRunning } from "./telegram-daemon";
 
 /** Resolve the git dir for `cwd`, handling worktrees where `.git` is a file. */
@@ -520,6 +525,29 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			rt.server.pushFrame(JSON.stringify({ type: "turn_stream", sessionId: id, phase: "finalized", text }));
 		} catch (e) {
 			logger.warn(`notifications: pushFrame (turn) failed: ${String(e)}`);
+		}
+	});
+
+	// Stream agent-produced images (computer/browser/tool screenshots) as
+	// image_attachment frames; suppressed when redaction is on.
+	api.on("message_end", (event, ctx) => {
+		const id = sessionId(ctx);
+		const rt = runtimes.get(id);
+		if (!rt || rt.redact) return;
+		for (const img of imageAttachmentsFromMessage(event.message)) {
+			try {
+				rt.server.pushFrame(
+					JSON.stringify({
+						type: "image_attachment",
+						sessionId: id,
+						source: img.source,
+						mime: img.mime,
+						data: img.data,
+					}),
+				);
+			} catch (e) {
+				logger.warn(`notifications: image_attachment failed: ${String(e)}`);
+			}
 		}
 	});
 

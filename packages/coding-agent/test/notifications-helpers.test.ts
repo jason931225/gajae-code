@@ -4,6 +4,7 @@ import {
 	idleDedupeKey,
 	notificationActionPayload,
 	summaryFromMessage,
+	imageAttachmentsFromMessage,
 	summaryFromMessages,
 	truncate,
 } from "../src/notifications/helpers";
@@ -42,6 +43,27 @@ describe("notifications helpers", () => {
 	test("summaryFromMessages returns undefined for empty/non-array", () => {
 		expect(summaryFromMessages([])).toBeUndefined();
 		expect(summaryFromMessages(undefined)).toBeUndefined();
+	});
+
+	test("imageAttachmentsFromMessage extracts image blocks with data + mime", () => {
+		const message = {
+			role: "toolResult",
+			content: [
+				{ type: "text", text: "screenshot:" },
+				{ type: "image", data: "AAAA", mimeType: "image/png" },
+				{ type: "image", data: "BBBB", mimeType: "image/jpeg" },
+			],
+		};
+		expect(imageAttachmentsFromMessage(message, "computer")).toEqual([
+			{ source: "computer", mime: "image/png", data: "AAAA" },
+			{ source: "computer", mime: "image/jpeg", data: "BBBB" },
+		]);
+	});
+
+	test("imageAttachmentsFromMessage returns empty for text-only or malformed", () => {
+		expect(imageAttachmentsFromMessage({ content: "just text" })).toEqual([]);
+		expect(imageAttachmentsFromMessage({ content: [{ type: "image", data: 123 }] })).toEqual([]);
+		expect(imageAttachmentsFromMessage(undefined)).toEqual([]);
 	});
 
 	test("asksFromAskInput extracts questions, options, and namespaced ids", () => {

@@ -758,36 +758,41 @@ export class TelegramNotificationDaemon {
 			pid: this.opts.pid ?? process.pid,
 		});
 		if (!this.running) return;
-		await this.registerBotCommands();
-		await this.loadAliases();
-		await this.loadTopics();
-		await this.scanRoots();
-		let idleSince = (this.opts.now ?? Date.now)();
-		while (this.running) {
-			if (
-				!(await renewDaemonHeartbeat({
-					settings: this.opts.settings,
-					ownerId: this.opts.ownerId,
-					fs: this.fsImpl,
-					now: this.opts.now,
-					pid: this.opts.pid ?? process.pid,
-				}))
-			)
-				break;
+		this.startFlushTimer();
+		try {
+			await this.registerBotCommands();
+			await this.loadAliases();
+			await this.loadTopics();
 			await this.scanRoots();
-			if (this.sessions.size === 0) {
-				if ((this.opts.now ?? Date.now)() - idleSince >= (this.opts.idleTimeoutMs ?? 60_000)) break;
-			} else {
-				idleSince = (this.opts.now ?? Date.now)();
-				await this.pollOnce();
+			let idleSince = (this.opts.now ?? Date.now)();
+			while (this.running) {
+				if (
+					!(await renewDaemonHeartbeat({
+						settings: this.opts.settings,
+						ownerId: this.opts.ownerId,
+						fs: this.fsImpl,
+						now: this.opts.now,
+						pid: this.opts.pid ?? process.pid,
+					}))
+				)
+					break;
+				await this.scanRoots();
+				if (this.sessions.size === 0) {
+					if ((this.opts.now ?? Date.now)() - idleSince >= (this.opts.idleTimeoutMs ?? 60_000)) break;
+				} else {
+					idleSince = (this.opts.now ?? Date.now)();
+					await this.pollOnce();
+				}
+				await new Promise(resolve => (this.opts.setTimeoutImpl ?? setTimeout)(resolve, 10));
 			}
-			await new Promise(resolve => (this.opts.setTimeoutImpl ?? setTimeout)(resolve, 10));
+		} finally {
+			this.stopFlushTimer();
+			await releaseDaemonOwnership({
+				settings: this.opts.settings,
+				ownerId: this.opts.ownerId,
+				fs: this.fsImpl,
+				now: this.opts.now,
+			});
 		}
-		await releaseDaemonOwnership({
-			settings: this.opts.settings,
-			ownerId: this.opts.ownerId,
-			fs: this.fsImpl,
-			now: this.opts.now,
-		});
 	}
 }

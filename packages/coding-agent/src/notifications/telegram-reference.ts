@@ -15,6 +15,7 @@
  */
 
 import * as fs from "node:fs";
+import { renderThreadedFrame } from "./threaded-render";
 
 /** One inline-keyboard button. */
 export interface InlineButton {
@@ -203,22 +204,6 @@ function routeWithAnswer(route: CallbackRoute | Omit<CallbackRoute, "answer">, a
 	return { sessionId: route.sessionId, actionId: route.actionId, answer };
 }
 
-function parseAnswerCommand(text: string): { sessionId: string; actionId?: string; answer: string } | undefined {
-	const trimmed = text.trim();
-	if (!trimmed.startsWith("/answer")) return undefined;
-	const parts = trimmed.split(/\s+/);
-	if (parts.length < 3) return undefined;
-	const sessionId = parts[1]!;
-	let actionId: string | undefined;
-	let answerStart = 2;
-	if (parts.length >= 4) {
-		actionId = parts[2]!;
-		answerStart = 3;
-	}
-	const answer = parts.slice(answerStart).join(" ");
-	if (!answer) return undefined;
-	return { sessionId, actionId, answer };
-}
 
 /** Route a Telegram update to a session/action without I/O. Fail closed under ambiguity. */
 export function routeInboundUpdate(update: unknown, ctx: RouteInboundContext): RouteDecision {
@@ -240,19 +225,6 @@ export function routeInboundUpdate(update: unknown, ctx: RouteInboundContext): R
 	}
 
 	if (text) {
-		const command = parseAnswerCommand(text);
-		if (command) {
-			const pending = ctx.pendingBySession(command.sessionId);
-			const match = command.actionId
-				? pending.find(item => item.actionId === command.actionId)
-				: pending.length === 1
-					? pending[0]
-					: undefined;
-			return match
-				? { kind: "reply", sessionId: match.sessionId, actionId: match.actionId, answer: command.answer }
-				: { kind: "stale", reason: "unresolvable_answer_command" };
-		}
-
 		const allPending = ctx.pendingBySession(undefined);
 		if (allPending.length === 1) {
 			const [pending] = allPending;
@@ -329,6 +301,14 @@ export async function runTelegramReferenceClient(opts: TelegramReferenceOptions)
 			});
 		} else if (msg.type === "action_resolved" && msg.id === latestPendingAskId) {
 			latestPendingAskId = undefined;
+		} else {
+			// Threaded frames (identity/context/turn/config): render as plain messages
+			// in this flat example client. The bundled daemon renders them into the
+			// session's forum topic; this reference shows the minimal handling.
+			const threaded = renderThreadedFrame(msg as never);
+			if (threaded?.text) {
+				void send("sendMessage", { chat_id: opts.chatId, text: threaded.text });
+			}
 		}
 	});
 

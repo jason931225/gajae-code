@@ -21,6 +21,6 @@ pub use actions::{ActionRegistry, ReplyClassification, ReplyOutcome};
 pub use discovery::{EndpointRecord, clean_stale, endpoint_path, read_endpoint, write_endpoint};
 pub use protocol::{
 	ActionKind, ActionNeeded, ActionResolved, AnswerSelector, ClientMessage, RejectReason, Reply,
-	ReplyAnswer, ReplyRejected, ResolvedBy, ServerMessage,
+	ReplyAnswer, ReplyRejected, ResolvedBy, ServerMessage, Verbosity,
 };
 pub use server::{ServerConfig, ServerHandle, start};

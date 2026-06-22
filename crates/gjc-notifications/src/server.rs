@@ -90,6 +90,9 @@ struct ServerState {
 	resolver_available: AtomicBool,
 	/// Present in forward mode: accepted replies are sent here for the host.
 	reply_tx:           Option<tokio::sync::mpsc::UnboundedSender<Reply>>,
+	/// Always present: inbound free-text injections / in-thread config commands
+	/// forwarded to the host (token-authorized).
+	inbound_tx:         tokio::sync::mpsc::UnboundedSender<ClientMessage>,
 }
 
 /// Handle to a running server. Dropping it does not stop the server; call
@@ -103,6 +106,7 @@ pub struct ServerHandle {
 	session_id:  String,
 	state_root:  Option<PathBuf>,
 	reply_rx:    Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Reply>>>,
+	inbound_rx:  Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ClientMessage>>>,
 }
 
 impl ServerHandle {
@@ -137,6 +141,16 @@ impl ServerHandle {
 		let _ = self.state.tx.send(ServerMessage::ActionNeeded(msg));
 	}
 
+	/// Broadcast an ephemeral threaded-session frame to connected clients.
+	///
+	/// Used for the additive identity/context/turn/image/config/hello frames.
+	/// Like [`ServerHandle::note_idle`] these are not buffered for replay (the
+	/// host re-emits the identity header on reconnect); existing buffered-ask
+	/// replay (see [`ServerHandle::register_ask`]) is unaffected.
+	pub fn push_frame(&self, msg: ServerMessage) {
+		let _ = self.state.tx.send(msg);
+	}
+
 	/// Resolve a pending action locally (e.g. the CLI/TUI answered it).
 	///
 	/// Broadcasts `action_resolved` so clients mark it non-repliable. A no-op if
@@ -157,6 +171,14 @@ impl ServerHandle {
 	#[must_use]
 	pub fn take_reply_receiver(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<Reply>> {
 		self.reply_rx.lock().take()
+	}
+
+	/// Take the receiver of forwarded inbound messages (free-text injections and
+	/// in-thread config commands). Returns the receiver exactly once; subsequent
+	/// calls return `None`.
+	#[must_use]
+	pub fn take_inbound_receiver(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<ClientMessage>> {
+		self.inbound_rx.lock().take()
 	}
 
 	/// Resolve a pending action as answered by a remote client, after the host
@@ -248,6 +270,7 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
 	} else {
 		(None, None)
 	};
+	let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
 
 	let state = Arc::new(ServerState {
 		token: config.token,
@@ -255,6 +278,7 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
 		tx,
 		resolver_available: AtomicBool::new(config.resolver_available),
 		reply_tx,
+		inbound_tx,
 	});
 	let cancel = CancellationToken::new();
 	let accept_task = tokio::spawn(accept_loop(listener, Arc::clone(&state), cancel.clone()));
@@ -266,6 +290,7 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
 		session_id: config.session_id,
 		state_root: config.state_root,
 		reply_rx: Mutex::new(reply_rx),
+		inbound_rx: Mutex::new(Some(inbound_rx)),
 	})
 }
 
@@ -355,9 +380,29 @@ async fn handle_text<S>(text: &str, state: &Arc<ServerState>, write: &mut S) -> 
 where
 	S: SinkExt<Message> + Unpin,
 {
-	let Ok(ClientMessage::Reply(reply)) = serde_json::from_str::<ClientMessage>(text) else {
+	let msg = match serde_json::from_str::<ClientMessage>(text) {
+		Ok(m) => m,
 		// Ignore malformed frames without tearing down the connection.
-		return true;
+		Err(_) => return true,
+	};
+	let reply = match msg {
+		ClientMessage::Reply(reply) => reply,
+		// Inbound free-text injection / in-thread config command: forward to the
+		// host (token-authorized) and stop. These are not action replies.
+		ClientMessage::UserMessage(u) => {
+			if tokens_match(&u.token, &state.token) {
+				let _ = state.inbound_tx.send(ClientMessage::UserMessage(u));
+			}
+			return true;
+		},
+		ClientMessage::ConfigCommand(c) => {
+			if tokens_match(&c.token, &state.token) {
+				let _ = state.inbound_tx.send(ClientMessage::ConfigCommand(c));
+			}
+			return true;
+		},
+		// Capability handshake / forward-compat: nothing to do server-side yet.
+		ClientMessage::Hello(_) | ClientMessage::Unknown => return true,
 	};
 
 	let authorized = tokens_match(&reply.token, &state.token);
@@ -528,6 +573,48 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn push_frame_broadcasts_threaded_frames_and_preserves_ask() {
+		use crate::protocol::{IdentityHeader, TurnPhase, TurnStream};
+		let handle = start(ServerConfig::new("s", "secret")).await.unwrap();
+		let mut ws = connect(&handle, "secret").await;
+		wait_for_clients(&handle, 1).await;
+
+		handle.push_frame(ServerMessage::IdentityHeader(IdentityHeader {
+			session_id: "s".into(),
+			repo:       "gajae-code".into(),
+			branch:     "feat/notification-surface".into(),
+			machine:    "m1".into(),
+			title:      Some("Session".into()),
+		}));
+		match next_server_msg(&mut ws).await {
+			ServerMessage::IdentityHeader(h) => assert_eq!(h.repo, "gajae-code"),
+			other => panic!("expected identity_header, got {other:?}"),
+		}
+
+		handle.push_frame(ServerMessage::TurnStream(TurnStream {
+			session_id:  "s".into(),
+			phase:       TurnPhase::Finalized,
+			text:        "done".into(),
+			message_ref: None,
+		}));
+		match next_server_msg(&mut ws).await {
+			ServerMessage::TurnStream(t) => {
+				assert_eq!(t.phase, TurnPhase::Finalized);
+				assert_eq!(t.text, "done");
+			},
+			other => panic!("expected turn_stream, got {other:?}"),
+		}
+
+		// Buffered-ask broadcast still works alongside the new streaming frames.
+		handle.register_ask(ask("a1"), true);
+		match next_server_msg(&mut ws).await {
+			ServerMessage::ActionNeeded(a) => assert_eq!(a.id, "a1"),
+			other => panic!("expected action_needed, got {other:?}"),
+		}
+		handle.stop();
+	}
+
+	#[tokio::test]
 	async fn unknown_action_reply_is_rejected_to_sender() {
 		let handle = start(ServerConfig::new("s", "secret")).await.unwrap();
 		let mut ws = connect(&handle, "secret").await;
@@ -692,5 +779,63 @@ mod tests {
 			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 		}
 		panic!("clients did not subscribe in time");
+	}
+
+	#[tokio::test]
+	async fn inbound_user_message_forwards_to_host() {
+		let handle = start(ServerConfig::new("s", "secret")).await.unwrap();
+		let mut inbound = handle.take_inbound_receiver().expect("inbound rx");
+		let mut ws = connect(&handle, "secret").await;
+		wait_for_clients(&handle, 1).await;
+		ws.send(Message::Text(
+			serde_json::to_string(&ClientMessage::UserMessage(crate::protocol::UserMessage {
+				session_id: "s".into(),
+				text:       "keep going".into(),
+				token:      "secret".into(),
+				update_id:  Some(7),
+				thread_id:  Some("topic-1".into()),
+			}))
+			.unwrap()
+			.into(),
+		))
+		.await
+		.unwrap();
+		let got = tokio::time::timeout(std::time::Duration::from_secs(2), inbound.recv())
+			.await
+			.expect("inbound timed out")
+			.expect("inbound channel closed");
+		match got {
+			ClientMessage::UserMessage(u) => {
+				assert_eq!(u.text, "keep going");
+				assert_eq!(u.update_id, Some(7));
+				assert_eq!(u.thread_id.as_deref(), Some("topic-1"));
+			},
+			other => panic!("expected user_message, got {other:?}"),
+		}
+		handle.stop();
+	}
+
+	#[tokio::test]
+	async fn inbound_user_message_wrong_token_is_dropped() {
+		let handle = start(ServerConfig::new("s", "secret")).await.unwrap();
+		let mut inbound = handle.take_inbound_receiver().expect("inbound rx");
+		let mut ws = connect(&handle, "secret").await;
+		wait_for_clients(&handle, 1).await;
+		ws.send(Message::Text(
+			serde_json::to_string(&ClientMessage::UserMessage(crate::protocol::UserMessage {
+				session_id: "s".into(),
+				text:       "x".into(),
+				token:      "WRONG".into(),
+				update_id:  None,
+				thread_id:  None,
+			}))
+			.unwrap()
+			.into(),
+		))
+		.await
+		.unwrap();
+		let r = tokio::time::timeout(std::time::Duration::from_millis(300), inbound.recv()).await;
+		assert!(r.is_err(), "wrong-token inbound must not forward");
+		handle.stop();
 	}
 }

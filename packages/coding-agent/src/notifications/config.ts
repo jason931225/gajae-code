@@ -6,6 +6,7 @@ export interface NotificationConfig {
 	botToken?: string;
 	chatId?: string;
 	redact: boolean;
+	verbosity: "lean" | "verbose";
 	idleTimeoutMs: number;
 }
 
@@ -16,6 +17,7 @@ export function getNotificationConfig(settings: Settings): NotificationConfig {
 		botToken: settings.get("notifications.telegram.botToken"),
 		chatId: settings.get("notifications.telegram.chatId"),
 		redact: settings.get("notifications.redact"),
+		verbosity: settings.get("notifications.verbosity") === "verbose" ? "verbose" : "lean",
 		idleTimeoutMs: settings.get("notifications.daemon.idleTimeoutMs"),
 	};
 }

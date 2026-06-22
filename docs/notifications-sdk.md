@@ -231,8 +231,13 @@ routes replies back to the exact session/action.
 Supported reply paths:
 
 - tap an inline button on an ask notification;
-- reply to the bot message in Telegram;
-- use `/answer <session-tag> <answer>` when a session tag is needed.
+- reply inside the session's thread/topic (replies are thread-native; the
+  topic identifies the session, so no session tag is needed).
+
+In threaded mode the user can also adjust per-session behaviour with in-thread
+config commands: `/verbose`, `/lean`, `/verbosity <lean|verbose>`, and
+`/redact <on|off>`. The legacy `/answer <session-tag> <answer>` command is
+removed — replies are routed by the topic they arrive in.
 
 Unknown, expired, or restart-unvalidated callback aliases fail closed: the daemon
 sends guidance and does not guess a target session or action.

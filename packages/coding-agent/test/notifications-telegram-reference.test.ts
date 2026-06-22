@@ -64,7 +64,7 @@ describe("telegram reference client helpers", () => {
 		});
 	});
 
-	test("routeInboundUpdate order: reply_to_message before /answer before plain text", () => {
+	test("routeInboundUpdate: reply_to_message wins; ambiguous plain text is stale (tag commands removed)", () => {
 		const messageRoutes = new Map([["10", { sessionId: "reply-session", actionId: "reply-action" }]]);
 		const pending = [
 			{ sessionId: "s1", actionId: "a1" },
@@ -76,18 +76,14 @@ describe("telegram reference client helpers", () => {
 			pendingBySession: (sessionId?: string) => pending.filter(item => !sessionId || item.sessionId === sessionId),
 			pairedChatId: "42",
 		};
+		// reply_to_message routes to the replied message's action.
 		expect(
 			routeInboundUpdate(
-				{ message: { chat: { id: 42 }, text: "/answer s1 wrong", reply_to_message: { message_id: 10 } } },
+				{ message: { chat: { id: 42 }, text: "looks good", reply_to_message: { message_id: 10 } } },
 				ctx,
 			),
-		).toEqual({ kind: "reply", sessionId: "reply-session", actionId: "reply-action", answer: "/answer s1 wrong" });
-		expect(routeInboundUpdate({ message: { chat: { id: 42 }, text: "/answer s1 ok" } }, ctx)).toEqual({
-			kind: "reply",
-			sessionId: "s1",
-			actionId: "a1",
-			answer: "ok",
-		});
+		).toEqual({ kind: "reply", sessionId: "reply-session", actionId: "reply-action", answer: "looks good" });
+		// Plain text with multiple pending asks is ambiguous; /answer tag commands are gone.
 		expect(routeInboundUpdate({ message: { chat: { id: 42 }, text: "plain" } }, ctx)).toEqual({
 			kind: "stale",
 			reason: "ambiguous_plain_text",

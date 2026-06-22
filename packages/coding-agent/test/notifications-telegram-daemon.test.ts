@@ -18,13 +18,18 @@ function tempAgentDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "gjc-telegram-daemon-test-"));
 }
 
-function settings(_agentDir: string): Settings {
-	return Settings.isolated({
-		"notifications.enabled": true,
-		"notifications.telegram.botToken": "123456:secret-token",
-		"notifications.telegram.chatId": "42",
-		"notifications.daemon.idleTimeoutMs": 20,
-	}) as Settings;
+function settings(agentDir: string): Settings {
+	// Isolate getAgentDir() to the temp dir so daemon persistence (aliases,
+	// topics, lock/state/roots) never writes into the real global ~/.gjc/agent.
+	return setPrivateAgentDir(
+		Settings.isolated({
+			"notifications.enabled": true,
+			"notifications.telegram.botToken": "123456:secret-token",
+			"notifications.telegram.chatId": "42",
+			"notifications.daemon.idleTimeoutMs": 20,
+		}) as Settings,
+		agentDir,
+	);
 }
 
 function setPrivateAgentDir(s: Settings, agentDir: string) {
@@ -74,6 +79,7 @@ class FakeBotApi {
 			this.updates = [];
 			return { ok: true, result };
 		}
+		if (method === "createForumTopic") return { ok: true, result: { message_thread_id: this.calls.length } };
 		if (method === "sendMessage") return { ok: true, result: { message_id: this.calls.length } };
 		return { ok: true, result: true };
 	}
@@ -429,7 +435,7 @@ describe("telegram daemon", () => {
 	});
 });
 
-test("daemon registers the /answer command menu and drops stale rpc commands", async () => {
+test("daemon registers in-thread config commands and drops stale rpc/answer commands", async () => {
 	const s = settings(tempAgentDir());
 	const bot = new FakeBotApi();
 	const daemon = new TelegramNotificationDaemon({
@@ -443,7 +449,10 @@ test("daemon registers the /answer command menu and drops stale rpc commands", a
 	const call = bot.calls.find((c: any) => c.method === "setMyCommands");
 	expect(call).toBeTruthy();
 	const cmds = (call!.body.commands as Array<{ command: string }>).map(c => c.command);
-	expect(cmds).toContain("answer");
+	expect(cmds).toContain("verbose");
+	expect(cmds).toContain("lean");
+	expect(cmds).toContain("redact");
+	expect(cmds).not.toContain("answer");
 	expect(cmds).not.toContain("attach");
 	expect(cmds).not.toContain("detach");
 });

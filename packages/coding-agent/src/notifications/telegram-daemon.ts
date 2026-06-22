@@ -13,6 +13,11 @@ import {
 	readEndpoint,
 	routeInboundUpdate,
 } from "./telegram-reference";
+import { parseInThreadConfigCommand } from "./config-commands";
+import { RateLimitPool } from "./rate-limit-pool";
+import { decideThreadedInbound } from "./threaded-inbound";
+import { type ThreadedSend, renderThreadedFrame } from "./threaded-render";
+import { TopicRegistry } from "./topic-registry";
 
 export type EnsureDaemonResult = "owner_spawned" | "attached" | "disabled";
 
@@ -382,6 +387,9 @@ export class TelegramNotificationDaemon {
 	private offset = 0;
 	private readonly fsImpl: TelegramDaemonFs;
 	private readonly botApi: BotApi;
+	private readonly topics = new TopicRegistry();
+	private readonly pool: RateLimitPool<{ send: ThreadedSend; topicId: string }>;
+	private readonly seenUpdateIds = new Set<number>();
 
 	constructor(private readonly opts: TelegramDaemonOptions) {
 		this.fsImpl = opts.fs ?? nodeFs;
@@ -399,6 +407,7 @@ export class TelegramNotificationDaemon {
 				return res.json();
 			},
 		};
+		this.pool = new RateLimitPool<{ send: ThreadedSend; topicId: string }>({ now: opts.now });
 	}
 
 	async loadAliases(): Promise<void> {
@@ -447,9 +456,116 @@ export class TelegramNotificationDaemon {
 		});
 	}
 
+	private static readonly THREADED_FRAMES = new Set([
+		"identity_header",
+		"context_update",
+		"turn_stream",
+		"image_attachment",
+		"config_update",
+	]);
+
+	private topicNameFor(sessionId: string, msg: { title?: unknown }): string {
+		return typeof msg?.title === "string" && msg.title ? msg.title : `GJC ${sessionId.slice(-6)}`;
+	}
+
+	/**
+	 * Resolve (creating once via `createForumTopic`) the forum topic for a
+	 * session. Threaded mode is required: on capability failure this returns
+	 * `undefined` and the caller drops the send (no flat fallback).
+	 */
+	private async ensureTopic(sessionId: string, name: string): Promise<string | undefined> {
+		const existing = this.topics.get(sessionId);
+		if (existing) return existing.topicId;
+		try {
+			const rec = await this.topics.getOrCreateTopic(
+				sessionId,
+				async () => {
+					const res = (await this.botApi.call("createForumTopic", {
+						chat_id: this.opts.chatId,
+						name,
+					})) as { result?: { message_thread_id?: number } };
+					const tid = res.result?.message_thread_id;
+					if (tid === undefined || tid === null) throw new Error("createForumTopic: no message_thread_id");
+					return String(tid);
+				},
+				this.opts.now,
+			);
+			await this.persistTopics();
+			return rec.topicId;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async persistTopics(): Promise<void> {
+		const paths = daemonPaths(this.opts.settings.getAgentDir());
+		await ensureDir(this.fsImpl, paths.dir);
+		await writeJsonAtomic(this.fsImpl, path.join(paths.dir, "telegram-topics.json"), this.topics.serialize());
+	}
+
+	async loadTopics(): Promise<void> {
+		const paths = daemonPaths(this.opts.settings.getAgentDir());
+		const raw = await readJson<{ topics?: Record<string, unknown> }>(this.fsImpl, path.join(paths.dir, "telegram-topics.json"));
+		if (raw && typeof raw === "object") {
+			// Reconstruct via a fresh registry then copy in (TopicRegistry loads from state in ctor).
+			const restored = new TopicRegistry(raw as never);
+			for (const sid of Object.keys(raw.topics ?? {})) {
+				const rec = restored.get(sid);
+				if (rec) await this.topics.getOrCreateTopic(sid, async () => rec.topicId, this.opts.now);
+			}
+		}
+	}
+
+	/** Drain the shared rate-limit pool and deliver each granted send to its topic. */
+	private async flushPool(): Promise<void> {
+		for (const item of this.pool.drain()) {
+			const { send, topicId } = item.payload;
+			const thread = Number(topicId);
+			try {
+				if (send.method === "sendPhoto" && send.photoBase64) {
+					// The JSON Bot API transport cannot multipart-upload bytes; surface a
+					// captioned note in-thread (real upload needs a multipart transport).
+					await this.botApi.call("sendMessage", {
+						chat_id: this.opts.chatId,
+						message_thread_id: thread,
+						text: send.text ? `🖼 ${send.text}` : "🖼 [image]",
+					});
+				} else if (send.text) {
+					await this.botApi.call("sendMessage", {
+						chat_id: this.opts.chatId,
+						message_thread_id: thread,
+						text: send.text,
+					});
+				}
+			} catch {
+				// Best-effort: a failed send must never stop the daemon.
+			}
+		}
+	}
+
 	async handleSessionMessage(session: SessionSocket, msg: any): Promise<void> {
+		if (typeof msg?.type === "string" && TelegramNotificationDaemon.THREADED_FRAMES.has(msg.type)) {
+			const send = renderThreadedFrame(msg);
+			if (!send) return;
+			const topicId = await this.ensureTopic(session.sessionId, this.topicNameFor(session.sessionId, msg));
+			if (!topicId) return;
+			this.pool.submit({
+				sessionId: session.sessionId,
+				lane: send.lane,
+				coalesceKey: send.coalesceKey,
+				payload: { send, topicId },
+			});
+			await this.flushPool();
+			if (send.identity) {
+				this.topics.markIdentitySent(session.sessionId);
+				await this.persistTopics();
+			}
+			return;
+		}
 		if (msg.type === "action_needed" && msg.id) {
 			if (msg.kind === "ask") session.pending.set(msg.id, { sessionId: session.sessionId, actionId: msg.id });
+			const topicId = await this.ensureTopic(session.sessionId, `GJC ${session.sessionId.slice(-6)}`);
+			if (!topicId) return;
 			const rendered = buildActionMessage({
 				kind: msg.kind ?? "ask",
 				id: msg.id,
@@ -466,6 +582,7 @@ export class TelegramNotificationDaemon {
 			]);
 			const result = (await this.botApi.call("sendMessage", {
 				chat_id: this.opts.chatId,
+				message_thread_id: Number(topicId),
 				text: rendered.text,
 				...(inline_keyboard.length ? { reply_markup: { inline_keyboard } } : {}),
 			})) as { result?: { message_id?: number } };
@@ -502,6 +619,44 @@ export class TelegramNotificationDaemon {
 	}
 
 	async handleTelegramUpdate(update: unknown): Promise<void> {
+		// Threaded injection: a free-text message in a known topic (not a button
+		// tap and not a reply to a specific ask message) injects a user turn or an
+		// in-thread config command. Fail-closed: paired chat + known topic +
+		// update_id dedupe are all enforced by decideThreadedInbound.
+		const raw = update as {
+			callback_query?: unknown;
+			message?: { reply_to_message?: unknown };
+		};
+		if (!raw.callback_query && !raw.message?.reply_to_message) {
+			const inbound = decideThreadedInbound(update as never, {
+				pairedChatId: this.opts.chatId,
+				topicToSession: t => this.topics.sessionForTopic(t),
+				isDuplicate: id => this.seenUpdateIds.has(id),
+			});
+			if (inbound.kind === "duplicate") return;
+			if (inbound.kind === "inject") {
+				this.seenUpdateIds.add(inbound.updateId);
+				const session = this.sessions.get(inbound.sessionId);
+				if (session?.ws.readyState === WebSocket.OPEN) {
+					const cfg = parseInThreadConfigCommand(inbound.text);
+					session.ws.send(
+						JSON.stringify(
+							cfg
+								? { type: "config_command", sessionId: inbound.sessionId, token: session.token, ...cfg }
+								: {
+										type: "user_message",
+										sessionId: inbound.sessionId,
+										text: inbound.text,
+										token: session.token,
+										updateId: inbound.updateId,
+										threadId: inbound.threadId,
+									},
+						),
+					);
+				}
+				return;
+			}
+		}
 		const callbackId = (update as { callback_query?: { id?: unknown } }).callback_query?.id;
 		const decision = routeInboundUpdate(update, {
 			aliasTable: this.aliasTable,
@@ -543,10 +698,9 @@ export class TelegramNotificationDaemon {
 		try {
 			await this.botApi.call("setMyCommands", {
 				commands: [
-					{
-						command: "answer",
-						description: "Reply to a pending question: /answer <sessionId> [actionId] <reply>",
-					},
+					{ command: "verbose", description: "Mirror full tool output + reasoning in this thread" },
+					{ command: "lean", description: "Mirror assistant text + tool names only (default)" },
+					{ command: "redact", description: "Toggle redaction of streamed content: /redact <on|off>" },
 				],
 			});
 		} catch {
@@ -565,6 +719,7 @@ export class TelegramNotificationDaemon {
 		if (!this.running) return;
 		await this.registerBotCommands();
 		await this.loadAliases();
+		await this.loadTopics();
 		await this.scanRoots();
 		let idleSince = (this.opts.now ?? Date.now)();
 		while (this.running) {

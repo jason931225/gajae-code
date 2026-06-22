@@ -81,3 +81,21 @@ export function summaryFromMessage(message: unknown, max = 280): string | undefi
 	const joined = parts.join("").trim();
 	return joined ? truncate(joined, max) : undefined;
 }
+
+/**
+ * Extract an idle summary from an `agent_end` event's settled message list: the
+ * last message that yields text (i.e. the final assistant message; tool-result
+ * messages have no text and are skipped).
+ *
+ * `agent_end` fires exactly once when the agent loop settles to await the user,
+ * so emitting idle from this — instead of per-`turn_end` — produces exactly one
+ * idle notification per genuine idle, eliminating the multi-turn flood.
+ */
+export function summaryFromMessages(messages: unknown, max = 280): string | undefined {
+	if (!Array.isArray(messages)) return undefined;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const summary = summaryFromMessage(messages[i], max);
+		if (summary) return summary;
+	}
+	return undefined;
+}

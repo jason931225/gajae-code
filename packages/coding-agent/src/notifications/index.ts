@@ -32,7 +32,7 @@ import {
 	type NotificationConfig,
 	sessionTag,
 } from "./config";
-import { idleDedupeKey, notificationActionPayload, summaryFromMessage } from "./helpers";
+import { notificationActionPayload, summaryFromMessage, summaryFromMessages } from "./helpers";
 import { ensureTelegramDaemonRunning } from "./telegram-daemon";
 
 interface PendingInteractiveAsk {
@@ -42,7 +42,7 @@ interface PendingInteractiveAsk {
 
 interface SessionRuntime {
 	server: NotificationServer;
-	notifiedIdleTurns: Set<string>;
+	idleSeq: number;
 	/** Interactive asks awaiting a remote answer, by action id. */
 	pendingInteractive: Map<string, PendingInteractiveAsk>;
 	/** Deregisters this session's ask answer source. */
@@ -60,6 +60,7 @@ interface ResolvedSettings {
 const defaultConfig: NotificationConfig = {
 	enabled: false,
 	redact: false,
+	verbosity: "lean",
 	idleTimeoutMs: 60_000,
 };
 
@@ -214,6 +215,26 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			}
 		});
 
+		// Inbound free-text injection / in-thread config command from a session
+		// thread (forwarded by the daemon over the WS, fail-closed at the daemon).
+		server.onInbound((err, inbound) => {
+			if (err || !inbound) return;
+			if (inbound.kind === "user_message" && inbound.text) {
+				// Inject as a user turn (steers/continues the agent; the resulting
+				// turn streams back via the turn_end handler even when not idle).
+				try {
+					api.sendUserMessage(inbound.text);
+				} catch (e) {
+					logger.warn(`notifications: sendUserMessage failed: ${String(e)}`);
+				}
+				return;
+			}
+			if (inbound.kind === "config_command") {
+				const rt = runtimes.get(id);
+				if (rt && typeof inbound.redact === "boolean") rt.redact = inbound.redact;
+			}
+		});
+
 		try {
 			const endpoint = await server.start();
 
@@ -252,7 +273,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 
 			runtimes.set(id, {
 				server,
-				notifiedIdleTurns: new Set(),
+				idleSeq: 0,
 				pendingInteractive,
 				disposeAnswerSource,
 				redact,
@@ -373,22 +394,24 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		await startSession(ctx);
 	});
 
-	api.on("turn_end", (event, ctx) => {
+	// Idle fires on `agent_end` (the agent loop settling to await the user), NOT
+	// per `turn_end`. turn_end fires once per turn iteration, so a single
+	// user-visible idle previously produced many idle pings (the flood); agent_end
+	// fires exactly once per settle, yielding exactly one idle notification.
+	api.on("agent_end", (event, ctx) => {
 		const id = sessionId(ctx);
 		const rt = runtimes.get(id);
 		if (!rt) return;
-		const key = idleDedupeKey(id, event.turnIndex);
-		if (rt.notifiedIdleTurns.has(key)) return;
-		rt.notifiedIdleTurns.add(key);
+		const seq = rt.idleSeq++;
 		try {
 			rt.server.noteIdle(
 				JSON.stringify(
 					notificationActionPayload(
 						{
-							id: `idle:${key}`,
+							id: `idle:${id}#${seq}`,
 							kind: "idle",
 							sessionId: id,
-							summary: summaryFromMessage(event.message),
+							summary: summaryFromMessages(event.messages),
 						},
 						{ redact: rt.redact, sessionTag: rt.sessionTag },
 					),
@@ -396,6 +419,28 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			);
 		} catch (e) {
 			logger.warn(`notifications: noteIdle failed: ${String(e)}`);
+		}
+	});
+
+	// Stream viable agent output per turn (the live thread mirror). Unlike idle,
+	// turn output is expected to be multiple messages — one per turn that
+	// produced assistant text. Tool-only turns yield no text and are skipped.
+	// Redaction suppresses streamed content (only the one-time identity header
+	// survives redaction). The daemon coalesces/throttles these via its shared
+	// rate-limit pool before sending to Telegram.
+	api.on("turn_end", (event, ctx) => {
+		const id = sessionId(ctx);
+		const rt = runtimes.get(id);
+		if (!rt) return;
+		if (rt.redact) return;
+		const text = summaryFromMessage(event.message, 3500);
+		if (!text) return;
+		try {
+			rt.server.pushFrame(
+				JSON.stringify({ type: "turn_stream", sessionId: id, phase: "finalized", text }),
+			);
+		} catch (e) {
+			logger.warn(`notifications: pushFrame (turn) failed: ${String(e)}`);
 		}
 	});
 

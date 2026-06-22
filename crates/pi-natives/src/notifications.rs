@@ -13,7 +13,9 @@
 
 use std::path::PathBuf;
 
-use gjc_notifications::{ActionNeeded, ReplyAnswer, ServerConfig, ServerHandle};
+use gjc_notifications::{
+	ActionNeeded, ClientMessage, ReplyAnswer, ServerConfig, ServerHandle, ServerMessage, Verbosity,
+};
 use napi::{
 	bindgen_prelude::*,
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
@@ -45,12 +47,33 @@ pub struct ReplyEvent {
 	pub idempotency_key: Option<String>,
 }
 
+/// An inbound message forwarded to the TypeScript host: a free-text injection
+/// (`user_message`) or an in-thread config command (`config_command`).
+#[napi(object)]
+pub struct InboundEvent {
+	/// Either `"user_message"` or `"config_command"`.
+	pub kind:       String,
+	/// The session this inbound belongs to.
+	pub session_id: String,
+	/// Free-text body (`user_message` only).
+	pub text:       Option<String>,
+	/// Telegram update id for dedupe (`user_message` only).
+	pub update_id:  Option<i64>,
+	/// Originating thread/topic id (`user_message` only).
+	pub thread_id:  Option<String>,
+	/// Requested verbosity `"lean"|"verbose"` (`config_command` only).
+	pub verbosity:  Option<String>,
+	/// Requested redaction state (`config_command` only).
+	pub redact:     Option<bool>,
+}
+
 /// In-process notification server handle exposed to TypeScript.
 #[napi]
 pub struct NotificationServer {
-	config:   Mutex<Option<ServerConfig>>,
-	handle:   Mutex<Option<ServerHandle>>,
-	on_reply: Mutex<Option<ThreadsafeFunction<ReplyEvent>>>,
+	config:     Mutex<Option<ServerConfig>>,
+	handle:     Mutex<Option<ServerHandle>>,
+	on_reply:   Mutex<Option<ThreadsafeFunction<ReplyEvent>>>,
+	on_inbound: Mutex<Option<ThreadsafeFunction<InboundEvent>>>,
 }
 
 #[napi]
@@ -73,9 +96,10 @@ impl NotificationServer {
 		// TS always owns gate resolution, so the core forwards replies.
 		config.forward_replies = true;
 		Self {
-			config:   Mutex::new(Some(config)),
-			handle:   Mutex::new(None),
-			on_reply: Mutex::new(None),
+			config:     Mutex::new(Some(config)),
+			handle:     Mutex::new(None),
+			on_reply:   Mutex::new(None),
+			on_inbound: Mutex::new(None),
 		}
 	}
 
@@ -83,6 +107,13 @@ impl NotificationServer {
 	#[napi(ts_args_type = "callback: (err: null | Error, reply: ReplyEvent) => void")]
 	pub fn on_reply(&self, callback: ThreadsafeFunction<ReplyEvent>) {
 		*self.on_reply.lock() = Some(callback);
+	}
+
+	/// Register the inbound-message callback (free-text injections and in-thread
+	/// config commands). Must be called before [`Self::start`].
+	#[napi(ts_args_type = "callback: (err: null | Error, msg: InboundEvent) => void")]
+	pub fn on_inbound(&self, callback: ThreadsafeFunction<InboundEvent>) {
+		*self.on_inbound.lock() = Some(callback);
 	}
 
 	/// Bind the loopback endpoint and start serving. Resolves with the bound
@@ -126,6 +157,41 @@ impl NotificationServer {
 			});
 		}
 
+		// Pump forwarded inbound messages (injections / config commands) to TS.
+		let inbound_tsfn = self.on_inbound.lock().take();
+		let inbound_rx = handle.take_inbound_receiver();
+		if let (Some(tsfn), Some(mut rx)) = (inbound_tsfn, inbound_rx) {
+			napi::tokio::spawn(async move {
+				while let Some(msg) = rx.recv().await {
+					let event = match msg {
+						ClientMessage::UserMessage(u) => InboundEvent {
+							kind:       "user_message".to_owned(),
+							session_id: u.session_id,
+							text:       Some(u.text),
+							update_id:  u.update_id,
+							thread_id:  u.thread_id,
+							verbosity:  None,
+							redact:     None,
+						},
+						ClientMessage::ConfigCommand(c) => InboundEvent {
+							kind:       "config_command".to_owned(),
+							session_id: c.session_id,
+							text:       None,
+							update_id:  None,
+							thread_id:  None,
+							verbosity:  c.verbosity.map(|v| match v {
+								Verbosity::Lean => "lean".to_owned(),
+								Verbosity::Verbose => "verbose".to_owned(),
+							}),
+							redact:     c.redact,
+						},
+						_ => continue,
+					};
+					tsfn.call(Ok(event), ThreadsafeFunctionCallMode::NonBlocking);
+				}
+			});
+		}
+
 		*self.handle.lock() = Some(handle);
 		Ok(endpoint)
 	}
@@ -151,6 +217,19 @@ impl NotificationServer {
 	pub fn note_idle(&self, needed_json: String) -> Result<()> {
 		let needed = parse_needed(&needed_json)?;
 		self.with_handle(|h| h.note_idle(needed))
+	}
+
+	/// Broadcast an ephemeral threaded-session frame. `frame_json` is a JSON
+	/// `ServerMessage` (e.g. `identity_header`, `context_update`, `turn_stream`,
+	/// `image_attachment`, `config_update`, `hello`). Not buffered for replay.
+	///
+	/// # Errors
+	/// Fails if not started or `frame_json` is not a valid `ServerMessage`.
+	#[napi]
+	pub fn push_frame(&self, frame_json: String) -> Result<()> {
+		let msg: ServerMessage = serde_json::from_str(&frame_json)
+			.map_err(|e| Error::from_reason(format!("invalid frame json: {e}")))?;
+		self.with_handle(|h| h.push_frame(msg))
 	}
 
 	/// Resolve an action locally (the CLI/TUI answered). `answer_json` is an

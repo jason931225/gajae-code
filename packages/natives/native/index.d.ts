@@ -64,6 +64,11 @@ export declare class NotificationServer {
   /** Register the reply callback. Must be called before [`Self::start`]. */
   onReply(callback: (err: null | Error, reply: ReplyEvent) => void): void
   /**
+   * Register the inbound-message callback (free-text injections and in-thread
+   * config commands). Must be called before [`Self::start`].
+   */
+  onInbound(callback: (err: null | Error, msg: InboundEvent) => void): void
+  /**
    * Bind the loopback endpoint and start serving. Resolves with the bound
    * endpoint info once the socket is bound.
    *
@@ -81,12 +86,22 @@ export declare class NotificationServer {
    */
   registerAsk(neededJson: string, repliable: boolean): void
   /**
-   * Broadcast an ephemeral `action_needed` idle ping. `needed_json` is JSON `ActionNeeded`.
+   * Broadcast an ephemeral `action_needed` idle ping. `needed_json` is JSON
+   * `ActionNeeded`.
    *
    * # Errors
    * Fails if not started or `needed_json` is invalid.
    */
   noteIdle(neededJson: string): void
+  /**
+   * Broadcast an ephemeral threaded-session frame. `frame_json` is a JSON
+   * `ServerMessage` (e.g. `identity_header`, `context_update`, `turn_stream`,
+   * `image_attachment`, `config_update`, `hello`). Not buffered for replay.
+   *
+   * # Errors
+   * Fails if not started or `frame_json` is not a valid `ServerMessage`.
+   */
+  pushFrame(frameJson: string): void
   /**
    * Resolve an action locally (the CLI/TUI answered). `answer_json` is an
    * optional JSON `ReplyAnswer`.
@@ -893,6 +908,27 @@ export interface HtmlToMarkdownOptions {
   cleanContent?: boolean
   /** Skip images during conversion. */
   skipImages?: boolean
+}
+
+/**
+ * An inbound message forwarded to the TypeScript host: a free-text injection
+ * (`user_message`) or an in-thread config command (`config_command`).
+ */
+export interface InboundEvent {
+  /** Either `"user_message"` or `"config_command"`. */
+  kind: string
+  /** The session this inbound belongs to. */
+  sessionId: string
+  /** Free-text body (`user_message` only). */
+  text?: string
+  /** Telegram update id for dedupe (`user_message` only). */
+  updateId?: number
+  /** Originating thread/topic id (`user_message` only). */
+  threadId?: string
+  /** Requested verbosity `"lean"|"verbose"` (`config_command` only). */
+  verbosity?: string
+  /** Requested redaction state (`config_command` only). */
+  redact?: boolean
 }
 
 /**

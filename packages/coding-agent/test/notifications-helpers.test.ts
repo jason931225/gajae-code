@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
 	asksFromAskInput,
 	idleDedupeKey,
+	imageAttachmentsFromMessage,
 	notificationActionPayload,
 	summaryFromMessage,
+	summaryFromMessages,
 	truncate,
 } from "../src/notifications/helpers";
 
@@ -18,6 +20,50 @@ describe("notifications helpers", () => {
 		expect(idleDedupeKey("s1", 3)).toBe("s1#3");
 		expect(idleDedupeKey("s1", 3)).toBe(idleDedupeKey("s1", 3));
 		expect(idleDedupeKey("s1", 4)).not.toBe(idleDedupeKey("s1", 3));
+	});
+
+	test("summaryFromMessages picks the last assistant text from a settled run", () => {
+		const messages = [
+			{ role: "user", content: "do it" },
+			{ role: "assistant", content: "first step" },
+			{ role: "toolResult", content: [{ type: "tool_result", text: "ignored" }] },
+			{ role: "assistant", content: [{ type: "text", text: "final summary" }] },
+		];
+		expect(summaryFromMessages(messages)).toBe("final summary");
+	});
+
+	test("summaryFromMessages skips trailing non-text messages", () => {
+		const messages = [
+			{ role: "assistant", content: "the answer" },
+			{ role: "toolResult", content: [{ type: "tool_result", text: "tool noise" }] },
+		];
+		expect(summaryFromMessages(messages)).toBe("the answer");
+	});
+
+	test("summaryFromMessages returns undefined for empty/non-array", () => {
+		expect(summaryFromMessages([])).toBeUndefined();
+		expect(summaryFromMessages(undefined)).toBeUndefined();
+	});
+
+	test("imageAttachmentsFromMessage extracts image blocks with data + mime", () => {
+		const message = {
+			role: "toolResult",
+			content: [
+				{ type: "text", text: "screenshot:" },
+				{ type: "image", data: "AAAA", mimeType: "image/png" },
+				{ type: "image", data: "BBBB", mimeType: "image/jpeg" },
+			],
+		};
+		expect(imageAttachmentsFromMessage(message, "computer")).toEqual([
+			{ source: "computer", mime: "image/png", data: "AAAA" },
+			{ source: "computer", mime: "image/jpeg", data: "BBBB" },
+		]);
+	});
+
+	test("imageAttachmentsFromMessage returns empty for text-only or malformed", () => {
+		expect(imageAttachmentsFromMessage({ content: "just text" })).toEqual([]);
+		expect(imageAttachmentsFromMessage({ content: [{ type: "image", data: 123 }] })).toEqual([]);
+		expect(imageAttachmentsFromMessage(undefined)).toEqual([]);
 	});
 
 	test("asksFromAskInput extracts questions, options, and namespaced ids", () => {

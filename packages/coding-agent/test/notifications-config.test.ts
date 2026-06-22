@@ -18,6 +18,7 @@ const BASE_CFG: NotificationConfig = {
 	botToken: undefined,
 	chatId: undefined,
 	redact: false,
+	verbosity: "lean",
 	idleTimeoutMs: 60000,
 };
 
@@ -47,6 +48,7 @@ describe("notifications config", () => {
 			botToken: "token-1",
 			chatId: "chat-1",
 			redact: true,
+			verbosity: "lean",
 			idleTimeoutMs: 1234,
 		});
 	});

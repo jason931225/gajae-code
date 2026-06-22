@@ -18,8 +18,12 @@
  * generated), or `GJC_NOTIFICATIONS_TOKEN`.
  */
 
+import { execFile } from "node:child_process";
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import { NotificationServer } from "@gajae-code/natives";
 import { logger } from "@gajae-code/utils";
 import { Settings } from "../config/settings";
@@ -32,8 +36,68 @@ import {
 	type NotificationConfig,
 	sessionTag,
 } from "./config";
-import { idleDedupeKey, notificationActionPayload, summaryFromMessage } from "./helpers";
+import {
+	imageAttachmentsFromMessage,
+	notificationActionPayload,
+	summaryFromMessage,
+	summaryFromMessages,
+} from "./helpers";
 import { ensureTelegramDaemonRunning } from "./telegram-daemon";
+
+/** Resolve the git dir for `cwd`, handling worktrees where `.git` is a file. */
+function gitDir(cwd: string): string | undefined {
+	const dot = path.join(cwd, ".git");
+	try {
+		if (fs.statSync(dot).isDirectory()) return dot;
+		const m = fs
+			.readFileSync(dot, "utf8")
+			.trim()
+			.match(/^gitdir:\s*(.+)$/);
+		if (m) return path.resolve(cwd, m[1]);
+	} catch {}
+	return undefined;
+}
+
+/** Best-effort current branch from `.git/HEAD` (no git spawn). */
+function readGitBranch(cwd: string): string | undefined {
+	const gd = gitDir(cwd);
+	if (!gd) return undefined;
+	try {
+		const head = fs.readFileSync(path.join(gd, "HEAD"), "utf8").trim();
+		const m = head.match(/^ref:\s*refs\/heads\/(.+)$/);
+		return m ? m[1] : head.slice(0, 12);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Build the one-time identity header fields for a session thread. */
+function buildIdentity(cwd: string): {
+	repo: string;
+	branch: string;
+	machine: string;
+	title: string;
+} {
+	const repo = path.basename(cwd) || cwd;
+	const branch = readGitBranch(cwd) ?? "(detached)";
+	return { repo, branch, machine: os.hostname(), title: `${repo} · ${branch}` };
+}
+
+const execFileAsync = promisify(execFile);
+
+/** Best-effort working-tree diff stat for the context update (no throw). */
+async function readGitDiffStat(cwd: string): Promise<string | undefined> {
+	try {
+		const { stdout } = await execFileAsync("git", ["-C", cwd, "diff", "--stat", "--no-color"], {
+			timeout: 3000,
+			maxBuffer: 256 * 1024,
+		});
+		const trimmed = stdout.trim();
+		return trimmed ? trimmed.slice(0, 1500) : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 interface PendingInteractiveAsk {
 	resolve: (label: string | undefined) => void;
@@ -42,7 +106,7 @@ interface PendingInteractiveAsk {
 
 interface SessionRuntime {
 	server: NotificationServer;
-	notifiedIdleTurns: Set<string>;
+	idleSeq: number;
 	/** Interactive asks awaiting a remote answer, by action id. */
 	pendingInteractive: Map<string, PendingInteractiveAsk>;
 	/** Deregisters this session's ask answer source. */
@@ -60,6 +124,7 @@ interface ResolvedSettings {
 const defaultConfig: NotificationConfig = {
 	enabled: false,
 	redact: false,
+	verbosity: "lean",
 	idleTimeoutMs: 60_000,
 };
 
@@ -214,6 +279,26 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			}
 		});
 
+		// Inbound free-text injection / in-thread config command from a session
+		// thread (forwarded by the daemon over the WS, fail-closed at the daemon).
+		server.onInbound((err, inbound) => {
+			if (err || !inbound) return;
+			if (inbound.kind === "user_message" && inbound.text) {
+				// Inject as a user turn (steers/continues the agent; the resulting
+				// turn streams back via the turn_end handler even when not idle).
+				try {
+					api.sendUserMessage(inbound.text);
+				} catch (e) {
+					logger.warn(`notifications: sendUserMessage failed: ${String(e)}`);
+				}
+				return;
+			}
+			if (inbound.kind === "config_command") {
+				const rt = runtimes.get(id);
+				if (rt && typeof inbound.redact === "boolean") rt.redact = inbound.redact;
+			}
+		});
+
 		try {
 			const endpoint = await server.start();
 
@@ -252,7 +337,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 
 			runtimes.set(id, {
 				server,
-				notifiedIdleTurns: new Set(),
+				idleSeq: 0,
 				pendingInteractive,
 				disposeAnswerSource,
 				redact,
@@ -266,6 +351,14 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 				} catch (e) {
 					logger.warn(`notifications: failed to ensure Telegram daemon: ${String(e)}`);
 				}
+			}
+
+			// One-time identity header (repo/branch/machine/session) pinned at the top
+			// of the session thread by the daemon.
+			try {
+				server.pushFrame(JSON.stringify({ type: "identity_header", sessionId: id, ...buildIdentity(ctx.cwd) }));
+			} catch (e) {
+				logger.warn(`notifications: identity_header failed: ${String(e)}`);
 			}
 
 			// Unattended: a real ask emits a workflow gate; register it repliable by gate_id.
@@ -373,22 +466,24 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		await startSession(ctx);
 	});
 
-	api.on("turn_end", (event, ctx) => {
+	// Idle fires on `agent_end` (the agent loop settling to await the user), NOT
+	// per `turn_end`. turn_end fires once per turn iteration, so a single
+	// user-visible idle previously produced many idle pings (the flood); agent_end
+	// fires exactly once per settle, yielding exactly one idle notification.
+	api.on("agent_end", (event, ctx) => {
 		const id = sessionId(ctx);
 		const rt = runtimes.get(id);
 		if (!rt) return;
-		const key = idleDedupeKey(id, event.turnIndex);
-		if (rt.notifiedIdleTurns.has(key)) return;
-		rt.notifiedIdleTurns.add(key);
+		const seq = rt.idleSeq++;
 		try {
 			rt.server.noteIdle(
 				JSON.stringify(
 					notificationActionPayload(
 						{
-							id: `idle:${key}`,
+							id: `idle:${id}#${seq}`,
 							kind: "idle",
 							sessionId: id,
-							summary: summaryFromMessage(event.message),
+							summary: summaryFromMessages(event.messages),
 						},
 						{ redact: rt.redact, sessionTag: rt.sessionTag },
 					),
@@ -396,6 +491,78 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			);
 		} catch (e) {
 			logger.warn(`notifications: noteIdle failed: ${String(e)}`);
+		}
+
+		// On idle, also stream a context update (last message + working-tree diff
+		// stat) unless redaction is on. Best-effort + async; never blocks.
+		if (!rt.redact) {
+			const last = summaryFromMessages(event.messages, 600);
+			const usage = (
+				ctx as { getContextUsage?: () => { tokens: number | null; contextWindow: number } | undefined }
+			).getContextUsage?.();
+			const model = (ctx as { getModel?: () => { id?: string } | undefined }).getModel?.();
+			const tokenUsage = usage && usage.tokens != null ? `${usage.tokens}/${usage.contextWindow}` : undefined;
+			const modelId = model?.id;
+			void readGitDiffStat(ctx.cwd).then(diff => {
+				if (!last && !diff && !tokenUsage && !modelId) return;
+				try {
+					rt.server.pushFrame(
+						JSON.stringify({
+							type: "context_update",
+							sessionId: id,
+							lastMessage: last,
+							tokenUsage,
+							model: modelId,
+							diff,
+						}),
+					);
+				} catch (e) {
+					logger.warn(`notifications: context_update failed: ${String(e)}`);
+				}
+			});
+		}
+	});
+
+	// Stream viable agent output per turn (the live thread mirror). Unlike idle,
+	// turn output is expected to be multiple messages — one per turn that
+	// produced assistant text. Tool-only turns yield no text and are skipped.
+	// Redaction suppresses streamed content (only the one-time identity header
+	// survives redaction). The daemon coalesces/throttles these via its shared
+	// rate-limit pool before sending to Telegram.
+	api.on("turn_end", (event, ctx) => {
+		const id = sessionId(ctx);
+		const rt = runtimes.get(id);
+		if (!rt) return;
+		if (rt.redact) return;
+		const text = summaryFromMessage(event.message, 3500);
+		if (!text) return;
+		try {
+			rt.server.pushFrame(JSON.stringify({ type: "turn_stream", sessionId: id, phase: "finalized", text }));
+		} catch (e) {
+			logger.warn(`notifications: pushFrame (turn) failed: ${String(e)}`);
+		}
+	});
+
+	// Stream agent-produced images (computer/browser/tool screenshots) as
+	// image_attachment frames; suppressed when redaction is on.
+	api.on("message_end", (event, ctx) => {
+		const id = sessionId(ctx);
+		const rt = runtimes.get(id);
+		if (!rt || rt.redact) return;
+		for (const img of imageAttachmentsFromMessage(event.message)) {
+			try {
+				rt.server.pushFrame(
+					JSON.stringify({
+						type: "image_attachment",
+						sessionId: id,
+						source: img.source,
+						mime: img.mime,
+						data: img.data,
+					}),
+				);
+			} catch (e) {
+				logger.warn(`notifications: image_attachment failed: ${String(e)}`);
+			}
 		}
 	});
 

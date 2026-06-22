@@ -158,6 +158,21 @@ pub enum ServerMessage {
 	ActionResolved(ActionResolved),
 	/// A specific client's reply was rejected.
 	ReplyRejected(ReplyRejected),
+	/// One-time per-session identity header (threaded clients).
+	IdentityHeader(IdentityHeader),
+	/// A streamed dynamic context update (threaded clients).
+	ContextUpdate(ContextUpdate),
+	/// A streamed turn output chunk: live (throttled) or finalized.
+	TurnStream(TurnStream),
+	/// An agent-produced image artifact.
+	ImageAttachment(ImageAttachment),
+	/// A pushed configuration update (verbosity/redact).
+	ConfigUpdate(ConfigUpdate),
+	/// Server capability/version advertisement for negotiation.
+	Hello(ServerHello),
+	/// Forward-compat: an unrecognized frame type. Tolerated, never emitted.
+	#[serde(other)]
+	Unknown,
 }
 
 /// Messages sent from a client to the server (upstream).
@@ -166,6 +181,195 @@ pub enum ServerMessage {
 pub enum ClientMessage {
 	/// A reply to a pending action.
 	Reply(Reply),
+	/// Client capability/version advertisement for negotiation.
+	Hello(ClientHello),
+	/// An inbound free-text user message that injects/steers a turn.
+	UserMessage(UserMessage),
+	/// An in-thread configuration command (verbosity/redact toggles).
+	ConfigCommand(ConfigCommand),
+	/// Forward-compat: an unrecognized frame type. Tolerated, ignored.
+	#[serde(other)]
+	Unknown,
+}
+
+/// Streaming verbosity for the threaded session mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verbosity {
+	/// Assistant text + tool names only (default).
+	Lean,
+	/// Full tool outputs + reasoning.
+	Verbose,
+}
+
+/// Phase of a streamed turn output chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnPhase {
+	/// An in-progress, throttled live edit.
+	Live,
+	/// The clean, finalized turn output.
+	Finalized,
+}
+
+/// One-time per-session identity header, pinned at thread creation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityHeader {
+	/// The session this header describes.
+	pub session_id: String,
+	/// Repository name/path.
+	pub repo:       String,
+	/// Active branch.
+	pub branch:     String,
+	/// Host machine tag.
+	pub machine:    String,
+	/// Optional session title (also used as the topic title).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub title:      Option<String>,
+}
+
+/// A streamed dynamic context update for a session thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUpdate {
+	/// The session this update belongs to.
+	pub session_id:   String,
+	/// Last assistant message text.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub last_message: Option<String>,
+	/// Current task/todo summary.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub task:         Option<String>,
+	/// Goal status summary.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub goal:         Option<String>,
+	/// Token/context-window usage summary.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub token_usage:  Option<String>,
+	/// Active model.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub model:        Option<String>,
+	/// Latest diff snippet.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub diff:         Option<String>,
+}
+
+/// A streamed turn output chunk (live throttled edit or finalized).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStream {
+	/// The session this chunk belongs to.
+	pub session_id:  String,
+	/// Whether this is a live (throttled) edit or the finalized output.
+	pub phase:       TurnPhase,
+	/// The rendered text for this chunk.
+	pub text:        String,
+	/// Opaque ref to coalesce live edits onto one rendered message.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub message_ref: Option<String>,
+}
+
+/// An agent-produced image artifact for a session thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachment {
+	/// The session this image belongs to.
+	pub session_id: String,
+	/// Image source: "computer", "browser", or a tool name.
+	pub source:     String,
+	/// MIME type, e.g. "image/png".
+	pub mime:       String,
+	/// Base64-encoded image bytes.
+	pub data:       String,
+	/// Optional caption.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub caption:    Option<String>,
+}
+
+/// A pushed configuration update reflecting current verbosity/redaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigUpdate {
+	/// The session this config applies to.
+	pub session_id: String,
+	/// Current streaming verbosity.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub verbosity:  Option<Verbosity>,
+	/// Whether redaction is enabled.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub redact:     Option<bool>,
+}
+
+/// Server capability/version advertisement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerHello {
+	/// Protocol version the server speaks.
+	pub protocol_version: u32,
+	/// Capability tokens the server supports.
+	pub capabilities:     Vec<String>,
+}
+
+/// Client capability/version advertisement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientHello {
+	/// Protocol version the client speaks.
+	pub protocol_version: u32,
+	/// Capability tokens the client supports.
+	pub capabilities:     Vec<String>,
+}
+
+/// An inbound free-text user message injecting/steering a session turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMessage {
+	/// The session to inject into.
+	pub session_id: String,
+	/// The free-text message body.
+	pub text:       String,
+	/// The per-session token authorizing this client.
+	pub token:      String,
+	/// Telegram update id for inbound dedupe/idempotency.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub update_id:  Option<i64>,
+	/// Originating thread/topic id, for fail-closed routing.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub thread_id:  Option<String>,
+}
+
+/// An in-thread configuration command (verbosity/redact toggles).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigCommand {
+	/// The session to configure.
+	pub session_id: String,
+	/// The per-session token authorizing this client.
+	pub token:      String,
+	/// Requested verbosity, if changing.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub verbosity:  Option<Verbosity>,
+	/// Requested redaction state, if changing.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub redact:     Option<bool>,
+}
+
+/// Current protocol version emitted in [`ServerHello`].
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Capability tokens for protocol negotiation.
+pub mod capabilities {
+	/// Threaded per-session forum-topic delivery.
+	pub const THREADED: &str = "threaded";
+	/// Streamed dynamic context updates.
+	pub const CONTEXT: &str = "context";
+	/// Live + finalized turn streaming.
+	pub const TURN_STREAM: &str = "turn_stream";
+	/// Image attachments.
+	pub const IMAGES: &str = "images";
+	/// Config push/commands.
+	pub const CONFIG: &str = "config";
 }
 
 #[cfg(test)]
@@ -213,7 +417,9 @@ mod tests {
 	fn reply_index_answer_roundtrips() {
 		let raw = r#"{"type":"reply","id":"a1","answer":2,"token":"t"}"#;
 		let msg: ClientMessage = serde_json::from_str(raw).unwrap();
-		let ClientMessage::Reply(reply) = msg;
+		let ClientMessage::Reply(reply) = msg else {
+			panic!("expected reply")
+		};
 		assert_eq!(reply.id, "a1");
 		assert_eq!(reply.answer, ReplyAnswer::Index(2));
 		assert_eq!(reply.token, "t");
@@ -224,7 +430,9 @@ mod tests {
 	fn reply_text_answer_parses_as_text_not_index() {
 		let raw =
 			r#"{"type":"reply","id":"a1","answer":"Looks good","token":"t","idempotencyKey":"k1"}"#;
-		let ClientMessage::Reply(reply) = serde_json::from_str(raw).unwrap();
+		let ClientMessage::Reply(reply) = serde_json::from_str(raw).unwrap() else {
+			panic!("expected reply")
+		};
 		assert_eq!(reply.answer, ReplyAnswer::Text("Looks good".into()));
 		assert_eq!(reply.idempotency_key.as_deref(), Some("k1"));
 	}
@@ -233,7 +441,9 @@ mod tests {
 	fn reply_structured_answer_parses() {
 		let raw =
 			r#"{"type":"reply","id":"a1","answer":{"selected":[0,"Maybe"],"custom":"x"},"token":"t"}"#;
-		let ClientMessage::Reply(reply) = serde_json::from_str(raw).unwrap();
+		let ClientMessage::Reply(reply) = serde_json::from_str(raw).unwrap() else {
+			panic!("expected reply")
+		};
 		match reply.answer {
 			ReplyAnswer::Structured { selected, custom } => {
 				assert_eq!(selected.len(), 2);
@@ -267,5 +477,263 @@ mod tests {
 		let v = serde_json::to_value(&msg).unwrap();
 		assert_eq!(v["type"], "reply_rejected");
 		assert_eq!(v["reason"], "already_answered");
+	}
+
+	#[test]
+	fn identity_header_serializes_camelcase() {
+		let msg = ServerMessage::IdentityHeader(IdentityHeader {
+			session_id: "sess-1".into(),
+			repo:       "gajae-code".into(),
+			branch:     "feat/notification-surface".into(),
+			machine:    "mac-studio".into(),
+			title:      Some("Rebuild notifications".into()),
+		});
+		let v = serde_json::to_value(&msg).unwrap();
+		assert_eq!(v["type"], "identity_header");
+		assert_eq!(v["sessionId"], "sess-1");
+		assert_eq!(v["repo"], "gajae-code");
+		assert_eq!(v["branch"], "feat/notification-surface");
+		assert_eq!(v["machine"], "mac-studio");
+		assert_eq!(v["title"], "Rebuild notifications");
+	}
+
+	#[test]
+	fn context_update_omits_absent_fields() {
+		let msg = ServerMessage::ContextUpdate(ContextUpdate {
+			session_id:   "sess-1".into(),
+			last_message: Some("done".into()),
+			task:         None,
+			goal:         None,
+			token_usage:  Some("12k/200k".into()),
+			model:        Some("opus".into()),
+			diff:         None,
+		});
+		let v = serde_json::to_value(&msg).unwrap();
+		assert_eq!(v["type"], "context_update");
+		assert_eq!(v["lastMessage"], "done");
+		assert_eq!(v["tokenUsage"], "12k/200k");
+		assert!(v.get("task").is_none());
+		assert!(v.get("diff").is_none());
+	}
+
+	#[test]
+	fn turn_stream_phase_serializes_snake_case() {
+		let msg = ServerMessage::TurnStream(TurnStream {
+			session_id:  "sess-1".into(),
+			phase:       TurnPhase::Finalized,
+			text:        "final output".into(),
+			message_ref: Some("m-7".into()),
+		});
+		let v = serde_json::to_value(&msg).unwrap();
+		assert_eq!(v["type"], "turn_stream");
+		assert_eq!(v["phase"], "finalized");
+		assert_eq!(v["messageRef"], "m-7");
+	}
+
+	#[test]
+	fn image_attachment_serializes() {
+		let msg = ServerMessage::ImageAttachment(ImageAttachment {
+			session_id: "sess-1".into(),
+			source:     "computer".into(),
+			mime:       "image/png".into(),
+			data:       "AAAA".into(),
+			caption:    None,
+		});
+		let v = serde_json::to_value(&msg).unwrap();
+		assert_eq!(v["type"], "image_attachment");
+		assert_eq!(v["mime"], "image/png");
+		assert!(v.get("caption").is_none());
+	}
+
+	#[test]
+	fn config_update_serializes_verbosity() {
+		let msg = ServerMessage::ConfigUpdate(ConfigUpdate {
+			session_id: "sess-1".into(),
+			verbosity:  Some(Verbosity::Verbose),
+			redact:     Some(false),
+		});
+		let v = serde_json::to_value(&msg).unwrap();
+		assert_eq!(v["type"], "config_update");
+		assert_eq!(v["verbosity"], "verbose");
+		assert_eq!(v["redact"], false);
+	}
+
+	#[test]
+	fn server_hello_roundtrips_with_capabilities() {
+		let hello = ServerMessage::Hello(ServerHello {
+			protocol_version: PROTOCOL_VERSION,
+			capabilities:     vec![capabilities::THREADED.into(), capabilities::IMAGES.into()],
+		});
+		let raw = serde_json::to_string(&hello).unwrap();
+		let back: ServerMessage = serde_json::from_str(&raw).unwrap();
+		assert_eq!(hello, back);
+		let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+		assert_eq!(v["type"], "hello");
+		assert_eq!(v["protocolVersion"], 2);
+		assert_eq!(v["capabilities"][0], "threaded");
+	}
+
+	#[test]
+	fn client_hello_parses() {
+		let raw = r#"{"type":"hello","protocolVersion":2,"capabilities":["threaded","context"]}"#;
+		let msg: ClientMessage = serde_json::from_str(raw).unwrap();
+		match msg {
+			ClientMessage::Hello(h) => {
+				assert_eq!(h.protocol_version, 2);
+				assert_eq!(h.capabilities, vec!["threaded", "context"]);
+			},
+			other => panic!("expected hello, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn user_message_parses_with_dedupe_fields() {
+		let raw = r#"{"type":"user_message","sessionId":"s1","text":"keep going","token":"t","updateId":42,"threadId":"topic-9"}"#;
+		let msg: ClientMessage = serde_json::from_str(raw).unwrap();
+		match msg {
+			ClientMessage::UserMessage(u) => {
+				assert_eq!(u.session_id, "s1");
+				assert_eq!(u.text, "keep going");
+				assert_eq!(u.update_id, Some(42));
+				assert_eq!(u.thread_id.as_deref(), Some("topic-9"));
+			},
+			other => panic!("expected user_message, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn config_command_parses() {
+		let raw = r#"{"type":"config_command","sessionId":"s1","token":"t","verbosity":"lean","redact":true}"#;
+		let msg: ClientMessage = serde_json::from_str(raw).unwrap();
+		match msg {
+			ClientMessage::ConfigCommand(c) => {
+				assert_eq!(c.verbosity, Some(Verbosity::Lean));
+				assert_eq!(c.redact, Some(true));
+			},
+			other => panic!("expected config_command, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn unknown_server_frame_tolerated_as_unknown() {
+		let raw = r#"{"type":"some_future_frame","payload":{"a":1}}"#;
+		let msg: ServerMessage = serde_json::from_str(raw).unwrap();
+		assert_eq!(msg, ServerMessage::Unknown);
+	}
+
+	#[test]
+	fn unknown_client_frame_tolerated_as_unknown() {
+		let raw = r#"{"type":"some_future_inbound","x":true}"#;
+		let msg: ClientMessage = serde_json::from_str(raw).unwrap();
+		assert_eq!(msg, ClientMessage::Unknown);
+	}
+
+	#[test]
+	fn legacy_reply_still_parses_after_additions() {
+		let raw = r#"{"type":"reply","id":"a1","answer":2,"token":"t"}"#;
+		let msg: ClientMessage = serde_json::from_str(raw).unwrap();
+		assert!(matches!(msg, ClientMessage::Reply(_)));
+	}
+
+	#[test]
+	fn malformed_json_rejected_without_panic() {
+		for raw in ["{", "not json", r#"{"type":"reply","id":"a1","answer":2,"token":"t""#] {
+			assert!(serde_json::from_str::<ClientMessage>(raw).is_err(), "accepted {raw:?}");
+			assert!(serde_json::from_str::<ServerMessage>(raw).is_err(), "accepted {raw:?}");
+		}
+	}
+
+	#[test]
+	fn reply_answer_type_boundaries_are_enforced() {
+		let object = r#"{"type":"reply","id":"a1","answer":{"selected":[0,"Maybe"],"custom":"x","future":true},"token":"t"}"#;
+		let ClientMessage::Reply(reply) = serde_json::from_str(object).unwrap() else {
+			panic!("expected reply")
+		};
+		assert_eq!(reply.answer, ReplyAnswer::Structured {
+			selected: vec![AnswerSelector::Index(0), AnswerSelector::Label("Maybe".into())],
+			custom:   Some("x".into()),
+		});
+
+		let max = r#"{"type":"reply","id":"a1","answer":4294967295,"token":"t"}"#;
+		let ClientMessage::Reply(reply) = serde_json::from_str(max).unwrap() else {
+			panic!("expected reply")
+		};
+		assert_eq!(reply.answer, ReplyAnswer::Index(u32::MAX));
+
+		let text = r#"{"type":"reply","id":"a1","answer":"4294967296","token":"t"}"#;
+		let ClientMessage::Reply(reply) = serde_json::from_str(text).unwrap() else {
+			panic!("expected reply")
+		};
+		assert_eq!(reply.answer, ReplyAnswer::Text("4294967296".into()));
+
+		let too_large = r#"{"type":"reply","id":"a1","answer":4294967296,"token":"t"}"#;
+		assert!(serde_json::from_str::<ClientMessage>(too_large).is_err());
+
+		let negative = r#"{"type":"reply","id":"a1","answer":-1,"token":"t"}"#;
+		assert!(serde_json::from_str::<ClientMessage>(negative).is_err());
+	}
+
+	#[test]
+	fn user_message_missing_required_fields_is_rejected() {
+		let missing_session = r#"{"type":"user_message","text":"keep going","token":"t"}"#;
+		let missing_token = r#"{"type":"user_message","sessionId":"s1","text":"keep going"}"#;
+		for raw in [missing_session, missing_token] {
+			assert!(serde_json::from_str::<ClientMessage>(raw).is_err(), "accepted {raw}");
+		}
+	}
+
+	#[test]
+	fn unknown_nested_fields_are_ignored() {
+		let raw = r#"{"type":"user_message","sessionId":"s1","text":"keep going","token":"t","updateId":7,"threadId":"topic-9","futureNested":{"ignored":true}}"#;
+		let ClientMessage::UserMessage(msg) = serde_json::from_str(raw).unwrap() else {
+			panic!("expected user_message")
+		};
+		assert_eq!(msg.session_id, "s1");
+		assert_eq!(msg.update_id, Some(7));
+		assert_eq!(msg.thread_id.as_deref(), Some("topic-9"));
+	}
+
+	#[test]
+	fn user_message_update_id_accepts_i64_bounds() {
+		for (raw, expected) in [
+			(
+				format!(
+					r#"{{"type":"user_message","sessionId":"s1","text":"low","token":"t","updateId":{}}}"#,
+					i64::MIN
+				),
+				i64::MIN,
+			),
+			(
+				format!(
+					r#"{{"type":"user_message","sessionId":"s1","text":"high","token":"t","updateId":{}}}"#,
+					i64::MAX
+				),
+				i64::MAX,
+			),
+		] {
+			let ClientMessage::UserMessage(msg) = serde_json::from_str(&raw).unwrap() else {
+				panic!("expected user_message")
+			};
+			assert_eq!(msg.update_id, Some(expected));
+		}
+	}
+
+	#[test]
+	fn hello_accepts_empty_capabilities_vec() {
+		let raw = r#"{"type":"hello","protocolVersion":2,"capabilities":[]}"#;
+		let ClientMessage::Hello(hello) = serde_json::from_str(raw).unwrap() else {
+			panic!("expected hello")
+		};
+		assert!(hello.capabilities.is_empty());
+	}
+
+	#[test]
+	fn unknown_type_deserializes_to_unknown() {
+		let server: ServerMessage =
+			serde_json::from_str(r#"{"type":"future_server","payload":1}"#).unwrap();
+		let client: ClientMessage =
+			serde_json::from_str(r#"{"type":"future_client","payload":1}"#).unwrap();
+		assert_eq!(server, ServerMessage::Unknown);
+		assert_eq!(client, ClientMessage::Unknown);
 	}
 }

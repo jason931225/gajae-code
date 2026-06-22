@@ -81,3 +81,55 @@ export function summaryFromMessage(message: unknown, max = 280): string | undefi
 	const joined = parts.join("").trim();
 	return joined ? truncate(joined, max) : undefined;
 }
+
+/**
+ * Extract an idle summary from an `agent_end` event's settled message list: the
+ * last message that yields text (i.e. the final assistant message; tool-result
+ * messages have no text and are skipped).
+ *
+ * `agent_end` fires exactly once when the agent loop settles to await the user,
+ * so emitting idle from this — instead of per-`turn_end` — produces exactly one
+ * idle notification per genuine idle, eliminating the multi-turn flood.
+ */
+export function summaryFromMessages(messages: unknown, max = 280): string | undefined {
+	if (!Array.isArray(messages)) return undefined;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const summary = summaryFromMessage(messages[i], max);
+		if (summary) return summary;
+	}
+	return undefined;
+}
+
+/** An agent-produced image extracted from a message's content. */
+export interface ExtractedImage {
+	source: string;
+	mime: string;
+	data: string;
+}
+
+/**
+ * Extract agent-produced images (`{ type: "image", data, mimeType }` blocks)
+ * from a message's content — e.g. computer-use/browser screenshots or tool
+ * image outputs — for `image_attachment` delivery.
+ */
+export function imageAttachmentsFromMessage(message: unknown, source = "agent"): ExtractedImage[] {
+	const content = (message as { content?: unknown } | null | undefined)?.content;
+	if (!Array.isArray(content)) return [];
+	const out: ExtractedImage[] = [];
+	for (const block of content) {
+		if (
+			block &&
+			typeof block === "object" &&
+			(block as { type?: unknown }).type === "image" &&
+			typeof (block as { data?: unknown }).data === "string" &&
+			typeof (block as { mimeType?: unknown }).mimeType === "string"
+		) {
+			out.push({
+				source,
+				mime: (block as { mimeType: string }).mimeType,
+				data: (block as { data: string }).data,
+			});
+		}
+	}
+	return out;
+}

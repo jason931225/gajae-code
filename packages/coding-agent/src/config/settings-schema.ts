@@ -259,6 +259,11 @@ export const SETTINGS_SCHEMA = {
 	"notifications.telegram.botToken": { type: "string", default: undefined },
 	"notifications.telegram.chatId": { type: "string", default: undefined },
 	"notifications.redact": { type: "boolean", default: false },
+	"notifications.verbosity": {
+		type: "string",
+		default: "lean",
+		validate: (value: string) => value === "lean" || value === "verbose",
+	},
 	"notifications.daemon.idleTimeoutMs": {
 		type: "number",
 		default: 60000,

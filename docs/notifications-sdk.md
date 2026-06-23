@@ -1,5 +1,9 @@
 # Notifications SDK
 
+<p align="center">
+  <img src="../assets/telegram-mobile-hero.png" alt="Gajae Code 0.7.0 mobile answers for coding agents hero illustration" width="100%" />
+</p>
+
 A small, transport-agnostic way to get **action-needed** signals out of a GJC
 session and deliver **replies** back — without scraping the terminal and without
 the depth of the RPC / Coordinator / Bridge surfaces.
@@ -193,6 +197,10 @@ ws.on("message", (data) => {
 
 Swap `ws` for a Telegram bot's long-poll loop, a Discord gateway client, or a
 Slack socket-mode app — the contract above is all you implement.
+
+## Telegram onboarding
+
+For the exact user setup flow (`gjc notify setup`, BotFather token, private-chat pairing, status, and troubleshooting), see [Telegram notification onboarding](./telegram-onboarding.md).
 
 ## Managed Telegram daemon (bundled reference client)
 

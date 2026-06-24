@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject truncated or incomplete streamed tool calls instead of executing them with partial arguments, so a cut-off tool-call payload fails fast rather than running against a mismatched schema.
+
 ## [0.7.1] - 2026-06-23
 
 ### Changed

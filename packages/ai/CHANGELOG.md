@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.7.3] - 2026-06-25
 ### Added
 
 - Added the Sakana Fugu provider (`fugu`) with API-key auth (`FUGU_API_KEY`) and bundled catalog models (#1086).

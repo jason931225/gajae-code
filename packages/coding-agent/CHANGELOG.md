@@ -17,6 +17,7 @@
 - Added a UI design and visual QA contract governing future TUI/dashboard/terminal visual work (#1101).
 - Added a CodeGraph custom-tool integration guide (#1073).
 - Documented the Windows psmux namespace boundary for `gjc --tmux`, `gjc session`, and `gjc team`: cwd/`-c` is now called out as a start directory rather than server isolation, `-L <namespace>` is identified as the psmux namespace primitive, and tmux command overrides are documented as executable names rather than shell command lines (#1118).
+- Clarified the Telegram Threaded Mode fallback documentation (#1122).
 
 ### Fixed
 
@@ -27,6 +28,14 @@
 - Parse quoted SSH remote host names in the slash-command host parser (#1104).
 - Tolerate an unreadable git HEAD in the status chrome instead of throwing (#1072).
 - Registered the `plugin` command in the CLI command registry so `gjc plugin …` (install/uninstall/list/marketplace/enable/disable/doctor) resolves instead of silently falling through to the default launch/chat command — the command was implemented and tested but was never registered (#1071).
+- Keybinding/Ctrl+Enter newline-handling sweep across the editor and input controller (#1111).
+- Fixed model-profile default badge precedence in the `/model` selector so the correct default-profile badge wins (#1117).
+- Prevented duplicate Telegram topics being created for transient sessions (#1125).
+
+### Security
+
+- User-supplied URL reads now share the public HTTP(S) network guard that was previously insane-fallback-only: the initial target, the redirect chain, and binary-conversion redirects are all revalidated against private-network blocking before any request is opened or followed, closing an SSRF path through the normal read-tool fetch pipeline (#1114).
+- Bridge workflow-gate responses now require the claimed controller token before the unattended control plane may resolve a gate, and the `workflow_gate_response` RPC command was raised from prompt scope to control scope, so prompt-only clients can no longer answer lifecycle workflow gates (#1116).
 
 ## [0.7.2] - 2026-06-24
 ### Added

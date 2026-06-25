@@ -11,6 +11,10 @@
 - Matched the real google-antigravity IDE request headers, system prompt, and preamble config so requests are accepted by Cloud Code Assist (#1080).
 - `isContextOverflow` now detects a third proxy-level overflow case — an empty response with `stopReason: "stop"` and anomalously low usage (input + output ≤ 5 tokens), as emitted by some proxies (notably LiteLLM) when the upstream context window is exceeded — so callers surface overflow instead of treating it as a clean completion (#1102).
 
+### Security
+
+- In no-auth (tokenless) auth-gateway mode, requests carrying a browser `Origin` header are now rejected before CORS preflight handling or route dispatch, while local non-browser CLI clients keep the existing tokenless flow and token-configured browser clients keep the bearer-token/preflight flow (#1115).
+
 ## [0.7.2] - 2026-06-24
 
 ### Fixed

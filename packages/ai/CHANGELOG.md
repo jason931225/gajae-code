@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added the Sakana Fugu provider (`fugu`) with API-key auth (`FUGU_API_KEY`) and bundled catalog models (#1086).
+
+### Fixed
+
+- Wired Fugu API-key auth login so `gjc login fugu` stores a reusable `FUGU_API_KEY` credential instead of the provider having no supported login flow (#1090).
+- Matched the real google-antigravity IDE request headers, system prompt, and preamble config so requests are accepted by Cloud Code Assist (#1080).
+- `isContextOverflow` now detects a third proxy-level overflow case — an empty response with `stopReason: "stop"` and anomalously low usage (input + output ≤ 5 tokens), as emitted by some proxies (notably LiteLLM) when the upstream context window is exceeded — so callers surface overflow instead of treating it as a clean completion (#1102).
 
 ## [0.7.2] - 2026-06-24
 

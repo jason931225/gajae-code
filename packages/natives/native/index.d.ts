@@ -929,7 +929,10 @@ export interface InboundEvent {
   verbosity?: string
   /** Requested redaction state (`config_command` only). */
   redact?: boolean
-  /** Inline image attachments forwarded with the message (`user_message` only). */
+  /**
+   * Inline image attachments forwarded with the message (`user_message`
+   * only).
+   */
   images?: Array<InboundImageEvent>
 }
 

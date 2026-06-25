@@ -16,8 +16,11 @@
 - Documented the docs-only Aside evaluation boundary as an opt-in search/context retrieval sidecar using explicit user-provided MCP configuration, with browser actions, login flows, payments, internal tools, secrets, and raw browser/session payload logging out of scope by default (#1097).
 - Added a UI design and visual QA contract governing future TUI/dashboard/terminal visual work (#1101).
 - Added a CodeGraph custom-tool integration guide (#1073).
+- Documented the Windows psmux namespace boundary for `gjc --tmux`, `gjc session`, and `gjc team`: cwd/`-c` is now called out as a start directory rather than server isolation, `-L <namespace>` is identified as the psmux namespace primitive, and tmux command overrides are documented as executable names rather than shell command lines (#1118).
 
 ### Fixed
+
+- Expanded the initial GJC forge welcome box to the live terminal viewport width and pinned the status/composer area to the bottom when the startup layout is shorter than the screen (#1120).
 
 - Deep Interview Restate/option gates now recover through the ask selector path instead of waiting on plaintext `Options:` output.
 - Widened the forge splash on wide terminals so it no longer clips (#1110).

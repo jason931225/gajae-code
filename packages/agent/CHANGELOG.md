@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.7.3] - 2026-06-25
 ### Added
 
 - Added Composer evidence publication gates in the agent loop, so Composer-harness turns emit structured evidence under defined publication conditions (#1106).

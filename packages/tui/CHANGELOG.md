@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-06-25
+
 ### Fixed
 
 - Fixed Korean IME ghost character on macOS: a Hangul syllable committed by the IME immediately after `ctrl+u` (line-delete) is now discarded, preventing it from appearing in the cleared buffer.

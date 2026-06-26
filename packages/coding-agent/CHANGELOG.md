@@ -2,23 +2,42 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-06-25
+
 ### Added
 
 - Added the `gruvbox-dark` built-in theme: the canonical Gruvbox dark palette mapped across every GJC theme token, selectable via `/theme`.
+- Added a standalone MCP registration command: `gjc mcp add|list|remove` writes explicit user-provided MCP server definitions (stdio/http/sse) into GJC config without importing or inheriting other tools' live MCP configs, with env/header/auth values redacted in output (#1095).
 
 ### Changed
 
 - Refined the interactive composer chrome so the input box, status rail, and welcome banner share one visual language: the composer now uses a rounded border (matching the rounded welcome banner) instead of a sharp rectangle, and the status rail uses the subtle elevated `userMessageBg` surface tone instead of the heavy `statusLineBg` block, so it reads as a quiet layered zone rather than a solid bar. Both resolve through existing semantic theme slots, so every bundled theme tracks automatically.
+- When a Composer harness model is active, the `bash` tool now hard-blocks repository file I/O — pipes, process/heredoc/command substitution, redirection, `tee`, file read/discovery (`cat`/`head`/`tail`/`grep`/`find`/`ls`), file mutation (`cp`/`mv`/`rm`/`touch`/`mkdir`/`chmod`/`ln`), `sed`/`awk`, git file-read subcommands, and script file I/O — unless the command is on a strict allowlist (`bun test`/`run check|test|build`, `cargo test|check|build`, `git status`/`rev-parse`, package version queries), forcing Composer models to use the dedicated find/search/read/edit tools for file discovery and mutation (#1027).
 ### Documentation
 
 - Documented the docs-only Aside evaluation boundary as an opt-in search/context retrieval sidecar using explicit user-provided MCP configuration, with browser actions, login flows, payments, internal tools, secrets, and raw browser/session payload logging out of scope by default (#1097).
+- Added a UI design and visual QA contract governing future TUI/dashboard/terminal visual work (#1101).
+- Added a CodeGraph custom-tool integration guide (#1073).
 - Documented the Windows psmux namespace boundary for `gjc --tmux`, `gjc session`, and `gjc team`: cwd/`-c` is now called out as a start directory rather than server isolation, `-L <namespace>` is identified as the psmux namespace primitive, and tmux command overrides are documented as executable names rather than shell command lines (#1118).
+- Clarified the Telegram Threaded Mode fallback documentation (#1122).
 
 ### Fixed
 
 - Expanded the initial GJC forge welcome box to the live terminal viewport width and pinned the status/composer area to the bottom when the startup layout is shorter than the screen (#1120).
 
 - Deep Interview Restate/option gates now recover through the ask selector path instead of waiting on plaintext `Options:` output.
+- Widened the forge splash on wide terminals so it no longer clips (#1110).
+- Parse quoted SSH remote host names in the slash-command host parser (#1104).
+- Tolerate an unreadable git HEAD in the status chrome instead of throwing (#1072).
+- Registered the `plugin` command in the CLI command registry so `gjc plugin …` (install/uninstall/list/marketplace/enable/disable/doctor) resolves instead of silently falling through to the default launch/chat command — the command was implemented and tested but was never registered (#1071).
+- Keybinding/Ctrl+Enter newline-handling sweep across the editor and input controller (#1111).
+- Fixed model-profile default badge precedence in the `/model` selector so the correct default-profile badge wins (#1117).
+- Prevented duplicate Telegram topics being created for transient sessions (#1125).
+
+### Security
+
+- User-supplied URL reads now share the public HTTP(S) network guard that was previously insane-fallback-only: the initial target, the redirect chain, and binary-conversion redirects are all revalidated against private-network blocking before any request is opened or followed, closing an SSRF path through the normal read-tool fetch pipeline (#1114).
+- Bridge workflow-gate responses now require the claimed controller token before the unattended control plane may resolve a gate, and the `workflow_gate_response` RPC command was raised from prompt scope to control scope, so prompt-only clients can no longer answer lifecycle workflow gates (#1116).
 
 - `gjc team` now adopts any real tmux session as its leader — including one you started yourself outside `gjc --tmux` — by writing and reading back GJC's `@gjc-profile` ownership tag, instead of only accepting `gjc --tmux`-launched sessions. Providers that cannot round-trip tmux user options (e.g. psmux) are still rejected as unmanaged.
 

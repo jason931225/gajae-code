@@ -8,41 +8,47 @@
 
 - Native Windows `gjc --tmux` is now backed by [psmux](https://github.com/psmux/psmux) when no real tmux is on PATH: a new `psmux-detect` module probes `psmux` / `pmux` / `tmux` on Windows and resolves the multiplexer to use, `tmux-common.ts` re-exports the resolver for downstream callers, and `buildDefaultTmuxLaunchPlan` builds a real PowerShell-encoded `--tmux` plan instead of falling through to the direct-launch diagnostic. The native Windows `gjc session` / `gjc team` ownership-tag and worker-spawn paths therefore work end-to-end on a Windows host with psmux installed (no WSL required).
 - Three new environment knobs back the Windows psmux path: `GJC_PSMUX_COMMAND` (force the multiplexer to be treated as psmux), `GJC_PSMUX_DETECTION` (`off` / `false` to skip probing entirely), and `GJC_PSMUX_FORCE_DETECT` (`1` / `true` to re-probe on every call). `GJC_TMUX_COMMAND` and `GJC_TEAM_TMUX_COMMAND` continue to override the multiplexer selection on every platform.
-- New unit tests under `packages/coding-agent/test/gjc-runtime/psmux-detect.test.ts` cover detection verdicts, override precedence, cache behavior, and the `resolveGjcTmuxBinary` Windows / POSIX resolution paths. The existing launch-tmux test surface was updated to assert the new Windows psmux path (a real `--tmux` plan is produced when psmux is available, the diagnostic points at the psmux install URL when no multiplexer is found, and the mouse / clipboard / mode-style UX profile is filtered out for psmux while the `@gjc-profile` ownership tag still round-trips).
+- Implemented a GJC plugin bundle architecture: `gjc plugin install <path|package>` resolves and installs declarative GJC plugin bundles into user/project scope with a content-addressed registry (per-file SHA-256 manifest hashes), and `gjc plugin list|doctor|enable|disable|uninstall` manage them; local-path bundles install offline without npm (#1149).
+- Added Telegram-driven session lifecycle control so sessions can be created, closed, and resumed from Telegram, with per-session topic management wired into connect and shutdown (#1148).
+- Added a keyless `insane` web search provider that safely ports upstream [`fivetaku/insane-search`](https://github.com/fivetaku/insane-search) public-route fallbacks (MIT; vendored engine pinned in `packages/coding-agent/vendor/insane-search/`) without TLS impersonation, browser/cookie bypasses, credential storage, or auto-installed dependencies (#1011).
+- Added durable cold-spill eviction for compacted session history: after a compaction, `SessionManager.evictCompactedContent()` moves pre-`firstKeptEntryId` payloads (user/assistant text, thinking, tool-call arguments) out of the hot JSONL and resident heap into durable content-addressed sidecar blobs via `BlobStore.putImmutableSync`, keeping hot retained bytes bounded regardless of pre-compaction history size while preserving graph integrity and the compaction summary (#1166).
+- Added a non-materializing, path-only `buildSessionContext()` that no longer populates `#materializedEntriesCache` and performs zero cold-spill reads on covered compacted branches, plus fidelity read APIs (`getEntryForFidelity`/`getBranchForFidelity`/`getEntriesForExport`) that rehydrate cold-spilled content on demand for HTML export, branch & re-edit, and branched-session creation (#1166).
+- Added `BlobStore.putImmutableSync`/`getCheckedSync` (plus `EphemeralBlobStore`/`MemoryBlobStore` overrides): immutable, crash-safe, hash-verified content-addressed install (exclusive copy fallback + fsync) and checked reads that throw `BlobCorruptError` on corrupt blobs and never return silent wrong data (#1166).
+- Raised the `deep-interview` default maximum round count to 100.
+- New unit tests under `packages/coding-agent/test/gjc-runtime/psmux-detect.test.ts` cover detection verdicts, override precedence, cache behavior, and the `resolveGjcTmuxBinary` Windows / POSIX resolution paths.
+
+### Changed
+
+- `gjc team` now adopts any real tmux session as its leader — including one you started yourself outside `gjc --tmux` — by writing and reading back GJC's `@gjc-profile` ownership tag, instead of only accepting `gjc --tmux`-launched sessions. Providers that cannot round-trip tmux user options (e.g. psmux) are still rejected as unmanaged (#1140).
+- `gjc team` now fails with actionable guidance when there is no tmux leader to host workers: running it with no tmux installed reports `tmux_not_installed`, and running it outside any tmux session reports `not_inside_tmux` (with a hint to start one via `gjc --tmux` or your own `tmux`, or use `--dry-run`), instead of surfacing raw tmux stderr (#1143).
+- Improved `ultragoal` artifact-gate guidance in the completion quality gate (#1163).
 
 ### Fixed
 
-- First-time `gjc` startup now shows only the installed/current version changelog entry instead of dumping the full historical changelog before the actionable UI; full history remains available through `/changelog --full`.
-
+- First-time `gjc` startup now shows only the installed/current version changelog entry instead of dumping the full historical changelog before the actionable UI; full history remains available through `/changelog --full` (#1184).
 - `gjc --tmux` on native Windows no longer silently falls through to a tmux-less launch: when psmux is installed the plan now boots gjc through a PowerShell-encoded inner command, when no tmux-class binary resolves on PATH the diagnostic points at the psmux install URL and `GJC_TMUX_COMMAND` override, and explicit `GJC_TMUX_COMMAND` overrides are honored on every platform.
 - The `gjc team` worker-command string is now formatted for the host shell: on Windows + psmux each env assignment uses the `$env:VAR = 'value';` PowerShell form (with PowerShell-safe single-quote escaping) instead of the POSIX `VAR='value'` form, so worker panes spawned via psmux ConPTY panes inherit the right `GJC_TEAM_*` environment.
 - `createGjcTmuxSession` now chooses the new-session bootstrap command for the host shell: PowerShell `$env:GJC_TMUX_LAUNCHED = '1'; gjc` on Windows, `exec env GJC_TMUX_LAUNCHED=1 gjc` on POSIX, so psmux-managed sessions tag the spawned gjc the same way tmux-managed ones do.
 - `applyGjcTmuxProfile` no longer hard-fails the `gjc --tmux` boot on Windows when psmux drops the UX profile round-trip. When the resolved multiplexer is psmux, only the `mouse` / `set-clipboard` / `mode-style` UX keys are filtered out; the `@gjc-profile` / branch / project / session-identity ownership tags are still emitted because those are required for `gjc session` and `gjc team`.
 - `renameExistingTmuxWindowIfNeeded` no longer short-circuits on `platform === "win32"`: on a Windows host running psmux inside `gjc --tmux`, the leader window now inherits the project:branch title the same way it does on POSIX.
+- Fixed tmux startup fast paths (#1142).
+- Deep Interview (and any scrollable `ask`/hook selector) no longer enables SGR mouse reporting, which was hijacking the mouse wheel and disabling the terminal's native scrollback while a question was on screen. The wheel now scrolls the terminal as usual; long questions still scroll inside the dialog via PgUp/PgDn (#1164).
+- Scrollable Deep Interview question boxes now show explicit `▲ more` / `▼ more` affordances when hidden question text exists, and selector mode also supports Ctrl+u/Ctrl+d as question-scroll aliases for PgUp/PgDn (#1164).
+- Fixed unbounded memory growth in long sessions: the full verbatim transcript was retained in `SessionManager.#fileEntries`/`#byId` forever across compactions (compaction only summarized the LLM-bound context), so long coding sessions could OOM. Compaction now reclaims hot resident content via cold-spill, the `AgentSession.compact()` post-append path no longer bulk-materializes the branch, and assistant tool-call arguments/text are no longer kept verbatim indefinitely (#1166).
+- Lossless branch/export fidelity after compaction: HTML export and branch & re-edit now rehydrate cold-spilled pre-compaction content instead of showing tombstone notices, and branched-session creation preserves cold-spill refs without truncating >500k-char content (#1166).
+- Materialize resident blobs before branch export so exported branches never reference unresolved resident blob refs.
+- Inherit the live fast-mode (`serviceTier`) into task subagents so delegated work uses the parent session's service tier (#1171).
+- Fixed model selection after model-profile preset activation so the activated preset's model is actually used (#1172).
+- Preserve session-only model-profile overrides instead of dropping them on later resolution (#1175).
+- Fixed the `gjc ultragoal checkpoint` goal-snapshot fallback so checkpoints reconcile correctly when a fresh snapshot is unavailable (#1177).
+- Added durable `gjc-session` diagnostics for the routed-session harness scripts (#1189).
+- Telegram: apply verbosity commands (#1139), fix clarify-choice rendering (#1147), create the session topic on connect, and delete session topics on shutdown.
 
 ### Documentation
 
 - The native Windows psmux section in `docs/environment-variables.md` now reflects that `gjc --tmux` builds a real tmux-backed plan via psmux, lists the new `GJC_PSMUX_*` knobs, and explains the worker-spawn shell-quoting rule. The bundled `team` skill doc points readers at the same environment section instead of the legacy "psmux is not fully supported" warning.
-
-## [0.7.3] - 2026-06-25
-
-### Fixed
-
-- Deep Interview (and any scrollable `ask`/hook selector) no longer enables SGR mouse reporting, which was hijacking the mouse wheel and disabling the terminal's native scrollback while a question was on screen. The wheel now scrolls the terminal as usual; long questions still scroll inside the dialog via PgUp/PgDn.
-- Scrollable Deep Interview question boxes now show explicit `▲ more` / `▼ more` affordances when hidden question text exists, and selector mode also supports Ctrl+u/Ctrl+d as question-scroll aliases for PgUp/PgDn.
-
-## [0.7.3] - 2026-06-25
-
-### Added
-
-- Added durable cold-spill eviction for compacted session history: after a compaction, `SessionManager.evictCompactedContent()` moves pre-`firstKeptEntryId` payloads (user/assistant text, thinking, tool-call arguments) out of the hot JSONL and resident heap into durable content-addressed sidecar blobs via `BlobStore.putImmutableSync`, keeping hot retained bytes bounded regardless of pre-compaction history size while preserving graph integrity and the compaction summary.
-- Added a non-materializing, path-only `buildSessionContext()` that no longer populates `#materializedEntriesCache` and performs zero cold-spill reads on covered compacted branches, plus fidelity read APIs (`getEntryForFidelity`/`getBranchForFidelity`/`getEntriesForExport`) that rehydrate cold-spilled content on demand for HTML export, branch & re-edit, and branched-session creation.
-- Added `BlobStore.putImmutableSync`/`getCheckedSync` (plus `EphemeralBlobStore`/`MemoryBlobStore` overrides): immutable, crash-safe, hash-verified content-addressed install (exclusive copy fallback + fsync) and checked reads that throw `BlobCorruptError` on corrupt blobs and never return silent wrong data.
-
-### Fixed
-
-- Fixed unbounded memory growth in long sessions: the full verbatim transcript was retained in `SessionManager.#fileEntries`/`#byId` forever across compactions (compaction only summarized the LLM-bound context), so long coding sessions could OOM. Compaction now reclaims hot resident content via cold-spill, the `AgentSession.compact()` post-append path no longer bulk-materializes the branch (`#syncTodoPhasesFromBranch` uses a non-materializing canonical active-path accessor), and assistant tool-call arguments/text are no longer kept verbatim indefinitely.
-- Lossless branch/export fidelity after compaction: HTML export and branch & re-edit now rehydrate cold-spilled pre-compaction content instead of showing tombstone notices, and branched-session creation preserves cold-spill refs without truncating >500k-char content.
+- Clarified Windows tmux fallback guidance.
+- Credited `fivetaku/insane-search` for the ported public-route search fallbacks.
 
 ## [0.7.3] - 2026-06-25
 
@@ -81,14 +87,10 @@
 - User-supplied URL reads now share the public HTTP(S) network guard that was previously insane-fallback-only: the initial target, the redirect chain, and binary-conversion redirects are all revalidated against private-network blocking before any request is opened or followed, closing an SSRF path through the normal read-tool fetch pipeline (#1114).
 - Bridge workflow-gate responses now require the claimed controller token before the unattended control plane may resolve a gate, and the `workflow_gate_response` RPC command was raised from prompt scope to control scope, so prompt-only clients can no longer answer lifecycle workflow gates (#1116).
 
-- `gjc team` now adopts any real tmux session as its leader — including one you started yourself outside `gjc --tmux` — by writing and reading back GJC's `@gjc-profile` ownership tag, instead of only accepting `gjc --tmux`-launched sessions. Providers that cannot round-trip tmux user options (e.g. psmux) are still rejected as unmanaged.
-
-- `gjc team` now fails with actionable guidance when there is no tmux leader to host workers: running it with no tmux installed reports `tmux_not_installed`, and running it outside any tmux session reports `not_inside_tmux` (with a hint to start one via `gjc --tmux` or your own `tmux`, or use `--dry-run`), instead of surfacing raw tmux stderr.
-
 ## [0.7.2] - 2026-06-24
 ### Added
 
-- Added a keyless `insane` web search provider that safely ports upstream [`fivetaku/insane-search`](https://github.com/fivetaku/insane-search) public-route fallbacks (MIT; vendored engine pinned in `packages/coding-agent/vendor/insane-search/`) without TLS impersonation, browser/cookie bypasses, credential storage, or auto-installed dependencies (#1011).
+- Added a keyless `insane` web search provider that safely ports upstream insane-search public-route fallbacks without TLS impersonation, browser/cookie bypasses, credential storage, or auto-installed dependencies (#1011).
 - `web_search` `auto` mode now drives native provider search over proxies/custom endpoints by reusing the active model's own credential + baseUrl when canonical native creds are absent: `activeContextNativeId()` matches the model's wire api (+ model-id family) to `anthropic` (anthropic-messages), `openai-compatible` (openai-responses/completions), or `gemini` (google-generative-ai Generative Language), each falling back to DuckDuckGo if the endpoint does not support web search.
 - Added built-in C# LSP detection for `csharp-ls`, with `omnisharp` preserved as a fallback when `csharp-ls` is unavailable (#1054).
 - Added Discord and Slack notification adapters alongside the existing Telegram surface, so action-needed signals and replies can be routed to those clients (#1043).

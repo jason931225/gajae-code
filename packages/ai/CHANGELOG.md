@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-06-27
+
+### Fixed
+
+- Treated `openai-codex-device` as an auth-storage alias for `openai-codex`, so headless/device Codex logins show as authenticated and logout/remove the stored Codex credential instead of appearing unsaved (#1151).
+- Disabled thinking for OpenCode Go forced tool calls so forced-tool turns no longer emit unsupported thinking content (#1185).
+- Restored the GPT-5.5 context window to its correct size (#1186).
+
 ## [0.7.3] - 2026-06-25
 ### Added
 
@@ -16,9 +24,6 @@
 ### Security
 
 - In no-auth (tokenless) auth-gateway mode, requests carrying a browser `Origin` header are now rejected before CORS preflight handling or route dispatch, while local non-browser CLI clients keep the existing tokenless flow and token-configured browser clients keep the bearer-token/preflight flow (#1115).
-### Fixed
-
-- Treated `openai-codex-device` as an auth-storage alias for `openai-codex`, so headless/device Codex logins show as authenticated and logout/remove the stored Codex credential instead of appearing unsaved.
 
 ## [0.7.2] - 2026-06-24
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-06-27
+
+### Fixed
+
+- Fixed the `gajae-code` npm wrapper to invoke the `gjc` CLI through the global bin wrapper so global installs launch the CLI correctly.
+
 ## [0.5.1] - 2026-06-14
 
 - Version aligned with the 0.5.1 monorepo release; no functional changes in this package.

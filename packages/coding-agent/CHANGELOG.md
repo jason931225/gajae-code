@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-06-27
+
 ### Added
 
 - Native Windows `gjc --tmux` is now backed by [psmux](https://github.com/psmux/psmux) when no real tmux is on PATH: a new `psmux-detect` module probes `psmux` / `pmux` / `tmux` on Windows and resolves the multiplexer to use, `tmux-common.ts` re-exports the resolver for downstream callers, and `buildDefaultTmuxLaunchPlan` builds a real PowerShell-encoded `--tmux` plan instead of falling through to the direct-launch diagnostic. The native Windows `gjc session` / `gjc team` ownership-tag and worker-spawn paths therefore work end-to-end on a Windows host with psmux installed (no WSL required).

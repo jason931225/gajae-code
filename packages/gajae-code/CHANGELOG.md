@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-06-27
+
+### Fixed
+
+- Patch release bundling memory hotfixes: resume OOM cycle guards for session-tree traversal (#1193, #1195) and elision of runaway thinking-token loops (#1196), plus psmux session support (#1192), tmux window-title sanitization (#1198), and Codex history replay sanitization (#1199, #1200).
+
 ## [0.7.4] - 2026-06-27
 
 ### Fixed

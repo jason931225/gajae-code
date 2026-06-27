@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-06-27
+
+### Fixed
+
+- Sanitized Codex history replay text fields so malformed/non-string replay text no longer corrupts the rebuilt request payload (#1199).
+- Preserved object-valued tool replay fields when rebuilding Codex history payloads instead of coercing them to strings (#1200).
+
 ## [0.7.4] - 2026-06-27
 
 ### Fixed

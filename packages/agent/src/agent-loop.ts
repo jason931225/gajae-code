@@ -24,8 +24,8 @@ import {
 	type HarmonyRecoveredToolCall,
 	isHarmonyLeakMitigationTarget,
 	recoverHarmonyToolCall,
-	signalListLabel,
 	shouldMitigateHarmonyLeak,
+	signalListLabel,
 } from "./harmony-leak";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {

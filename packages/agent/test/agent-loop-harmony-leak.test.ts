@@ -15,12 +15,12 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 const LEAKED = [
 	"call",
 	'<invoke name="web_search">',
-	"<parameter name=\"query\">portfolio copywriting examples</parameter>",
+	'<parameter name="query">portfolio copywriting examples</parameter>',
 	'<parameter name="_i">Researching copy</parameter>',
 	"</invoke>",
 ].join("\n");
 
-const HARMONY_HEADER_LEAK = "analysis to=functions.read code {\n  \"path\": \"src/x.ts\"\n}";
+const HARMONY_HEADER_LEAK = 'analysis to=functions.read code {\n  "path": "src/x.ts"\n}';
 
 function assistantContains(messages: AgentMessage[], needle: string): boolean {
 	return messages.some(m => m.role === "assistant" && JSON.stringify(m.content).includes(needle));

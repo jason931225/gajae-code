@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ## [0.7.7] - 2026-06-28
+### Added
+
+- Added a `#` prompt action that enters tmux copy-mode and searches backward to the previous rendered `user` input marker, providing a tmux-local previous-input scroll jump without relying on terminal-specific modified key chords.
 
 ### Fixed
 
@@ -22,7 +25,6 @@
 - Elided runaway thinking-token loops in the assistant message renderer so repeated thinking output no longer grows without bound (#1196).
 - Made `gjc session` create/list work on psmux-backed multiplexers (#1192).
 - Sanitized dot-prefixed cwd window titles so tmux window names render correctly (#1198).
-
 ## [0.7.4] - 2026-06-27
 
 ### Added

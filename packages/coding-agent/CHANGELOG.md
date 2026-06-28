@@ -5,6 +5,15 @@
 ### Fixed
 
 - Kept Codex `reasoning.encrypted_content` replay strings out of the resident large-text externalizer so resumed sessions preserve the provider's opaque encrypted reasoning payload instead of degrading it to a resident blob object.
+## [0.7.5] - 2026-06-27
+
+### Fixed
+
+- Guarded `parentId` session-tree walks against cycles to stop resume from exhausting memory (OOM) on self-referential or cyclic parent chains (#1193).
+- Guarded `getTree` against child cycles so cyclic child references can no longer drive unbounded traversal (#1195).
+- Elided runaway thinking-token loops in the assistant message renderer so repeated thinking output no longer grows without bound (#1196).
+- Made `gjc session` create/list work on psmux-backed multiplexers (#1192).
+- Sanitized dot-prefixed cwd window titles so tmux window names render correctly (#1198).
 
 ## [0.7.4] - 2026-06-27
 

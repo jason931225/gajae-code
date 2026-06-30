@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.7.8] - 2026-06-30
 ### Added
 
 - Terminal bell notifications can now be enabled for agent completion, approval, and ask/user-input prompts (#1277).

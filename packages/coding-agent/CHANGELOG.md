@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.7.10] - 2026-07-02
 ### Added
 
 - GJC now best-effort renames the containing cmux workspace to the current GJC session name when running inside a cmux terminal.

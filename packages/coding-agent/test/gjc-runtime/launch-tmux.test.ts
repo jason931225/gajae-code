@@ -940,7 +940,7 @@ describe("default GJC tmux launch", () => {
 		const stdout = process.stdout as typeof process.stdout & { isTTY?: boolean };
 		const previousIsTTY = stdout.isTTY;
 		const writeSpy = spyOn(process.stdout, "write").mockImplementation(() => true);
-		stdout.isTTY = true;
+		Object.defineProperty(stdout, "isTTY", { configurable: true, value: true });
 
 		try {
 			const handled = launchDefaultTmuxIfNeeded({
@@ -970,7 +970,7 @@ describe("default GJC tmux launch", () => {
 			expect(writeSpy).not.toHaveBeenCalled();
 			expect(diagnostics[0]).toStartWith("gjc --tmux failed after creating tmux session: attach failed.");
 		} finally {
-			stdout.isTTY = previousIsTTY;
+			Object.defineProperty(stdout, "isTTY", { configurable: true, value: previousIsTTY });
 		}
 	});
 
@@ -1259,7 +1259,7 @@ describe("default GJC tmux launch", () => {
 		const stdout = process.stdout as typeof process.stdout & { isTTY?: boolean };
 		const previousIsTTY = stdout.isTTY;
 		const writeSpy = spyOn(process.stdout, "write").mockImplementation(() => true);
-		stdout.isTTY = true;
+		Object.defineProperty(stdout, "isTTY", { configurable: true, value: true });
 		try {
 			const handled = launchDefaultTmuxIfNeeded({
 				parsed: args({ tmux: true }),
@@ -1284,7 +1284,7 @@ describe("default GJC tmux launch", () => {
 			expect(calls[0].args[0]).toBe("new-session");
 			expect(writeSpy).not.toHaveBeenCalled();
 		} finally {
-			stdout.isTTY = previousIsTTY;
+			Object.defineProperty(stdout, "isTTY", { configurable: true, value: previousIsTTY });
 		}
 	});
 

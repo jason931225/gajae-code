@@ -432,6 +432,8 @@ const USAGE_CACHE_PREFIX = "usage_cache:";
 // data (5h / 7d / monthly limits) is fine being a few minutes stale.
 const USAGE_REPORT_TTL_MS = 5 * 60_000;
 const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
+// Display-stale usage is non-authoritative for routing.
+const USAGE_ROUTING_MAX_AGE_MS = 15 * 60_000;
 /**
  * Per-credential cool-down after a usage fetch fails. While this window is
  * active we serve the last successful value to avoid dropping the credential
@@ -655,6 +657,7 @@ class AuthStorageUsageCache implements UsageCache {
 		return parseUsageCacheEntry<T>(raw);
 	}
 
+	// Expired rows remain readable; retention is enforced on read.
 	set<T>(key: string, entry: UsageCacheEntry<T>): void {
 		const payload = JSON.stringify({ value: entry.value, expiresAt: entry.expiresAt });
 		const durableExpiresAt =
@@ -2053,6 +2056,19 @@ export class AuthStorage {
 			// don't write — let the next poll retry.
 			const lastGood = this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value ?? null;
 			if (lastGood !== null) {
+				// Prevent expired last-good rows from surviving failed probes.
+				const fetchedAt = lastGood.fetchedAt;
+				const retired =
+					typeof fetchedAt !== "number" ||
+					!Number.isFinite(fetchedAt) ||
+					Date.now() - fetchedAt > USAGE_LAST_GOOD_RETENTION_MS;
+				if (retired) {
+					this.#usageLogger?.debug("Usage last-good retired (age)", {
+						cacheKey,
+						ageMs: typeof fetchedAt === "number" ? Date.now() - fetchedAt : undefined,
+					});
+					return null;
+				}
 				const backoffJitter = USAGE_FAILURE_BACKOFF_MS * (Math.random() * 0.5 - 0.25);
 				const coolDown = Date.now() + USAGE_FAILURE_BACKOFF_MS + backoffJitter;
 				this.#usageCache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
@@ -2254,6 +2270,54 @@ export class AuthStorage {
 		}
 		if (candidates.length === 0) return undefined;
 		return Math.min(...candidates);
+	}
+
+	#usageAgeMs(report: UsageReport, nowMs: number): number | undefined {
+		const fetchedAt = report.fetchedAt;
+		if (typeof fetchedAt !== "number" || !Number.isFinite(fetchedAt)) return undefined;
+		return nowMs - fetchedAt;
+	}
+
+	#isUsageFreshForRouting(report: UsageReport, nowMs: number): boolean {
+		const ageMs = this.#usageAgeMs(report, nowMs);
+		return ageMs !== undefined && ageMs <= USAGE_ROUTING_MAX_AGE_MS;
+	}
+
+	#usageForRouting(report: UsageReport | null | undefined, nowMs: number): UsageReport | undefined {
+		if (!report || !this.#isUsageFreshForRouting(report, nowMs)) return undefined;
+		return report;
+	}
+
+	#isUsageLimitAuthoritativeForRouting(limit: UsageLimit | undefined, nowMs: number): limit is UsageLimit {
+		if (!limit) return false;
+		if (!this.#isUsageLimitExhausted(limit)) return true;
+		const resetsAt = limit.window?.resetsAt;
+		return !(typeof resetsAt === "number" && Number.isFinite(resetsAt) && resetsAt <= nowMs);
+	}
+
+	#hasOpenAICodexProPlanForRouting(report: UsageReport | null | undefined, nowMs: number): boolean {
+		return this.#usageForRouting(report, nowMs) !== undefined && hasOpenAICodexProPlan(report ?? null);
+	}
+
+	#isUsageLimitReachedForRouting(report: UsageReport, nowMs: number): boolean {
+		return report.limits.some(
+			limit => this.#isUsageLimitExhausted(limit) && this.#isUsageLimitAuthoritativeForRouting(limit, nowMs),
+		);
+	}
+
+	#exhaustedWindowDurationMs(report: UsageReport, nowMs: number): number | undefined {
+		let bestReset: number | undefined;
+		let bestDuration: number | undefined;
+		for (const limit of report.limits) {
+			if (!this.#isUsageLimitExhausted(limit)) continue;
+			const resetsAt = limit.window?.resetsAt;
+			if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt) || resetsAt <= nowMs) continue;
+			if (bestReset === undefined || resetsAt < bestReset) {
+				bestReset = resetsAt;
+				bestDuration = limit.window?.durationMs;
+			}
+		}
+		return typeof bestDuration === "number" && Number.isFinite(bestDuration) ? bestDuration : undefined;
 	}
 
 	async #getUsageReport(
@@ -2509,11 +2573,23 @@ export class AuthStorage {
 			const credential = this.#getCredentialsForProvider(provider)[sessionCredential.index];
 			if (credential?.type === "oauth") {
 				const report = await this.#getUsageReport(provider, credential, options);
-				if (report && this.#isUsageLimitReached(report)) {
-					const resetAtMs = this.#getUsageResetAtMs(report, Date.now());
+				const nowMs = Date.now();
+				if (
+					report &&
+					this.#isUsageFreshForRouting(report, nowMs) &&
+					this.#isUsageLimitReachedForRouting(report, nowMs)
+				) {
+					const resetAtMs = this.#getUsageResetAtMs(report, nowMs);
 					if (resetAtMs && resetAtMs > blockedUntil) {
-						blockedUntil = resetAtMs;
+						const windowDurationMs = this.#exhaustedWindowDurationMs(report, nowMs);
+						const cap = nowMs + (windowDurationMs ?? USAGE_ROUTING_MAX_AGE_MS);
+						blockedUntil = Math.min(resetAtMs, cap);
 					}
+				} else if (report && !this.#isUsageFreshForRouting(report, nowMs)) {
+					this.#usageLogger?.debug("Block extension rejected: stale usage", {
+						provider,
+						ageMs: this.#usageAgeMs(report, nowMs),
+					});
 				}
 			}
 		}
@@ -2590,6 +2666,7 @@ export class AuthStorage {
 			selection: { credential: OAuthCredential; index: number };
 			usage: UsageReport | null;
 			usageChecked: boolean;
+			routingUsage?: UsageReport;
 			blocked: boolean;
 			blockedUntil?: number;
 			hasPriorityBoost: boolean;
@@ -2642,20 +2719,36 @@ export class AuthStorage {
 			const { selection, usage, usageChecked } = result;
 			let { blockedUntil } = result;
 			let blocked = blockedUntil !== undefined;
-			if (!blocked && usage && this.#isUsageLimitReached(usage)) {
-				const resetAtMs = this.#getUsageResetAtMs(usage, nowMs);
+			const usageForRouting = this.#usageForRouting(usage, nowMs);
+			if (!blocked && usageForRouting && this.#isUsageLimitReachedForRouting(usageForRouting, nowMs)) {
+				const resetAtMs = this.#getUsageResetAtMs(usageForRouting, nowMs);
 				blockedUntil = resetAtMs ?? Date.now() + AuthStorage.#defaultBackoffMs;
 				this.#markCredentialBlocked(args.providerKey, selection.index, blockedUntil);
 				blocked = true;
+			} else if (!blocked && usage && !usageForRouting && this.#isUsageLimitReached(usage)) {
+				this.#usageLogger?.debug("Routing ignored stale usage", {
+					provider: args.provider,
+					ageMs: this.#usageAgeMs(usage, nowMs),
+					maxAgeMs: USAGE_ROUTING_MAX_AGE_MS,
+					decision: "not-blocked",
+				});
 			}
-			const windows = usage ? strategy.findWindowLimits(usage) : undefined;
-			const primary = windows?.primary;
-			const secondary = windows?.secondary;
+			// Past-reset exhausted windows are not routing-authoritative.
+			const windows = usageForRouting ? strategy.findWindowLimits(usageForRouting) : undefined;
+			const primaryCandidate = windows?.primary;
+			const secondaryCandidate = windows?.secondary;
+			const primary = this.#isUsageLimitAuthoritativeForRouting(primaryCandidate, nowMs)
+				? primaryCandidate
+				: undefined;
+			const secondary = this.#isUsageLimitAuthoritativeForRouting(secondaryCandidate, nowMs)
+				? secondaryCandidate
+				: undefined;
 			const secondaryTarget = secondary ?? primary;
 			ranked.push({
 				selection,
 				usage,
 				usageChecked,
+				routingUsage: usageForRouting,
 				blocked,
 				blockedUntil,
 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary) ?? false,
@@ -2683,8 +2776,8 @@ export class AuthStorage {
 				return left.orderPos - right.orderPos;
 			}
 			if (requiresOpenAICodexProModel(args.provider, args.options?.modelId)) {
-				const leftPlanPriority = getOpenAICodexPlanPriority(left.usage);
-				const rightPlanPriority = getOpenAICodexPlanPriority(right.usage);
+				const leftPlanPriority = getOpenAICodexPlanPriority(left.routingUsage ?? null);
+				const rightPlanPriority = getOpenAICodexPlanPriority(right.routingUsage ?? null);
 				if (leftPlanPriority !== rightPlanPriority) return leftPlanPriority - rightPlanPriority;
 			}
 			if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
@@ -2788,8 +2881,10 @@ export class AuthStorage {
 
 		// Skip the Pro-plan filter when no candidate is confirmed Pro, so users with only
 		// non-Pro accounts can still attempt Spark requests (e.g. trial/grandfathered access).
+		const proRequirementNow = Date.now();
 		const enforceProRequirement =
-			requiresProModel && candidates.some(candidate => hasOpenAICodexProPlan(candidate.usage));
+			requiresProModel &&
+			candidates.some(candidate => this.#hasOpenAICodexProPlanForRouting(candidate.usage, proRequirementNow));
 
 		const fallback = candidates[0];
 
@@ -2969,10 +3064,16 @@ export class AuthStorage {
 				});
 				usageChecked = true;
 			}
-			if (applyProFilter && !hasOpenAICodexProPlan(usage)) {
+			if (applyProFilter && !this.#hasOpenAICodexProPlanForRouting(usage, Date.now())) {
 				return undefined;
 			}
-			if (checkUsage && !allowBlocked && usage && this.#isUsageLimitReached(usage)) {
+			if (
+				checkUsage &&
+				!allowBlocked &&
+				usage &&
+				this.#isUsageFreshForRouting(usage, Date.now()) &&
+				this.#isUsageLimitReachedForRouting(usage, Date.now())
+			) {
 				const resetAtMs = this.#getUsageResetAtMs(usage, Date.now());
 				this.#markCredentialBlocked(
 					providerKey,
@@ -3035,10 +3136,16 @@ export class AuthStorage {
 					});
 					usageChecked = true;
 				}
-				if (applyProFilter && !hasOpenAICodexProPlan(usage)) {
+				if (applyProFilter && !this.#hasOpenAICodexProPlanForRouting(usage, Date.now())) {
 					return undefined;
 				}
-				if (checkUsage && !allowBlocked && usage && this.#isUsageLimitReached(usage)) {
+				if (
+					checkUsage &&
+					!allowBlocked &&
+					usage &&
+					this.#isUsageFreshForRouting(usage, Date.now()) &&
+					this.#isUsageLimitReachedForRouting(usage, Date.now())
+				) {
 					const resetAtMs = this.#getUsageResetAtMs(usage, Date.now());
 					this.#markCredentialBlocked(
 						providerKey,

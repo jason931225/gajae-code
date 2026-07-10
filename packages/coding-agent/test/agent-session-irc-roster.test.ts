@@ -235,6 +235,28 @@ describe("AgentSession IRC roster delivery", () => {
 		expect(deliveredRosters(harness)).toHaveLength(1);
 	});
 
+	it("omits an ephemeral roster claim invalidated during API-key resolution and redelivers it once", async () => {
+		const apiKey = Promise.withResolvers<string>();
+		const claimAcquired = Promise.withResolvers<void>();
+		const harness = createHarness({
+			getApiKey: async () => {
+				claimAcquired.resolve();
+				return apiKey.promise;
+			},
+		});
+		addPeer(harness.registry);
+
+		const staleTurn = ephemeral(harness, "stale side request");
+		await claimAcquired.promise;
+		await harness.session.newSession();
+		apiKey.resolve("test-key");
+		await staleTurn;
+
+		expect(deliveredRosters(harness)).toHaveLength(0);
+		await ephemeral(harness, "fresh side request");
+		expect(deliveredRosters(harness)).toHaveLength(1);
+	});
+
 	it("releases a failed claimant so a later turn retries the same signature", async () => {
 		let fail = true;
 		const model = createMockModel({

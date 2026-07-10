@@ -191,7 +191,7 @@ export class UiHelpers {
 	constructor(private ctx: InteractiveModeContext) {}
 	#renderedIrcInlineComponents = new Map<string, readonly Component[]>();
 
-	getRenderedIrcInlineComponents(): ReadonlyMap<string, readonly Component[]> {
+	getRenderedIrcInlineComponents(): Map<string, readonly Component[]> {
 		return this.#renderedIrcInlineComponents;
 	}
 

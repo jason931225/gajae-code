@@ -77,6 +77,23 @@ describe("IRC rebuild projection", () => {
 		expect(chatContainer.children).toHaveLength(2);
 	});
 
+	it("removes inline components that expire between rendering and reconciliation", () => {
+		vi.useFakeTimers({ now: 0 });
+		const { ctx, ledger, helpers, chatContainer } = makeContext();
+		ledger.observe(
+			{ observationId: "expired-during-rebuild", kind: "incoming", from: "peer", to: "you", text: "hello", timestamp: 0 },
+			true,
+		);
+		helpers.renderSessionContext(emptyContext);
+		expect(chatContainer.children).toHaveLength(2);
+
+		vi.advanceTimersByTime(10_000);
+		new EventController(ctx).reconcileIrcExpiryTimers(helpers.getRenderedIrcInlineComponents());
+
+		expect(chatContainer.children).toHaveLength(0);
+		expect(helpers.getRenderedIrcInlineComponents().has("expired-during-rebuild")).toBe(false);
+	});
+
 	it("keeps persisted IRC observations between surrounding messages across rebuilds", () => {
 		const { ledger, helpers, chatContainer } = makeContext();
 		ledger.observe(

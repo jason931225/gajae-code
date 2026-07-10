@@ -10537,11 +10537,21 @@ export class AgentSession {
 				throw new Error(`No API key for ${model.provider}/${model.id}`);
 			}
 
-			const snapshot = this.#buildEphemeralSnapshot(
-				args.promptText,
-				rosterClaim ? [rosterClaim.message] : undefined,
-			);
-			const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
+			const rosterMessage =
+				rosterClaim && this.#isCurrentIrcRosterClaim(rosterClaim.token, rosterClaim.epoch)
+					? rosterClaim.message
+					: undefined;
+			if (rosterClaim && !rosterMessage) {
+				this.#releaseIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
+			}
+			let snapshot = this.#buildEphemeralSnapshot(args.promptText, rosterMessage ? [rosterMessage] : undefined);
+			let llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
+			if (rosterMessage && !this.#isCurrentIrcRosterClaim(rosterClaim!.token, rosterClaim!.epoch)) {
+				this.#releaseIrcRosterClaim(rosterClaim!.token, rosterClaim!.epoch);
+				// Conversion is asynchronous, so rebuild without a claim invalidated while it awaited.
+				snapshot = this.#buildEphemeralSnapshot(args.promptText);
+				llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
+			}
 			const context: Context = {
 				systemPrompt: this.systemPrompt,
 				messages: llmMessages,

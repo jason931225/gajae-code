@@ -381,11 +381,26 @@ export class EventController {
 		}
 	}
 
-	reconcileIrcExpiryTimers(componentsByObservationId: ReadonlyMap<string, readonly Component[]>): void {
+	reconcileIrcExpiryTimers(componentsByObservationId: Map<string, readonly Component[]>): void {
 		this.clearIrcExpiryTimers();
 		this.#renderedIrcComponents.clear();
 		const now = Date.now();
-		for (const record of this.ctx.ircLedger.getInlineProjection(now)) {
+		const inlineProjection = this.ctx.ircLedger.getInlineProjection(now);
+		const projectedObservationIds = new Set(inlineProjection.map(record => record.observationId));
+		for (const [observationId, components] of componentsByObservationId) {
+			const record = this.ctx.ircLedger.getRecord(observationId);
+			if (
+				!projectedObservationIds.has(observationId) ||
+				(record?.mode === "ephemeral" && record.expiresAt! - now <= 0)
+			) {
+				for (const component of components) {
+					this.ctx.chatContainer.removeChild(component);
+				}
+				this.#renderedIrcComponents.delete(observationId);
+				componentsByObservationId.delete(observationId);
+			}
+		}
+		for (const record of inlineProjection) {
 			const components = componentsByObservationId.get(record.observationId);
 			if (components) {
 				this.#renderedIrcComponents.set(record.observationId, components);

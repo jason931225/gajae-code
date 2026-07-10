@@ -119,6 +119,27 @@ describe("IrcSplitViewComponent", () => {
 		expect(narrow.every(line => Bun.stripANSI(line).length <= 40)).toBe(true);
 	});
 
+	it("replaces tabs in IRC labels and text before wrapping", () => {
+		const ledger = new IrcObservationLedger();
+		ledger.observe(
+			{
+				observationId: "tabs",
+				kind: "incoming",
+				from: "ali\tce",
+				to: "bo\tb",
+				text: "message\twith tabs",
+				timestamp: Date.parse("2026-01-02T03:04:05.000Z"),
+			},
+			false,
+		);
+		const split = new IrcSplitViewComponent(new TestPane("left"), ledger);
+		split.setVisible(true);
+
+		const lines = split.render(60).map(line => Bun.stripANSI(line));
+		expect(lines.every(line => line.length <= 60)).toBe(true);
+		expect(lines.join("\n")).not.toContain("\t");
+	});
+
 	it("renders kitty images in the left pane while the sidebar is visible", () => {
 		mutableTerminal.imageProtocol = ImageProtocol.Kitty;
 		const image = new Image(

@@ -1,6 +1,7 @@
 import {
 	type Component,
 	padding,
+	replaceTabs,
 	TERMINAL,
 	truncateToWidth,
 	visibleWidth,
@@ -19,10 +20,12 @@ function renderSidebarRecords(ledger: IrcObservationLedger, width: number): stri
 
 	const lines: string[] = [];
 	for (const record of ledger.getSidebarRecords()) {
-		const prefix = `[${formatTimestamp(record.timestamp)}] ${record.from}→${record.to} `;
+		const from = replaceTabs(record.from);
+		const to = replaceTabs(record.to);
+		const prefix = `[${formatTimestamp(record.timestamp)}] ${from}→${to} `;
 		const prefixWidth = visibleWidth(prefix);
 		const textWidth = Math.max(1, width - prefixWidth);
-		const textLines = wrapTextWithAnsi(record.text || "", textWidth);
+		const textLines = wrapTextWithAnsi(replaceTabs(record.text || ""), textWidth);
 		for (const [index, text] of textLines.entries()) {
 			const line = index === 0 ? prefix + text : padding(prefixWidth) + text;
 			lines.push(truncateToWidth(line, width));

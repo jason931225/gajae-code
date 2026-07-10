@@ -22,6 +22,7 @@ function makeContext() {
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
 	ctx.addMessageToChat = message => helpers.addMessageToChat(message);
+	ctx.getUserMessageText = message => helpers.getUserMessageText(message);
 	return { ctx, ledger, helpers, chatContainer };
 }
 
@@ -57,10 +58,55 @@ describe("IRC rebuild projection", () => {
 			false,
 		);
 		vi.advanceTimersByTime(10_000);
-		helpers.renderSessionContext(emptyContext);
+		helpers.renderSessionContext({
+			messages: [
+				{
+					role: "custom",
+					customType: "irc:incoming",
+					content: "old",
+					display: true,
+					attribution: "agent",
+					timestamp: 0,
+					details: { observationId: "expired", from: "peer", message: "old" },
+				},
+			],
+		} as unknown as SessionContext);
 
 		expect(helpers.getRenderedIrcInlineComponents().has("expired")).toBe(false);
 		expect(helpers.getRenderedIrcInlineComponents().has("relay")).toBe(true);
 		expect(chatContainer.children).toHaveLength(2);
+	});
+
+	it("keeps persisted IRC observations between surrounding messages across rebuilds", () => {
+		const { ledger, helpers, chatContainer } = makeContext();
+		ledger.observe(
+			{ observationId: "persisted", kind: "incoming", from: "peer", to: "you", text: "middle", timestamp: 0 },
+			false,
+		);
+		const context = {
+			messages: [
+				{ role: "user", content: "before", timestamp: 0 },
+				{
+					role: "custom",
+					customType: "irc:incoming",
+					content: "middle",
+					display: true,
+					attribution: "agent",
+					timestamp: 0,
+					details: { observationId: "persisted", from: "peer", message: "middle" },
+				},
+				{ role: "user", content: "after", timestamp: 1 },
+			],
+		} as unknown as SessionContext;
+
+		for (let rebuild = 0; rebuild < 2; rebuild++) {
+			chatContainer.clear();
+			helpers.renderSessionContext(context);
+			const transcript = Bun.stripANSI(chatContainer.render(100).join("\n"));
+			expect(transcript.indexOf("before")).toBeLessThan(transcript.indexOf("[IRC]"));
+			expect(transcript.indexOf("[IRC]")).toBeLessThan(transcript.indexOf("after"));
+			expect(helpers.getRenderedIrcInlineComponents()).toHaveLength(1);
+			expect(chatContainer.children).toHaveLength(4);
+		}
 	});
 });

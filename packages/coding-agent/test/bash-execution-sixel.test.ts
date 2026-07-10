@@ -40,6 +40,21 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 		expect(component.getOutput()).toContain(SIXEL);
 	});
 
+	it("renders all completed SIXEL output outside the graphics fallback", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+		const output = [`before ${SIXEL}`, ...Array.from({ length: 25 }, (_, index) => `line ${index}`)].join("\n");
+		const component = new BashExecutionComponent("emit sixel", ui, false);
+		component.setComplete(0, false, { output });
+
+		const rendered = component.render(160).join("\n");
+		expect(rendered).toContain(SIXEL);
+		expect(Bun.stripANSI(rendered)).toContain("line 0");
+		expect(Bun.stripANSI(rendered)).toContain("line 24");
+		expect(Bun.stripANSI(rendered)).not.toContain("more lines");
+	});
+
 	it("does not truncate long SIXEL payload lines", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";

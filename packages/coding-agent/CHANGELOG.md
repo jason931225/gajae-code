@@ -6,6 +6,9 @@
 ### Changed
 
 - Moved the `codex-eco`/`codex-medium`/`codex-pro` presets and the `opus-codex`/`codex-opencodego`/`fable-opus-codex` combo presets from `gpt-5.5` onto the GPT-5.6 tier family: Sol drives `default` and `architect` on every codex preset (eco `sol:medium`, medium `sol:high`, pro `sol:xhigh`/`sol:max`), with Luna/Terra covering the lighter executor/planner/critic roles by tier.
+### Fixed
+
+- Corrected launch-update guidance: only recognized Bun global installs, recognized Windows npm installs, and supported bundled-installer binaries may use `gjc update`; source checkouts and dev links must use their checkout workflow, while unrecognized package-manager or PATH installs must use their original update method. Successful updates require authoritative post-update version and smoke verification.
 
 ### Fixed
 

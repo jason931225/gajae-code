@@ -121,7 +121,7 @@
 
 - `irc.sidebar.enabled` defaults to `false`. When it and `irc.enabled` are enabled, `app.irc.sidebar.toggle` (default `Alt+I`, remappable) shows or hides a read-only IRC sidebar.
 - The sidebar retains the active runtime UI session's IRC observations only. It is not written to disk or restored into another session. Observations first seen while the sidebar setting is off remain inline; observations first seen while it is on use a fixed 10-second deadline from their observation time.
-- While the sidebar is visible, terminal graphics are represented by compact text placeholders so image protocols and raw SIXEL sequences cannot corrupt the split. Hiding it restores normal image and SIXEL rendering.
+- While the sidebar is visible, Kitty terminals keep rendering real images in the transcript (Kitty placements are cursor-neutral and compose safely with the split). Cursor-advancing protocols — iTerm2 inline images and raw SIXEL sequences — are represented by compact text placeholders so they cannot corrupt the split. Hiding the sidebar restores normal rendering for every protocol.
 - A successful `/fork` starts a new logical UI session: it clears the sidebar ledger, hides the panel, and resets roster-delivery state. Failed or cancelled forks preserve the current runtime sidebar state.
 
 ## Hidden peer roster reminders

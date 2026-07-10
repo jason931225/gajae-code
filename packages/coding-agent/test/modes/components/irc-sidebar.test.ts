@@ -1,7 +1,30 @@
-import { describe, expect, it } from "bun:test";
-import { isTerminalGraphicsFallbackActive, type Component } from "@gajae-code/tui";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import {
+	type Component,
+	Image,
+	ImageProtocol,
+	isTerminalGraphicsFallbackActive,
+	TERMINAL,
+} from "@gajae-code/tui";
 import { IrcSplitViewComponent } from "@gajae-code/coding-agent/modes/components/irc-sidebar";
 import { IrcObservationLedger } from "@gajae-code/coding-agent/modes/irc-observation-ledger";
+import { getThemeByName, initTheme, setThemeInstance } from "@gajae-code/coding-agent/modes/theme/theme";
+
+const BASE64_ONE_PIXEL_PNG =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
+const mutableTerminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+const originalProtocol = TERMINAL.imageProtocol;
+
+afterEach(() => {
+	mutableTerminal.imageProtocol = originalProtocol;
+});
+
+beforeAll(async () => {
+	initTheme();
+	const theme = await getThemeByName("red-claw");
+	if (!theme) throw new Error("Expected red-claw theme");
+	setThemeInstance(theme);
+});
 
 class TestPane implements Component {
 	widths: number[] = [];
@@ -94,5 +117,44 @@ describe("IrcSplitViewComponent", () => {
 		expect(pane.widths).toEqual([40, 20]);
 		expect(wide.every(line => Bun.stripANSI(line).length <= 80)).toBe(true);
 		expect(narrow.every(line => Bun.stripANSI(line).length <= 40)).toBe(true);
+	});
+
+	it("renders kitty images in the left pane while the sidebar is visible", () => {
+		mutableTerminal.imageProtocol = ImageProtocol.Kitty;
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 10, maxHeightCells: 2, refetch: () => BASE64_ONE_PIXEL_PNG },
+			{ widthPx: 100, heightPx: 100 },
+		);
+		const ledger = new IrcObservationLedger();
+		addRecord(ledger, "peer message");
+		const split = new IrcSplitViewComponent(image, ledger);
+
+		split.setVisible(true);
+		const visible = split.render(80).join("\n");
+		expect(visible).toContain("\x1b_G");
+		expect(Bun.stripANSI(visible)).toContain("peer message");
+
+		split.setVisible(false);
+		expect(split.render(80).join("\n")).toContain("\x1b_G");
+	});
+
+	it("keeps sixel suppressed in the visible split even with kitty permission active", () => {
+		mutableTerminal.imageProtocol = ImageProtocol.Sixel;
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 10, maxHeightCells: 2, refetch: () => BASE64_ONE_PIXEL_PNG },
+			{ widthPx: 100, heightPx: 100 },
+		);
+		const split = new IrcSplitViewComponent(image, new IrcObservationLedger());
+
+		split.setVisible(true);
+		const visible = split.render(80).join("\n");
+		expect(visible).not.toContain("\x1bP");
+		expect(Bun.stripANSI(visible)).toContain("[image/png");
 	});
 });

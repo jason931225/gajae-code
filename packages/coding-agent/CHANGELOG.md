@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Migrated the repository type-check and release declaration pipeline to stable TypeScript 7.0.2, including the robogjc web workspace and a non-mutating publish-type gate.
+
 ## [0.9.6] - 2026-07-10
 ### Changed
 

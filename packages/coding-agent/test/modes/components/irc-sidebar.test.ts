@@ -1,4 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { type IrcSidebarTheme, IrcSplitViewComponent } from "@gajae-code/coding-agent/modes/components/irc-sidebar";
+import { IrcObservationLedger } from "@gajae-code/coding-agent/modes/irc-observation-ledger";
 import {
 	type Component,
 	Image,
@@ -6,9 +8,11 @@ import {
 	isTerminalGraphicsFallbackActive,
 	TERMINAL,
 } from "@gajae-code/tui";
-import { IrcSplitViewComponent } from "@gajae-code/coding-agent/modes/components/irc-sidebar";
-import { IrcObservationLedger } from "@gajae-code/coding-agent/modes/irc-observation-ledger";
-import { getThemeByName, initTheme, setThemeInstance } from "@gajae-code/coding-agent/modes/theme/theme";
+
+const sidebarTheme = {
+	fg: (_color: "dim", text: string) => text,
+	boxSharp: { vertical: "|" },
+} satisfies IrcSidebarTheme;
 
 const BASE64_ONE_PIXEL_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
@@ -17,13 +21,6 @@ const originalProtocol = TERMINAL.imageProtocol;
 
 afterEach(() => {
 	mutableTerminal.imageProtocol = originalProtocol;
-});
-
-beforeAll(async () => {
-	initTheme();
-	const theme = await getThemeByName("red-claw");
-	if (!theme) throw new Error("Expected red-claw theme");
-	setThemeInstance(theme);
 });
 
 class TestPane implements Component {
@@ -54,7 +51,7 @@ function addRecord(ledger: IrcObservationLedger, text: string): void {
 describe("IrcSplitViewComponent", () => {
 	it("delegates hidden rendering at full width", () => {
 		const pane = new TestPane("transcript");
-		const split = new IrcSplitViewComponent(pane, new IrcObservationLedger());
+		const split = new IrcSplitViewComponent(pane, new IrcObservationLedger(), sidebarTheme);
 
 		expect(split.render(80)).toEqual(["transcript"]);
 		expect(pane.widths).toEqual([80]);
@@ -63,18 +60,18 @@ describe("IrcSplitViewComponent", () => {
 	it("renders all ledger records with UTC metadata and indented continuations", () => {
 		const ledger = new IrcObservationLedger();
 		addRecord(ledger, "first line\nsecond line");
-		const split = new IrcSplitViewComponent(new TestPane("left"), ledger);
+		const split = new IrcSplitViewComponent(new TestPane("left"), ledger, sidebarTheme);
 		split.setVisible(true);
 
 		const rendered = Bun.stripANSI(split.render(70).join("\n"));
 		expect(rendered).toContain("[03:04:05] alice→bob first line");
-		expect(rendered).toMatch(/\n[^\n]*│\s+second line/u);
+		expect(rendered).toMatch(/\n[^\n]*\|\s+second line/u);
 	});
 
 	it("shows records captured before opening the sidebar", () => {
 		const ledger = new IrcObservationLedger();
 		addRecord(ledger, "backfill");
-		const split = new IrcSplitViewComponent(new TestPane("left"), ledger);
+		const split = new IrcSplitViewComponent(new TestPane("left"), ledger, sidebarTheme);
 
 		split.setVisible(true);
 		expect(Bun.stripANSI(split.render(80).join("\n"))).toContain("backfill");
@@ -83,7 +80,7 @@ describe("IrcSplitViewComponent", () => {
 	it("tail-aligns short IRC history with a longer transcript", () => {
 		const ledger = new IrcObservationLedger();
 		addRecord(ledger, "latest IRC line");
-		const split = new IrcSplitViewComponent(new TestPane(["older", "newer", "live tail"]), ledger);
+		const split = new IrcSplitViewComponent(new TestPane(["older", "newer", "live tail"]), ledger, sidebarTheme);
 		split.setVisible(true);
 
 		const lines = Bun.stripANSI(split.render(80).join("\n")).split("\n");
@@ -96,7 +93,7 @@ describe("IrcSplitViewComponent", () => {
 			render: () => [isTerminalGraphicsFallbackActive() ? "[image hidden]" : "\x1bPqSIXEL\x1b\\"],
 			invalidate: () => {},
 		};
-		const split = new IrcSplitViewComponent(pane, new IrcObservationLedger());
+		const split = new IrcSplitViewComponent(pane, new IrcObservationLedger(), sidebarTheme);
 
 		expect(split.render(80).join("\n")).toContain("\x1bPqSIXEL\x1b\\");
 		split.setVisible(true);
@@ -109,7 +106,7 @@ describe("IrcSplitViewComponent", () => {
 		const pane = new TestPane("left");
 		const ledger = new IrcObservationLedger();
 		addRecord(ledger, "right");
-		const split = new IrcSplitViewComponent(pane, ledger);
+		const split = new IrcSplitViewComponent(pane, ledger, sidebarTheme);
 		split.setVisible(true);
 
 		const wide = split.render(80);
@@ -132,7 +129,7 @@ describe("IrcSplitViewComponent", () => {
 			},
 			false,
 		);
-		const split = new IrcSplitViewComponent(new TestPane("left"), ledger);
+		const split = new IrcSplitViewComponent(new TestPane("left"), ledger, sidebarTheme);
 		split.setVisible(true);
 
 		const lines = split.render(60).map(line => Bun.stripANSI(line));
@@ -151,7 +148,7 @@ describe("IrcSplitViewComponent", () => {
 		);
 		const ledger = new IrcObservationLedger();
 		addRecord(ledger, "peer message");
-		const split = new IrcSplitViewComponent(image, ledger);
+		const split = new IrcSplitViewComponent(image, ledger, sidebarTheme);
 
 		split.setVisible(true);
 		const visible = split.render(80).join("\n");
@@ -171,11 +168,27 @@ describe("IrcSplitViewComponent", () => {
 			{ maxWidthCells: 10, maxHeightCells: 2, refetch: () => BASE64_ONE_PIXEL_PNG },
 			{ widthPx: 100, heightPx: 100 },
 		);
-		const split = new IrcSplitViewComponent(image, new IrcObservationLedger());
+		const split = new IrcSplitViewComponent(image, new IrcObservationLedger(), sidebarTheme);
 
 		split.setVisible(true);
 		const visible = split.render(80).join("\n");
 		expect(visible).not.toContain("\x1bP");
 		expect(Bun.stripANSI(visible)).toContain("[image/png");
+	});
+
+	it("resolves an injected theme accessor on every render", () => {
+		let currentTheme: IrcSidebarTheme = {
+			fg: (_color, text) => `\x1b[31m${text}\x1b[0m`,
+			boxSharp: { vertical: "│" },
+		};
+		const split = new IrcSplitViewComponent(new TestPane("left"), new IrcObservationLedger(), () => currentTheme);
+		split.setVisible(true);
+
+		expect(split.render(80).join("\n")).toContain("\x1b[31m │ \x1b[0m");
+		currentTheme = {
+			fg: (_color, text) => `\x1b[32m${text}\x1b[0m`,
+			boxSharp: { vertical: "║" },
+		};
+		expect(split.render(80).join("\n")).toContain("\x1b[32m ║ \x1b[0m")
 	});
 });

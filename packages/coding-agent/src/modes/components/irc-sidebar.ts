@@ -9,7 +9,6 @@ import {
 	wrapTextWithAnsi,
 } from "@gajae-code/tui";
 import type { IrcObservationLedger } from "../irc-observation-ledger";
-import { theme } from "../theme/theme";
 
 function formatTimestamp(timestamp: number): string {
 	return new Date(timestamp).toISOString().slice(11, 19);
@@ -34,6 +33,13 @@ function renderSidebarRecords(ledger: IrcObservationLedger, width: number): stri
 	return lines;
 }
 
+export interface IrcSidebarTheme {
+	fg(color: "dim", text: string): string;
+	readonly boxSharp: { readonly vertical: string };
+}
+
+export type IrcSidebarThemeSource = IrcSidebarTheme | (() => IrcSidebarTheme);
+
 /** Read-only IRC history alongside the active transcript. */
 export class IrcSplitViewComponent implements Component {
 	#visible = false;
@@ -41,6 +47,7 @@ export class IrcSplitViewComponent implements Component {
 	constructor(
 		private readonly leftPane: Component,
 		private readonly ledger: IrcObservationLedger,
+		private readonly componentTheme: IrcSidebarThemeSource,
 	) {}
 
 	get visible(): boolean {
@@ -56,8 +63,9 @@ export class IrcSplitViewComponent implements Component {
 	render(width: number): string[] {
 		if (!this.#visible) return this.leftPane.render(width);
 
+		const componentTheme = typeof this.componentTheme === "function" ? this.componentTheme() : this.componentTheme;
 		const leftWidth = Math.floor(width * 0.5);
-		const separatorText = theme.fg("dim", ` ${theme.boxSharp.vertical} `);
+		const separatorText = componentTheme.fg("dim", ` ${componentTheme.boxSharp.vertical} `);
 		const separatorWidth = width - leftWidth > 3 ? visibleWidth(separatorText) : 0;
 		const separator = separatorWidth > 0 ? separatorText : "";
 		const rightWidth = Math.max(0, width - leftWidth - separatorWidth);

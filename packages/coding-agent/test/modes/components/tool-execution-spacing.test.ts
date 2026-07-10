@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
-import { IrcSplitViewComponent } from "@gajae-code/coding-agent/modes/components/irc-sidebar";
+import { type IrcSidebarTheme, IrcSplitViewComponent } from "@gajae-code/coding-agent/modes/components/irc-sidebar";
 import { IrcObservationLedger } from "@gajae-code/coding-agent/modes/irc-observation-ledger";
 import { ToolExecutionComponent } from "@gajae-code/coding-agent/modes/components/tool-execution";
 import * as themeModule from "@gajae-code/coding-agent/modes/theme/theme";
@@ -13,6 +13,11 @@ beforeAll(async () => {
 });
 
 const uiStub = { requestRender() {} } as unknown as TUI;
+
+const sidebarTheme = {
+	fg: (_color: "dim", text: string) => text,
+	boxSharp: { vertical: "|" },
+} satisfies IrcSidebarTheme;
 
 const originalForceProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
 const originalAllowPassthrough = Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH;
@@ -68,7 +73,7 @@ describe("ToolExecutionComponent spacing", () => {
 		const sixel = "\x1bPqcustom-image\x1b\\";
 		const component = new ToolExecutionComponent("custom", {}, {}, undefined, uiStub);
 		component.updateResult({ content: [{ type: "text", text: `before\n${sixel}\nafter` }], isError: false }, false);
-		const split = new IrcSplitViewComponent(component, new IrcObservationLedger());
+		const split = new IrcSplitViewComponent(component, new IrcObservationLedger(), sidebarTheme);
 
 		expect(split.render(120).join("\n")).toContain(sixel);
 		split.setVisible(true);

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { BashExecutionComponent } from "@gajae-code/coding-agent/modes/components/bash-execution";
 import { IrcSplitViewComponent } from "@gajae-code/coding-agent/modes/components/irc-sidebar";
 import { IrcObservationLedger } from "@gajae-code/coding-agent/modes/irc-observation-ledger";
-import { getThemeByName, setThemeInstance } from "@gajae-code/coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, theme } from "@gajae-code/coding-agent/modes/theme/theme";
 import { sanitizeWithOptionalSixelPassthrough } from "@gajae-code/coding-agent/utils/sixel";
 import { ImageProtocol, TERMINAL, type TUI } from "@gajae-code/tui";
 import { sanitizeText } from "@gajae-code/utils";
@@ -104,7 +104,7 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
 		const component = new BashExecutionComponent("echo sixel", ui, false);
-		const split = new IrcSplitViewComponent(component, new IrcObservationLedger());
+		const split = new IrcSplitViewComponent(component, new IrcObservationLedger(), theme);
 		component.setComplete(0, false, { output: `before\n${SIXEL}\nafter` });
 
 		expect(split.render(80).join("\n")).toContain(SIXEL);
@@ -121,7 +121,7 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
 		const component = new BashExecutionComponent("echo sixel", ui, false);
-		const split = new IrcSplitViewComponent(component, new IrcObservationLedger());
+		const split = new IrcSplitViewComponent(component, new IrcObservationLedger(), theme);
 		split.setVisible(true);
 		component.setComplete(0, false, { output: SIXEL });
 
@@ -138,7 +138,7 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
 		const component = new BashExecutionComponent("echo sixel", ui, false);
-		const split = new IrcSplitViewComponent(component, new IrcObservationLedger());
+		const split = new IrcSplitViewComponent(component, new IrcObservationLedger(), theme);
 		component.setComplete(0, false, { output: SIXEL });
 		split.setVisible(true);
 		component.setExpanded(true);
@@ -153,7 +153,7 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
 		const component = new BashExecutionComponent("echo sixel", ui, false);
-		const split = new IrcSplitViewComponent(component, new IrcObservationLedger());
+		const split = new IrcSplitViewComponent(component, new IrcObservationLedger(), theme);
 		split.setVisible(true);
 		component.setComplete(0, false, { output: `before\n${SIXEL}\nafter` });
 
@@ -169,8 +169,10 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
 		const component = new BashExecutionComponent("echo sixel", ui, false);
-		const split = new IrcSplitViewComponent(component, new IrcObservationLedger());
-		component.setComplete(0, false, { output: `${Array.from({ length: 25 }, (_, index) => `line ${index}`).join("\n")}\n${SIXEL}` });
+		const split = new IrcSplitViewComponent(component, new IrcObservationLedger(), theme);
+		component.setComplete(0, false, {
+			output: `${Array.from({ length: 25 }, (_, index) => `line ${index}`).join("\n")}\n${SIXEL}`,
+		});
 		split.setVisible(true);
 		const raw = split.render(160).join("\n");
 		const visible = Bun.stripANSI(raw);
@@ -187,8 +189,10 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
 		const component = new BashExecutionComponent("echo sixel", ui, false);
-		const split = new IrcSplitViewComponent(component, new IrcObservationLedger());
-		component.setComplete(0, false, { output: `${Array.from({ length: 25 }, (_, index) => `line ${index}`).join("\n")}\n${SIXEL}` });
+		const split = new IrcSplitViewComponent(component, new IrcObservationLedger(), theme);
+		component.setComplete(0, false, {
+			output: `${Array.from({ length: 25 }, (_, index) => `line ${index}`).join("\n")}\n${SIXEL}`,
+		});
 		component.setExpanded(true);
 		split.setVisible(true);
 		const raw = split.render(120).join("\n");

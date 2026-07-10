@@ -153,13 +153,13 @@ export class BashExecutionComponent extends Container {
 	#updateDisplay(): void {
 		const fallbackActive = isTerminalGraphicsFallbackActive();
 		const availableLines = this.#outputLines;
-		const selectedLines = this.#expanded ? availableLines : availableLines.slice(-PREVIEW_LINES);
-		const hiddenLineCount = availableLines.length - selectedLines.length;
 		const sixelLineMask =
 			fallbackActive || (TERMINAL.imageProtocol === ImageProtocol.Sixel && isSixelPassthroughEnabled())
 				? getSixelLineMask(availableLines)
 				: undefined;
 		const hasSixelOutput = sixelLineMask?.some(Boolean) ?? false;
+		const selectedLines = this.#expanded || (hasSixelOutput && !fallbackActive) ? availableLines : availableLines.slice(-PREVIEW_LINES);
+		const hiddenLineCount = availableLines.length - selectedLines.length;
 
 		// Rebuild content container
 		// Detach (not dispose): #headerText and the running #loader are persistent,

@@ -1,6 +1,8 @@
 import {
 	type Component,
 	padding,
+	replaceTabs,
+	TERMINAL,
 	truncateToWidth,
 	visibleWidth,
 	withTerminalGraphicsFallback,
@@ -17,10 +19,12 @@ function renderSidebarRecords(ledger: IrcObservationLedger, width: number): stri
 
 	const lines: string[] = [];
 	for (const record of ledger.getSidebarRecords()) {
-		const prefix = `[${formatTimestamp(record.timestamp)}] ${record.from}→${record.to} `;
+		const from = replaceTabs(record.from);
+		const to = replaceTabs(record.to);
+		const prefix = `[${formatTimestamp(record.timestamp)}] ${from}→${to} `;
 		const prefixWidth = visibleWidth(prefix);
 		const textWidth = Math.max(1, width - prefixWidth);
-		const textLines = wrapTextWithAnsi(record.text || "", textWidth);
+		const textLines = wrapTextWithAnsi(replaceTabs(record.text || ""), textWidth);
 		for (const [index, text] of textLines.entries()) {
 			const line = index === 0 ? prefix + text : padding(prefixWidth) + text;
 			lines.push(truncateToWidth(line, width));
@@ -65,7 +69,13 @@ export class IrcSplitViewComponent implements Component {
 		const separatorWidth = width - leftWidth > 3 ? visibleWidth(separatorText) : 0;
 		const separator = separatorWidth > 0 ? separatorText : "";
 		const rightWidth = Math.max(0, width - leftWidth - separatorWidth);
-		const leftLines = withTerminalGraphicsFallback(() => this.leftPane.render(leftWidth));
+		// Cursor-neutral (kitty) image placements are safe inside the split:
+		// the escape anchors to its cell without moving the cursor, so the
+		// right column still composes correctly. Cursor-advancing protocols
+		// (iTerm2/SIXEL) remain suppressed by the fallback scope.
+		const leftLines = withTerminalGraphicsFallback(() => this.leftPane.render(leftWidth), {
+			allowCursorNeutralImages: true,
+		});
 		const rightLines = renderSidebarRecords(this.ledger, rightWidth);
 		const lineCount = Math.max(leftLines.length, rightLines.length);
 		const output: string[] = [];
@@ -73,8 +83,15 @@ export class IrcSplitViewComponent implements Component {
 		const leftOffset = lineCount - leftLines.length;
 		const rightOffset = lineCount - rightLines.length;
 		for (let index = 0; index < lineCount; index++) {
-			const left = truncateToWidth(leftLines[index - leftOffset] ?? "", leftWidth);
+			const leftRaw = leftLines[index - leftOffset] ?? "";
 			const right = truncateToWidth(rightLines[index - rightOffset] ?? "", rightWidth);
+			if (TERMINAL.isImageLine(leftRaw)) {
+				// Never truncate/measure an image escape: it renders zero visible
+				// columns, so pad the full left width after it.
+				output.push(leftRaw + padding(leftWidth) + separator + right);
+				continue;
+			}
+			const left = truncateToWidth(leftRaw, leftWidth);
 			output.push(left + padding(Math.max(0, leftWidth - visibleWidth(left))) + separator + right);
 		}
 		return output;

@@ -1272,7 +1272,8 @@ export class AgentSession {
 	#agentId: string | undefined;
 	#agentRegistry: AgentRegistry | undefined;
 	#lastDeliveredIrcRosterSignature: string | null = null;
-	#ircRosterClaim: { token: symbol; signature: string } | null = null;
+	#ircRosterEpoch = 0;
+	#ircRosterClaim: { token: symbol; signature: string; epoch: number } | null = null;
 	#providerSessionId: string | undefined;
 	#providerCacheSessionId: string | undefined;
 	#isDisposed = false;
@@ -5636,8 +5637,10 @@ export class AgentSession {
 			}
 			const volatileProjectContextMessage = await this.#buildVolatileProjectContextMessage();
 			messages.push(volatileProjectContextMessage);
-			if (rosterClaim) {
+			if (rosterClaim && this.#isCurrentIrcRosterClaim(rosterClaim.token, rosterClaim.epoch)) {
 				messages.push(rosterClaim.message);
+			} else if (rosterClaim) {
+				this.#releaseIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
 			}
 			if (options?.prependMessages) {
 				messages.push(...options.prependMessages);
@@ -5743,8 +5746,14 @@ export class AgentSession {
 
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
 			await this.#promptAgentWithIdleRetry(messages, agentPromptOptions);
-			if (rosterClaim) {
-				this.#commitIrcRosterClaim(rosterClaim.token);
+			const terminalAssistant = this.#findLastAssistantMessage();
+			if (
+				rosterClaim &&
+				terminalAssistant &&
+				terminalAssistant.stopReason !== "error" &&
+				terminalAssistant.stopReason !== "aborted"
+			) {
+				this.#commitIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
 			}
 			if (!options?.skipPostPromptRecoveryWait) {
 				await this.#waitForPostPromptRecovery();
@@ -5756,7 +5765,7 @@ export class AgentSession {
 						candidate => !(candidate.role === "custom" && candidate.customType === "irc-peer-roster"),
 					),
 				);
-				this.#releaseIrcRosterClaim(rosterClaim.token);
+				this.#releaseIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
 			}
 			this.#endInFlight();
 		}
@@ -10467,26 +10476,36 @@ export class AgentSession {
 		};
 	}
 
-	#claimIrcRosterCandidate(): { token: symbol; message: CustomMessage } | null {
+	#claimIrcRosterCandidate(): { token: symbol; epoch: number; message: CustomMessage } | null {
 		if (this.#ircRosterClaim) return null;
 		const candidate = this.#buildIrcRosterCandidate();
 		if (!candidate || candidate.signature === this.#lastDeliveredIrcRosterSignature) return null;
 		const token = Symbol("irc-roster");
-		this.#ircRosterClaim = { token, signature: candidate.signature };
-		return { token, message: candidate.message };
+		const epoch = this.#ircRosterEpoch;
+		this.#ircRosterClaim = { token, signature: candidate.signature, epoch };
+		return { token, epoch, message: candidate.message };
 	}
 
-	#commitIrcRosterClaim(token: symbol): void {
-		if (this.#ircRosterClaim?.token !== token) return;
-		this.#lastDeliveredIrcRosterSignature = this.#ircRosterClaim.signature;
+	#isCurrentIrcRosterClaim(token: symbol, epoch: number): boolean {
+		return this.#ircRosterEpoch === epoch && this.#ircRosterClaim?.token === token;
+	}
+
+	#commitIrcRosterClaim(token: symbol, epoch: number): void {
+		const claim = this.#ircRosterClaim;
+		if (this.#ircRosterEpoch !== epoch || claim?.token !== token) {
+			this.#releaseIrcRosterClaim(token, epoch);
+			return;
+		}
+		this.#lastDeliveredIrcRosterSignature = claim.signature;
 		this.#ircRosterClaim = null;
 	}
 
-	#releaseIrcRosterClaim(token: symbol): void {
-		if (this.#ircRosterClaim?.token === token) this.#ircRosterClaim = null;
+	#releaseIrcRosterClaim(token: symbol, epoch: number): void {
+		if (this.#isCurrentIrcRosterClaim(token, epoch)) this.#ircRosterClaim = null;
 	}
 
 	#resetIrcRosterDeliveryState(): void {
+		this.#ircRosterEpoch += 1;
 		this.#lastDeliveredIrcRosterSignature = null;
 		this.#ircRosterClaim = null;
 	}
@@ -10518,11 +10537,21 @@ export class AgentSession {
 				throw new Error(`No API key for ${model.provider}/${model.id}`);
 			}
 
-			const snapshot = this.#buildEphemeralSnapshot(
-				args.promptText,
-				rosterClaim ? [rosterClaim.message] : undefined,
-			);
-			const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
+			const rosterMessage =
+				rosterClaim && this.#isCurrentIrcRosterClaim(rosterClaim.token, rosterClaim.epoch)
+					? rosterClaim.message
+					: undefined;
+			if (rosterClaim && !rosterMessage) {
+				this.#releaseIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
+			}
+			let snapshot = this.#buildEphemeralSnapshot(args.promptText, rosterMessage ? [rosterMessage] : undefined);
+			let llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
+			if (rosterMessage && !this.#isCurrentIrcRosterClaim(rosterClaim!.token, rosterClaim!.epoch)) {
+				this.#releaseIrcRosterClaim(rosterClaim!.token, rosterClaim!.epoch);
+				// Conversion is asynchronous, so rebuild without a claim invalidated while it awaited.
+				snapshot = this.#buildEphemeralSnapshot(args.promptText);
+				llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
+			}
 			const context: Context = {
 				systemPrompt: this.systemPrompt,
 				messages: llmMessages,
@@ -10567,12 +10596,12 @@ export class AgentSession {
 				throw new Error("Ephemeral turn ended without a final message");
 			}
 			if (rosterClaim) {
-				this.#commitIrcRosterClaim(rosterClaim.token);
+				this.#commitIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
 			}
 			return { replyText: dedupeIrcReply(replyText.trim()), assistantMessage };
 		} finally {
 			if (rosterClaim) {
-				this.#releaseIrcRosterClaim(rosterClaim.token);
+				this.#releaseIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
 			}
 		}
 	}

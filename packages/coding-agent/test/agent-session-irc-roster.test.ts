@@ -29,7 +29,12 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
-function createHarness(options: { sessionManager?: SessionManager; model?: MockModel } = {}): Harness {
+function createHarness(options: {
+	sessionManager?: SessionManager;
+	model?: MockModel;
+	getApiKey?: () => Promise<string>;
+	retryEnabled?: boolean;
+} = {}): Harness {
 	const model = options.model ?? createMockModel({ handler: () => ({ content: ["ok"] }) });
 	const snapshots: Harness["snapshots"] = [];
 	const registry = new AgentRegistry();
@@ -46,8 +51,8 @@ function createHarness(options: { sessionManager?: SessionManager; model?: MockM
 	const session = new AgentSession({
 		agent,
 		sessionManager,
-		settings: Settings.isolated({ "compaction.enabled": false }),
-		modelRegistry: { getApiKey: async () => "test-key", getAvailable: () => [model] } as never,
+		settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": options.retryEnabled ?? true }),
+		modelRegistry: { getApiKey: options.getApiKey ?? (async () => "test-key"), getAvailable: () => [model] } as never,
 		agentId: "0-Main",
 		agentRegistry: registry,
 		convertToLlm: async messages => {
@@ -177,6 +182,85 @@ describe("AgentSession IRC roster delivery", () => {
 		release.resolve();
 		await Promise.all([main, side]);
 
+		expect(deliveredRosters(harness)).toHaveLength(1);
+	});
+
+	it("releases a normal-turn roster claim after a resolving error outcome", async () => {
+		let fail = true;
+		const harness = createHarness({
+			model: createMockModel({
+				handler: () => (fail ? { content: ["failed"], stopReason: "error" } : { content: ["ok"] }),
+			}),
+			retryEnabled: false,
+		});
+		addPeer(harness.registry);
+
+		await prompt(harness, "fails");
+		fail = false;
+		await prompt(harness, "retry");
+
+		const deliveries = deliveredRosters(harness);
+		expect(deliveries).toHaveLength(2);
+		expect(deliveries[0]).toBe(deliveries[1]);
+	});
+
+	it("releases a normal-turn roster claim after a resolving aborted outcome", async () => {
+		let abort = true;
+		const harness = createHarness({
+			model: createMockModel({ handler: () => (abort ? { content: ["aborted"], stopReason: "aborted" } : { content: ["ok"] }) }),
+		});
+		addPeer(harness.registry);
+
+		await prompt(harness, "aborts");
+		abort = false;
+		await prompt(harness, "retry");
+
+		const deliveries = deliveredRosters(harness);
+		expect(deliveries).toHaveLength(2);
+		expect(deliveries[0]).toBe(deliveries[1]);
+	});
+
+	it("drops a roster claim invalidated during prompt setup and redelivers it once", async () => {
+		const apiKey = Promise.withResolvers<string>();
+		const claimAcquired = Promise.withResolvers<void>();
+		const harness = createHarness({
+			getApiKey: async () => {
+				claimAcquired.resolve();
+				return apiKey.promise;
+			},
+		});
+		addPeer(harness.registry);
+
+		const stalePrompt = prompt(harness, "stale");
+		await claimAcquired.promise;
+		await harness.session.newSession();
+		apiKey.resolve("test-key");
+		await stalePrompt;
+
+		expect(deliveredRosters(harness)).toHaveLength(0);
+		await prompt(harness, "fresh");
+		expect(deliveredRosters(harness)).toHaveLength(1);
+	});
+
+	it("omits an ephemeral roster claim invalidated during API-key resolution and redelivers it once", async () => {
+		const apiKey = Promise.withResolvers<string>();
+		const claimAcquired = Promise.withResolvers<void>();
+		const harness = createHarness({
+			getApiKey: async () => {
+				claimAcquired.resolve();
+				return apiKey.promise;
+			},
+		});
+		addPeer(harness.registry);
+
+		const staleTurn = ephemeral(harness, "stale side request");
+		await claimAcquired.promise;
+		await harness.session.newSession();
+		apiKey.resolve("test-key");
+		await staleTurn;
+
+		expect(deliveredRosters(harness)).toHaveLength(0);
+		await ephemeral(harness, "fresh side request");
 		expect(deliveredRosters(harness)).toHaveLength(1);
 	});
 

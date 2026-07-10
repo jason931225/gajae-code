@@ -3,6 +3,7 @@ import {
 	type ImageDimensions,
 	ImageProtocol,
 	imageFallback,
+	isCursorNeutralImagePermittedInFallback,
 	isTerminalGraphicsFallbackActive,
 	kittyImageId,
 	renderImage,
@@ -85,12 +86,17 @@ export class Image implements Component {
 	}
 
 	render(width: number): string[] {
-		const fallbackActive = isTerminalGraphicsFallbackActive();
+		// Kitty placements are cursor-neutral, so an opted-in fallback scope
+		// (e.g. the IRC split) can still render them safely; iTerm2/SIXEL
+		// advance the cursor and stay suppressed.
+		const graphicsSuppressed =
+			isTerminalGraphicsFallbackActive() &&
+			!(TERMINAL.imageProtocol === ImageProtocol.Kitty && isCursorNeutralImagePermittedInFallback());
 		const protocol = TERMINAL.imageProtocol;
 		if (
 			this.#cachedLines &&
 			this.#cachedWidth === width &&
-			this.#cachedFallbackActive === fallbackActive &&
+			this.#cachedFallbackActive === graphicsSuppressed &&
 			this.#cachedProtocol === protocol
 		) {
 			return this.#cachedLines;
@@ -101,7 +107,7 @@ export class Image implements Component {
 
 		let lines: string[];
 
-		if (protocol && !fallbackActive) {
+		if (protocol && !graphicsSuppressed) {
 			const base64Data = this.#getBase64Data();
 			if (!base64Data) {
 				lines = this.#fallbackLines();
@@ -150,7 +156,7 @@ export class Image implements Component {
 
 		this.#cachedLines = lines;
 		this.#cachedWidth = width;
-		this.#cachedFallbackActive = fallbackActive;
+		this.#cachedFallbackActive = graphicsSuppressed;
 		this.#cachedProtocol = protocol;
 
 		return lines;

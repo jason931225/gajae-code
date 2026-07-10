@@ -190,7 +190,7 @@ export class UiHelpers {
 	constructor(private ctx: InteractiveModeContext) {}
 	#renderedIrcInlineComponents = new Map<string, readonly Component[]>();
 
-	getRenderedIrcInlineComponents(): ReadonlyMap<string, readonly Component[]> {
+	getRenderedIrcInlineComponents(): Map<string, readonly Component[]> {
 		return this.#renderedIrcInlineComponents;
 	}
 
@@ -455,6 +455,8 @@ export class UiHelpers {
 		const readToolCallArgs = new Map<string, Record<string, unknown>>();
 		const readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
 		const deferredMessages: AgentMessage[] = [];
+		const persistedIrcObservationIds = new Set<string>();
+		const now = Date.now();
 		this.#renderedIrcInlineComponents.clear();
 		for (const message of sessionContext.messages) {
 			// Defer compaction summaries so they render at the bottom (visible after scroll)
@@ -463,6 +465,18 @@ export class UiHelpers {
 				continue;
 			}
 			if (message.role === "custom" && isIrcCustomType(message.customType)) {
+				const parsed = parseIrcMessage(message);
+				if (parsed) {
+					persistedIrcObservationIds.add(parsed.observationId);
+					const record = this.ctx.ircLedger.getRecord(parsed.observationId);
+					if (
+						record &&
+						(record.mode === "persistent" || now < record.expiresAt!) &&
+						!this.#renderedIrcInlineComponents.has(record.observationId)
+					) {
+						this.#renderedIrcInlineComponents.set(record.observationId, this.addIrcObservationToChat(record));
+					}
+				}
 				continue;
 			}
 
@@ -616,7 +630,13 @@ export class UiHelpers {
 		for (const message of deferredMessages) {
 			this.ctx.addMessageToChat(message, options);
 		}
-		for (const record of this.ctx.ircLedger.getInlineProjection(Date.now())) {
+		for (const record of this.ctx.ircLedger.getInlineProjection(now)) {
+			if (
+				persistedIrcObservationIds.has(record.observationId) ||
+				this.#renderedIrcInlineComponents.has(record.observationId)
+			) {
+				continue;
+			}
 			this.#renderedIrcInlineComponents.set(record.observationId, this.addIrcObservationToChat(record));
 		}
 

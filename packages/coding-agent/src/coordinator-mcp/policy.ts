@@ -1,12 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { coordinatorMcpStateRoot, gjcRoot } from "../gjc-runtime/session-layout";
-import {
-	DEFAULT_SESSION_IDLE_TTL_MS,
-	DEFAULT_SESSION_SWEEP_INTERVAL_MS,
-	MIN_SESSION_IDLE_TTL_MS,
-	MIN_SESSION_SWEEP_INTERVAL_MS,
-} from "./session-reaper";
 
 export type CoordinatorMutationClass = "sessions" | "questions" | "reports";
 
@@ -22,9 +16,6 @@ export interface CoordinatorMcpConfig {
 	namespace: CoordinatorNamespace;
 	stateRoot: string;
 	sessionCommand: string | null;
-	sessionIdleTtlMs: number;
-	sessionSweepIntervalMs: number;
-	forceStopEnabled: boolean;
 }
 
 export interface CoordinatorMutationRequest {
@@ -40,16 +31,6 @@ const LEGACY_MUTATION_CLASS_ALIASES = new Map<string, CoordinatorMutationClass>(
 	["question", "questions"],
 	["report", "reports"],
 ]);
-
-function parsePositiveIntMs(value: string | undefined, fallback: number, floor: number): number {
-	const parsed = Number.parseInt((value ?? "").trim(), 10);
-	if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-	return Math.max(floor, parsed);
-}
-
-function parseBool(value: string | undefined): boolean {
-	return /^(1|true|yes|on)$/i.test((value ?? "").trim());
-}
 
 function parseList(value: string | undefined): string[] {
 	return (value ?? "")
@@ -117,17 +98,6 @@ export function buildCoordinatorMcpConfig(env: NodeJS.ProcessEnv = process.env):
 		},
 		stateRoot: path.resolve(stateRoot),
 		sessionCommand: env.GJC_COORDINATOR_MCP_SESSION_COMMAND?.trim() || null,
-		sessionIdleTtlMs: parsePositiveIntMs(
-			env.GJC_COORDINATOR_MCP_SESSION_IDLE_TTL_MS,
-			DEFAULT_SESSION_IDLE_TTL_MS,
-			MIN_SESSION_IDLE_TTL_MS,
-		),
-		sessionSweepIntervalMs: parsePositiveIntMs(
-			env.GJC_COORDINATOR_MCP_SESSION_SWEEP_INTERVAL_MS,
-			DEFAULT_SESSION_SWEEP_INTERVAL_MS,
-			MIN_SESSION_SWEEP_INTERVAL_MS,
-		),
-		forceStopEnabled: parseBool(env.GJC_COORDINATOR_MCP_FORCE_STOP),
 	};
 }
 

@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@gajae-code/agent-core";
 import type { AssistantMessage, ImageContent, Message } from "@gajae-code/ai";
-import { type Component, Spacer, Text, TruncatedText, type TUI } from "@gajae-code/tui";
+import { type Component, Spacer, Text, TruncatedText, type TUI, truncateToWidth } from "@gajae-code/tui";
 import { settings } from "../../config/settings";
 import { resolveSubskillActivationForSkillInvocation } from "../../extensibility/gjc-plugins";
 import { buildSkillPromptMessage, parseSkillInvocations } from "../../extensibility/skills";
@@ -20,7 +20,12 @@ import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { UserMessageComponent } from "../../modes/components/user-message";
 import { theme } from "../../modes/theme/theme";
-import type { CompactionQueuedMessage, InteractiveModeContext, TranscriptRebuildPolicy } from "../../modes/types";
+import type {
+	CompactionQueuedMessage,
+	InteractiveModeContext,
+	IrcArrivalSnapshot,
+	TranscriptRebuildPolicy,
+} from "../../modes/types";
 import {
 	type CustomMessage,
 	isSilentAbort,
@@ -35,9 +40,44 @@ import {
 } from "../../session/session-manager";
 import { formatBytes, formatDuration } from "../../tools/render-utils";
 import { buildAbortDisplayMessage } from "./abort-message";
-import { isIrcCustomType, type ParsedIrcMessage, parseIrcMessage } from "./irc-message";
+import {
+	formatIrcMessageBlock,
+	isIrcCustomType,
+	type ParsedIrcMessage,
+	parseIrcMessage,
+	projectIrcText,
+} from "./irc-message";
 
 export type { TranscriptRebuildPolicy } from "../../modes/types";
+
+const IRC_INLINE_MAX_RENDER_ROWS = 2_048;
+const IRC_INLINE_MAX_SOURCE_UTF8_BYTES = 64 * 1_024;
+const IRC_INLINE_ELISION = "  … message elided …";
+
+class BoundedIrcTextComponent implements Component {
+	#text: Text;
+	#sourceTruncated: boolean;
+
+	constructor(text: string, sourceTruncated: boolean) {
+		this.#text = new Text(text, 0, 0);
+		this.#sourceTruncated = sourceTruncated;
+	}
+
+	render(width: number): string[] {
+		const rendered = this.#text.render(width);
+		if (!this.#sourceTruncated && rendered.length <= IRC_INLINE_MAX_RENDER_ROWS) return rendered;
+		const lines = rendered.slice(0, IRC_INLINE_MAX_RENDER_ROWS);
+		const marker = truncateToWidth(theme.fg("dim", IRC_INLINE_ELISION), width);
+		if (lines.length === 0) return [marker];
+		if (this.#sourceTruncated && rendered.length < IRC_INLINE_MAX_RENDER_ROWS) lines.push(marker);
+		else lines[lines.length - 1] = marker;
+		return lines;
+	}
+
+	invalidate(): void {
+		this.#text.invalidate();
+	}
+}
 
 export function prepareTranscriptRebuild(ui: TUI, policy: TranscriptRebuildPolicy): void {
 	if (policy === "replace-identity") ui.resetViewportAnchorIntent();
@@ -212,6 +252,7 @@ export class UiHelpers {
 	#viewportAnchorOccurrences = new WeakMap<object, { base: string; epoch: number; id: string }>();
 	#nextViewportAnchorOccurrence = new Map<string, number>();
 	#viewportAnchorOccurrenceEpoch = 0;
+	#ircSidebarHintShown = false;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -260,25 +301,59 @@ export class UiHelpers {
 		return this.#renderedIrcInlineComponents;
 	}
 
-	addIrcObservationToChat(message: ParsedIrcMessage): Component[] {
-		const arrow =
-			message.kind === "incoming"
-				? `⇦ ${message.from}`
-				: message.kind === "autoreply"
-					? `⇨ ${message.to}`
-					: `${message.from} ⇨ ${message.to}`;
+	removeRenderedIrcInlineComponents(observationId: string): readonly Component[] | undefined {
+		const components = this.#renderedIrcInlineComponents.get(observationId);
+		this.#renderedIrcInlineComponents.delete(observationId);
+		return components;
+	}
+
+	resetRenderedIrcInlineComponents(): readonly (readonly Component[])[] {
+		const components = [...this.#renderedIrcInlineComponents.values()];
+		this.#renderedIrcInlineComponents.clear();
+		return components;
+	}
+
+	#addIrcObservationToChat(message: ParsedIrcMessage, sidebarHint?: string): Component[] {
+		const bodyProjection = projectIrcText(message.text, IRC_INLINE_MAX_SOURCE_UTF8_BYTES);
+		const block = formatIrcMessageBlock({ ...message, text: bodyProjection.text });
 		const components: Component[] = [];
-		const headerComponent = new Text(theme.fg("accent", `[IRC] ${arrow}`), 1, 0);
+		const header = `${theme.fg("accent", `[IRC] ${block.sender} → ${block.recipient} · ${block.time}`)}${sidebarHint ? theme.fg("dim", sidebarHint) : ""}`;
+		const headerComponent = new Text(header, 1, 0);
 		addChatChild(this.ctx, headerComponent);
 		components.push(headerComponent);
-		if (message.text) {
-			for (const line of message.text.split("\n")) {
-				const lineComponent = new Text(theme.fg("muted", `  ${line}`), 0, 0);
-				addChatChild(this.ctx, lineComponent);
-				components.push(lineComponent);
-			}
+		if (block.bodyLines.length > 0 || bodyProjection.truncated) {
+			const bodyComponent = new BoundedIrcTextComponent(
+				theme.fg("muted", `  ${block.bodyLines.join("\n  ")}`),
+				bodyProjection.truncated,
+			);
+			addChatChild(this.ctx, bodyComponent);
+			components.push(bodyComponent);
 		}
 		return components;
+	}
+
+	addLiveIrcObservationToChat(message: ParsedIrcMessage, arrival: IrcArrivalSnapshot): Component[] {
+		// Requested-open panels that merely yielded at narrow widths must not
+		// advertise the toggle key: pressing it would close the pending request.
+		const showSidebarHint =
+			!arrival.panelVisible &&
+			!arrival.panelRequestedVisible &&
+			arrival.sidebarAvailable &&
+			Boolean(arrival.resolvedToggleKey) &&
+			!this.#ircSidebarHintShown;
+		if (showSidebarHint) this.#ircSidebarHintShown = true;
+		return this.#addIrcObservationToChat(
+			message,
+			showSidebarHint ? ` · ${arrival.resolvedToggleKey} opens sidebar` : undefined,
+		);
+	}
+
+	addRebuiltIrcObservationToChat(message: ParsedIrcMessage): Component[] {
+		return this.#addIrcObservationToChat(message);
+	}
+
+	resetIrcSidebarHint(): void {
+		this.#ircSidebarHintShown = false;
 	}
 
 	/** Extract text content from a user message */
@@ -399,7 +474,7 @@ export class UiHelpers {
 					}
 					if (message.role === "custom" && isIrcCustomType(message.customType)) {
 						const parsed = parseIrcMessage(message);
-						if (parsed) return this.addIrcObservationToChat(parsed);
+						if (parsed) return this.addRebuiltIrcObservationToChat(parsed);
 					}
 					if (message.customType === "subagent:steer" || message.customType === "subagent:steer:relay") {
 						const details = (
@@ -548,7 +623,10 @@ export class UiHelpers {
 						(record.mode === "persistent" || now < record.expiresAt!) &&
 						!this.#renderedIrcInlineComponents.has(record.observationId)
 					) {
-						this.#renderedIrcInlineComponents.set(record.observationId, this.addIrcObservationToChat(record));
+						this.#renderedIrcInlineComponents.set(
+							record.observationId,
+							this.addRebuiltIrcObservationToChat(record),
+						);
 					}
 				}
 				continue;
@@ -711,7 +789,7 @@ export class UiHelpers {
 			) {
 				continue;
 			}
-			this.#renderedIrcInlineComponents.set(record.observationId, this.addIrcObservationToChat(record));
+			this.#renderedIrcInlineComponents.set(record.observationId, this.addRebuiltIrcObservationToChat(record));
 		}
 
 		this.ctx.pendingTools.clear();

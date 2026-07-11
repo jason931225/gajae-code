@@ -120,17 +120,39 @@ import {
 import type {
 	CompactionQueuedMessage,
 	InteractiveModeContext,
+	IrcArrivalSnapshot,
 	SubmittedUserInput,
 	TodoItem,
 	TodoPhase,
 	TranscriptRebuildPolicy,
 } from "./types";
+import type { ParsedIrcMessage } from "./utils/irc-message";
 import { addChatChild, prepareTranscriptRebuild, UiHelpers } from "./utils/ui-helpers";
 
 const INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS = 5_000;
 const COMPOSER_NEWLINE_HINT = process.platform === "win32" ? "Alt+Enter/Ctrl+J" : "Shift+Enter/Ctrl+J";
 export const DEFAULT_COMPOSER_PLACEHOLDER = `Type your message... ${COMPOSER_NEWLINE_HINT}: New line · Ctrl+C: Clear · Ctrl+R: Search history · Shift+Tab: Reasoning`;
 const WELCOME_RESERVED_CONTAINER_CHILD_LIMIT = 8;
+
+const IRC_SIDEBAR_TOGGLE_SHADOWING_ACTIONS: readonly AppKeybinding[] = [
+	"app.plan.toggle",
+	"app.session.new",
+	"app.session.tree",
+	"app.session.fork",
+	"app.session.resume",
+	"app.message.followUp",
+	"app.stt.toggle",
+	"app.clipboard.copyLine",
+	"app.session.observe",
+	"app.jobs.open",
+	"app.tool.backgroundFold",
+];
+
+export function getWelcomeTranscriptReservedRows(chatContainer: Container, width: number): number {
+	return chatContainer.children.length === 0 || chatContainer.children.length > WELCOME_RESERVED_CONTAINER_CHILD_LIMIT
+		? 0
+		: chatContainer.render(width).length;
+}
 const FRIENDLY_KEY_PARTS: Record<string, string> = {
 	alt: "Alt",
 	cmd: "Cmd",
@@ -974,11 +996,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#getWelcomeReservedRows(width: number): number {
-		const transcriptRows =
-			this.chatContainer.children.length === 0 ||
-			this.chatContainer.children.length > WELCOME_RESERVED_CONTAINER_CHILD_LIMIT
-				? 0
-				: this.#ircSplitView.render(width).length;
+		const transcriptRows = getWelcomeTranscriptReservedRows(this.chatContainer, width);
 
 		const transientRows = [
 			this.pendingMessagesContainer,
@@ -2356,6 +2374,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.addMessageToChat(message, options);
 	}
 
+	addLiveIrcObservationToChat(message: ParsedIrcMessage, arrival: IrcArrivalSnapshot): Component[] {
+		return this.#uiHelpers.addLiveIrcObservationToChat(message, arrival);
+	}
+	removeRenderedIrcInlineComponents(observationId: string): readonly Component[] | undefined {
+		return this.#uiHelpers.removeRenderedIrcInlineComponents(observationId);
+	}
+	resetRenderedIrcInlineComponents(): readonly (readonly Component[])[] {
+		return this.#uiHelpers.resetRenderedIrcInlineComponents();
+	}
+
 	renderSessionContext(
 		sessionContext: SessionContext,
 		options?: { updateFooter?: boolean; populateHistory?: boolean },
@@ -2757,6 +2785,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController.setToolsExpanded(expanded);
 	}
 
+	#resolveEffectiveIrcSidebarToggleKey(): string | null {
+		for (const key of this.keybindings.getKeys("app.irc.sidebar.toggle")) {
+			if (this.editor.hasActionKey(key)) continue;
+			const shadowed = IRC_SIDEBAR_TOGGLE_SHADOWING_ACTIONS.some(action =>
+				this.keybindings.getKeys(action).includes(key),
+			);
+			if (!shadowed) return key;
+		}
+		return null;
+	}
+
+	captureIrcArrivalSnapshot(): IrcArrivalSnapshot {
+		return {
+			panelVisible: this.#ircSplitView.effectiveSidebarVisible(this.ui.terminal.columns),
+			panelRequestedVisible: this.#ircSidebarRequestedVisible,
+			sidebarAvailable: this.#ircSidebarAvailable,
+			resolvedToggleKey: this.#resolveEffectiveIrcSidebarToggleKey(),
+		};
+	}
 	toggleIrcSidebar(): void {
 		if (
 			!this.#ircSidebarAvailable ||
@@ -2788,6 +2835,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventController.resetIrcObservations();
 		this.#ircSidebarRequestedVisible = false;
 		this.#ircSplitView.setVisible(false);
+		this.#uiHelpers.resetIrcSidebarHint();
 		this.#syncIrcSidebarAvailabilityFromSettings();
 	}
 

@@ -21,6 +21,7 @@ import {
 	getRenderCacheRetainedBytes,
 	Loader,
 	Markdown,
+	onImageProtocolChanged,
 	ProcessTerminal,
 	Spacer,
 	Text,
@@ -617,6 +618,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.setFocus(this.editor);
 		this.petWidget = this.#createPetWidget(this.editor);
 		this.petWidget.setMode(settings.get("pet.mode"));
+		// The async sixel capability probe can enable graphics after the saved
+		// pet mode was applied and dropped (no protocol yet at startup).
+		// Re-apply the configured mode when capability arrives so the pet
+		// appears without the user re-running /pet.
+		onImageProtocolChanged(protocol => {
+			if (!protocol) return;
+			const saved = settings.get("pet.mode");
+			if (saved !== "off" && this.petWidget && this.petWidget.mode === "off") {
+				this.petWidget.setMode(saved);
+			}
+		});
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();

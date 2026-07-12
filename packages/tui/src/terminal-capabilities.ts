@@ -53,14 +53,32 @@ export function isNotificationSuppressed(): boolean {
 	return value === "off" || value === "0" || value === "false";
 }
 
+const MULTIPLEXER_DISABLED_ENV_VALUES = new Set(["0", "false", "off", "no"]);
+
+function multiplexerEnvEnabled(value: string | undefined): boolean {
+	const normalized = value?.trim().toLowerCase();
+	return normalized !== undefined && normalized.length > 0 && !MULTIPLEXER_DISABLED_ENV_VALUES.has(normalized);
+}
+
 /**
- * Returns whether the process runs under a terminal multiplexer (tmux or GNU
- * screen). Multiplexers intercept graphics escapes and OSC 8 hyperlinks
- * instead of forwarding them to the outer terminal.
+ * Returns whether the process runs under a terminal multiplexer (tmux, GNU
+ * screen, or zellij). Recognizes the same host markers as the renderer's
+ * multiplexer predicate in tui.ts so capability selection and viewport-repaint
+ * policy agree on what counts as a multiplexed host. Multiplexers intercept
+ * graphics escapes and OSC 8 hyperlinks instead of forwarding them to the
+ * outer terminal.
  */
 export function isUnderTerminalMultiplexer(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	if (env.TMUX) return true;
-	const term = env.TERM?.toLowerCase() ?? "";
+	if (
+		multiplexerEnvEnabled(env.TMUX) ||
+		multiplexerEnvEnabled(env.TMUX_PANE) ||
+		multiplexerEnvEnabled(env.STY) ||
+		multiplexerEnvEnabled(env.ZELLIJ) ||
+		multiplexerEnvEnabled(env.GJC_TMUX_LAUNCHED)
+	) {
+		return true;
+	}
+	const term = env.TERM?.trim().toLowerCase() ?? "";
 	return term.startsWith("tmux") || term.startsWith("screen");
 }
 
@@ -114,6 +132,15 @@ function getForcedImageProtocol(): ImageProtocol | null | undefined {
 	if (raw === "sixel") return ImageProtocol.Sixel;
 	if (raw === "off" || raw === "none" || raw === "0" || raw === "false") return null;
 	return null;
+}
+
+/**
+ * Returns whether PI_FORCE_IMAGE_PROTOCOL explicitly configures the image
+ * protocol, including an explicit "off". An explicit configuration is
+ * authoritative: runtime capability probes must not override it.
+ */
+export function isImageProtocolForced(): boolean {
+	return getForcedImageProtocol() !== undefined;
 }
 
 function parseMajorMinorVersion(versionRaw?: string): { major: number; minor: number } | null {
@@ -259,11 +286,35 @@ type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
 };
 
+type ImageProtocolChangeListener = (imageProtocol: ImageProtocol | null) => void;
+const imageProtocolChangeListeners = new Set<ImageProtocolChangeListener>();
+
+/**
+ * Subscribe to runtime image-protocol changes (e.g. the asynchronous sixel
+ * capability probe enabling graphics after startup). Returns an unsubscribe
+ * function. Listeners fire only on actual changes.
+ */
+export function onImageProtocolChanged(listener: ImageProtocolChangeListener): () => void {
+	imageProtocolChangeListeners.add(listener);
+	return () => {
+		imageProtocolChangeListeners.delete(listener);
+	};
+}
+
 /**
  * Override terminal image protocol at runtime after capability probes complete.
  */
 export function setTerminalImageProtocol(imageProtocol: ImageProtocol | null): void {
-	(TERMINAL as unknown as MutableTerminalInfo).imageProtocol = imageProtocol;
+	const mutable = TERMINAL as unknown as MutableTerminalInfo;
+	if (mutable.imageProtocol === imageProtocol) return;
+	mutable.imageProtocol = imageProtocol;
+	for (const listener of imageProtocolChangeListeners) {
+		try {
+			listener(imageProtocol);
+		} catch {
+			// Listener failures must not break protocol switching.
+		}
+	}
 }
 
 export function getTerminalInfo(terminalId: TerminalId): TerminalInfo {

@@ -752,7 +752,7 @@ describe("AgentSession durable default model selection", () => {
 				message: "secondary promotion rename failure",
 				rollback: { disposition: "restored", failures: [] },
 			});
-			expect(settings.getGlobal("modelRoles")).toEqual({});
+			expect(settings.getGlobal("modelRoles")).toBeUndefined();
 			expect(storage.readTextSync(sessionFile)).toBe(persistedBeforeSelection);
 			expect(storage.readTextSync(sessionFile)).not.toContain("target-provider/reasoning");
 			expect(storage.backupRestoreSucceeded).toBeTrue();
@@ -797,7 +797,7 @@ describe("AgentSession durable default model selection", () => {
 				message: "Session replacement could not be completed.",
 				rollback: { disposition: "restored", failures: [] },
 			});
-			expect(settings.getGlobal("modelRoles")).toEqual({});
+			expect(settings.getGlobal("modelRoles")).toBeUndefined();
 			expect(storage.readTextSync(sessionFile)).toBe(persistedBeforeSelection);
 			expect(storage.readTextSync(sessionFile)).not.toContain("target-provider/reasoning");
 			expect(persistentManager.getEntries()).toEqual(entriesBeforeSelection);
@@ -836,6 +836,70 @@ describe("AgentSession durable default model selection", () => {
 					),
 			).toBeTrue();
 			await manager.discardDefaultModelSelectionStage(stage);
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it("rejects a staged persisted selection after a rename and preserves the renamed header", async () => {
+		// Given
+		const manager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"));
+		manager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await manager.rewriteEntries();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+
+		try {
+			const stage = await manager.stageDefaultModelSelection("target-provider/reasoning", Effort.High, {
+				appendThinkingLevel: true,
+			});
+			await expect(manager.setSessionName("renamed", "user")).resolves.toBeTrue();
+
+			// When
+			const promotion = manager.promoteDefaultModelSelection(stage);
+
+			// Then
+			expect(promotion).toEqual({ kind: "not_promoted" });
+			expect(manager.getSessionName()).toBe("renamed");
+			await manager.discardDefaultModelSelectionStage(stage);
+			await manager.close();
+			const reopened = await SessionManager.open(sessionFile, tempRoot);
+			try {
+				expect(reopened.getSessionName()).toBe("renamed");
+			} finally {
+				await reopened.close();
+			}
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it("promotes a staged persisted selection when the header is unchanged", async () => {
+		// Given
+		const manager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"));
+		manager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await manager.rewriteEntries();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+
+		try {
+			const stage = await manager.stageDefaultModelSelection("target-provider/reasoning", Effort.High, {
+				appendThinkingLevel: true,
+			});
+
+			// When
+			const promotion = manager.promoteDefaultModelSelection(stage);
+
+			// Then
+			expect(promotion).toEqual({ kind: "promoted" });
+			expect(manager.buildSessionContext().models.default).toBe("target-provider/reasoning");
+			await manager.close();
+			const reopened = await SessionManager.open(sessionFile, tempRoot);
+			try {
+				expect(reopened.buildSessionContext().models.default).toBe("target-provider/reasoning");
+			} finally {
+				await reopened.close();
+			}
 		} finally {
 			await manager.close();
 		}
@@ -882,7 +946,7 @@ describe("AgentSession durable default model selection", () => {
 
 		// Then
 		await expect(selection).rejects.toThrow(DEFAULT_MODEL_SELECTION_RECOVERY_MESSAGE);
-		expect(settings.getGlobal("modelRoles")).toEqual({});
+		expect(settings.getGlobal("modelRoles")).toBeUndefined();
 		expect(session.model).toBe(INITIAL_MODEL);
 		expect(session.thinkingLevel).toBe(Effort.Medium);
 	});
@@ -1051,7 +1115,7 @@ describe("AgentSession durable default model selection", () => {
 			expect(candidateSession.thinkingLevel).toBe(Effort.Low);
 			expect(candidateSession.systemPrompt).toEqual(["active:edit,host_latest"]);
 			expect(candidateSession.agent.state.tools.map(tool => tool.name)).toEqual(["edit", "host_latest"]);
-			expect(durableSettings.getGlobal("modelRoles")).toEqual({});
+			expect(durableSettings.getGlobal("modelRoles")).toBeUndefined();
 			expect(persistentManager.buildSessionContext().models.default).toBeUndefined();
 		} finally {
 			await candidateSession.dispose();
@@ -1213,7 +1277,7 @@ describe("AgentSession durable default model selection", () => {
 
 		// Then
 		await expect(selection).rejects.toThrow(DEFAULT_MODEL_SELECTION_RECOVERY_MESSAGE);
-		expect(settings.getGlobal("modelRoles")).toEqual({});
+		expect(settings.getGlobal("modelRoles")).toBeUndefined();
 		expect(session.model).toBe(INITIAL_MODEL);
 		expect(sessionManager.getEntries()).toContainEqual(
 			expect.objectContaining({

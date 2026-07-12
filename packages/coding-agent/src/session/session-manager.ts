@@ -360,6 +360,7 @@ export type FileEntry = SessionHeader | SessionEntry;
 
 export type DefaultModelSelectionStage = {
 	readonly entryRevision: number;
+	readonly headerExportRevision: number;
 	readonly sessionId: string;
 	readonly sessionFile: string | undefined;
 	readonly entries: readonly FileEntry[];
@@ -4053,6 +4054,7 @@ export class SessionManager {
 		options?: { readonly appendThinkingLevel: boolean },
 	): Promise<DefaultModelSelectionStage> {
 		const entryRevision = this.#entryRevision;
+		const headerExportRevision = this.#headerExportRevision;
 		const sessionId = this.#sessionId;
 		const sessionFile = this.#sessionFile;
 		const entryIds = new Map(this.#byId);
@@ -4096,6 +4098,7 @@ export class SessionManager {
 			: undefined;
 		return {
 			entryRevision,
+			headerExportRevision,
 			sessionId,
 			sessionFile,
 			entries,
@@ -4107,6 +4110,7 @@ export class SessionManager {
 	promoteDefaultModelSelection(stage: DefaultModelSelectionStage): DefaultModelSelectionPromotion {
 		if (
 			stage.entryRevision !== this.#entryRevision ||
+			stage.headerExportRevision !== this.#headerExportRevision ||
 			stage.sessionId !== this.#sessionId ||
 			stage.sessionFile !== this.#sessionFile
 		) {

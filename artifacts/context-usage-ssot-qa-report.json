@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "kind": "api-package-test-report",
-  "round": 3,
-  "commit": "8487b7f130996860d9de7572bfa050ace47a0505",
+  "round": 4,
+  "commit": "32ef394225013d21f5c709953701197ab1d62c68",
   "rounds": [
     {
       "round": 0,
@@ -18,6 +18,42 @@
       "round": 3,
       "commit": "8487b7f130996860d9de7572bfa050ace47a0505",
       "outcome": "All five explicit invalidation paths passed. Two deliberate in-place cache-key blind spots were reproduced and classified as hardening notes after reachability review; no new production defect found."
+    },
+    {
+      "round": 4,
+      "commit": "32ef394225013d21f5c709953701197ab1d62c68",
+      "verification": {
+        "bunTest": {
+          "files": 13,
+          "pass": 288,
+          "skip": 2,
+          "fail": 0,
+          "assertions": 1220
+        },
+        "pythonUnittest": {
+          "tests": 7,
+          "failures": 0,
+          "errors": 0
+        },
+        "spotProbe": {
+          "verdict": "pass",
+          "scenario": "A real AgentSession returns two ContextUsage snapshots; the first snapshot's tokens and percent are mutated before the second read.",
+          "observed": "The second snapshot retained its original tokens and percent, and estimateCount was stable across the warm read."
+        },
+        "cliReplay": {
+          "artifact": "artifacts/context-usage-ssot-cli-replay.json",
+          "verdict": "pass",
+          "observedStdout": "ultragoal-cli-ok\n"
+        }
+      },
+      "finalContracts": {
+        "C1": "pass",
+        "C2": "pass",
+        "C3": "pass",
+        "C4": "pass",
+        "C5": "pass"
+      },
+      "outcome": "Full focused regression union, Python RPC regression suite, immutable snapshot/cache adversarial probe, and CLI replay all passed; C1-C5 pass."
     }
   ],
   "surfaceEvidence": [

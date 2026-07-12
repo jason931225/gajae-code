@@ -11033,8 +11033,9 @@ export class AgentSession {
 			// Accept the ordered pair as one volatile batch before committing its
 			// roster claim, notifying either UI, or resolving the sender delivery.
 			args.signal?.throwIfAborted();
-			this.#queueBackgroundExchangeInjection([incomingRecord, replyRecord]);
+			this.#queueBackgroundExchangeInjection([incomingRecord, replyRecord], { deferFlush: true });
 			commitRosterClaim?.();
+			this.#flushOrSchedulePendingBackgroundExchanges();
 			announceIncoming();
 			this.#emitIrcObservation(replyRecord);
 			this.#forwardIrcRelayToMain({
@@ -11392,8 +11393,12 @@ export class AgentSession {
 		return messages;
 	}
 
-	#queueBackgroundExchangeInjection(messages: CustomMessage[]): void {
+	#queueBackgroundExchangeInjection(messages: CustomMessage[], options?: { deferFlush?: boolean }): void {
 		this.#pendingBackgroundExchanges.push(messages);
+		if (!options?.deferFlush) this.#flushOrSchedulePendingBackgroundExchanges();
+	}
+
+	#flushOrSchedulePendingBackgroundExchanges(): void {
 		if (!this.isStreaming) {
 			this.#flushPendingBackgroundExchanges();
 			return;

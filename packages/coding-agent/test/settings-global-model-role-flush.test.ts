@@ -62,6 +62,120 @@ describe("Settings global model role durability", () => {
 		expect(settings.getGlobal("modelRoles")).toEqual({ planner: "planner/model:high" });
 	});
 
+	it("rejects an older restore when direct model roles change during its durable flush", async () => {
+		// Given: selection A starts durably committing B.
+		await Bun.write(
+			configPath,
+			YAML.stringify({ modelRoles: { default: "provider/original:low", planner: "planner/original:medium" } }),
+		);
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const originalWrite = Bun.write.bind(Bun);
+		const firstConfigWrite = Promise.withResolvers<void>();
+		const continueFirstConfigWrite = Promise.withResolvers<void>();
+		let configWrite = 0;
+		vi.spyOn(Bun, "write").mockImplementation(async (destination, input) => {
+			if (typeof destination !== "string" || typeof input !== "string") {
+				throw new Error("unexpected non-string settings write");
+			}
+			if (destination !== configPath) return originalWrite(destination, input);
+			configWrite += 1;
+			if (configWrite === 1) {
+				firstConfigWrite.resolve();
+				await continueFirstConfigWrite.promise;
+			}
+			return originalWrite(destination, input);
+		});
+
+		const selection = settings.setGlobalModelRoleAndFlush("default", "provider/selection-b:high");
+		await firstConfigWrite.promise;
+
+		// When: direct writer C commits while B's durable flush remains pending.
+		const newerRoles = {
+			default: "provider/selection-c:medium",
+			planner: "planner/original:medium",
+			reviewer: "reviewer/newer:low",
+		};
+		settings.set("modelRoles", newerRoles);
+		continueFirstConfigWrite.resolve();
+		const commit = await selection;
+		const restored = await settings.restoreGlobalDefaultModelRoleIfCurrent(commit);
+		await settings.flush();
+
+		// Then: A cannot replace C or discard C's unrelated role in memory or YAML.
+		expect(restored).toBe(false);
+		expect(settings.getGlobal("modelRoles")).toEqual(newerRoles);
+		expect(YAML.parse(await Bun.file(configPath).text())).toEqual({ modelRoles: newerRoles });
+	});
+
+	it("restores an absent original default without changing unrelated durable roles", async () => {
+		// Given
+		await Bun.write(configPath, YAML.stringify({ modelRoles: { planner: "planner/original:medium" } }));
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const commit = await settings.setGlobalModelRoleAndFlush("default", "provider/selection-b:high");
+		expect(commit).toEqual({ previousDefault: undefined, defaultRevision: expect.any(Number) });
+
+		// When
+		const restored = await settings.restoreGlobalDefaultModelRoleIfCurrent(commit);
+
+		// Then
+		expect(restored).toBe(true);
+		expect(settings.getGlobal("modelRoles")).toEqual({ planner: "planner/original:medium" });
+		expect(YAML.parse(await Bun.file(configPath).text())).toEqual({
+			modelRoles: { planner: "planner/original:medium" },
+		});
+	});
+
+	it("restores the committed default after a planner-only helper update", async () => {
+		// Given: selection A durably commits B while planner retains an independent role.
+		await Bun.write(
+			configPath,
+			YAML.stringify({ modelRoles: { default: "provider/original:low", planner: "planner/original:medium" } }),
+		);
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const commit = await settings.setGlobalModelRoleAndFlush("default", "provider/selection-b:high");
+
+		// When: an unrelated helper update writes planner before B must be rolled back.
+		settings.setModelRole("planner", "planner/newer:medium");
+		const restored = await settings.restoreGlobalDefaultModelRoleIfCurrent(commit);
+
+		// Then: recovery owns A while preserving planner Q in memory and YAML.
+		expect(restored).toBe(true);
+		expect(settings.getGlobal("modelRoles")).toEqual({
+			default: "provider/original:low",
+			planner: "planner/newer:medium",
+		});
+		expect(YAML.parse(await Bun.file(configPath).text())).toEqual({
+			modelRoles: { default: "provider/original:low", planner: "planner/newer:medium" },
+		});
+	});
+
+	it("treats helper writes and same-value ABA as newer default revisions", async () => {
+		// Given
+		await Bun.write(
+			configPath,
+			YAML.stringify({ modelRoles: { default: "provider/original:low", planner: "planner/original:medium" } }),
+		);
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const commit = await settings.setGlobalModelRoleAndFlush("default", "provider/selection-b:high");
+
+		// When: helper mutations return the default to B after an A/B ABA sequence.
+		settings.setGlobalModelRole("planner", "planner/newer:medium");
+		settings.setGlobalModelRole("default", "provider/original:low");
+		settings.setGlobalModelRole("default", "provider/selection-b:high");
+		await settings.flush();
+		const restored = await settings.restoreGlobalDefaultModelRoleIfCurrent(commit);
+
+		// Then: matching the prior value is insufficient ownership to restore it.
+		expect(restored).toBe(false);
+		expect(settings.getGlobal("modelRoles")).toEqual({
+			default: "provider/selection-b:high",
+			planner: "planner/newer:medium",
+		});
+		expect(YAML.parse(await Bun.file(configPath).text())).toEqual({
+			modelRoles: { default: "provider/selection-b:high", planner: "planner/newer:medium" },
+		});
+	});
+
 	it("rolls back a rejected selector so an unrelated later save cannot retry it", async () => {
 		// Given
 		await Bun.write(configPath, YAML.stringify({ modelRoles: { default: "provider/original:low" } }));
@@ -198,7 +312,7 @@ describe("Settings global model role durability", () => {
 			return originalWrite(destination, input);
 		});
 
-		settings.set("theme.dark", "first-claw");
+		settings.set("theme.dark", "red-claw");
 		const first = settings.flush();
 		const duplicate = settings.flush();
 
@@ -207,10 +321,10 @@ describe("Settings global model role durability", () => {
 		await first;
 		await duplicate;
 		await Bun.write(configPath, YAML.stringify({}));
-		settings.set("theme.light", "later-claw");
+		settings.set("theme.light", "blue-crab");
 		await settings.flush();
 
 		// Then: a later unrelated save cannot replay the stale, already-persisted patch.
-		expect(YAML.parse(await Bun.file(configPath).text())).toEqual({ theme: { light: "later-claw" } });
+		expect(YAML.parse(await Bun.file(configPath).text())).toEqual({ theme: { light: "blue-crab" } });
 	});
 });

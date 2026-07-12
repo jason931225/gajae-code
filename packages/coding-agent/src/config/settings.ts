@@ -61,6 +61,11 @@ type SettingsPatch = {
 	readonly generation: number;
 };
 
+export interface GlobalDefaultModelRoleCommit {
+	readonly previousDefault: string | undefined;
+	readonly defaultRevision: number;
+}
+
 export interface SettingsOptions {
 	/** Current working directory for project settings discovery */
 	cwd?: string;
@@ -216,6 +221,7 @@ export class Settings {
 	/** Latest dirty patch for each path, owned by its generation. */
 	#modified = new Map<string, SettingsPatch>();
 	#nextGeneration = 0;
+	#defaultModelRoleRevision = 0;
 
 	/** Pending save (debounced) */
 	#saveTimer?: NodeJS.Timeout;
@@ -327,6 +333,10 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		this.#set(path, value, true);
+	}
+
+	#set<P extends SettingPath>(path: P, value: SettingValue<P>, defaultModelRoleMayHaveChanged: boolean): void {
 		const prev = this.get(path);
 		const patch: SettingsPatch = {
 			path,
@@ -335,6 +345,9 @@ export class Settings {
 		};
 		setByPath(this.#global, path.split("."), structuredClone(patch.value));
 		this.#modified.set(path, patch);
+		if (path === "modelRoles" && defaultModelRoleMayHaveChanged) {
+			this.#defaultModelRoleRevision += 1;
+		}
 		this.#rebuildMerged();
 		this.#queueSave();
 
@@ -502,43 +515,70 @@ export class Settings {
 		const current = shallowStringRecord(getByPath(this.#global, ["modelRoles"]));
 		if (modelId === undefined) {
 			const { [role]: _removed, ...remaining } = current;
-			this.set("modelRoles", remaining);
+			this.#set("modelRoles", remaining, role === "default");
 			return;
 		}
-		this.set("modelRoles", { ...current, [role]: modelId });
+		this.#set("modelRoles", { ...current, [role]: modelId }, role === "default");
 	}
 
-	setGlobalModelRoleAndFlush(role: ModelRole | string, modelId: string | undefined): Promise<void> {
+	setGlobalModelRoleAndFlush(
+		role: ModelRole | string,
+		modelId: string | undefined,
+	): Promise<GlobalDefaultModelRoleCommit> {
 		const transaction = this.#globalModelRoleTail.then(async () => {
-			const hadModelRoles = Object.hasOwn(this.#global, "modelRoles");
-			const previousModelRoles = structuredClone(this.#global.modelRoles);
-			const previousPatch = this.#modified.get("modelRoles");
-			this.setGlobalModelRole(role, modelId);
-			const generation = this.#modified.get("modelRoles")?.generation;
-			if (this.#saveTimer) {
-				clearTimeout(this.#saveTimer);
-				this.#saveTimer = undefined;
-			}
-			const save = this.#saveNow({ throwOnError: true });
-			try {
-				await save;
-			} catch (error) {
-				const currentPatch = this.#modified.get("modelRoles");
-				if (currentPatch?.generation === generation) {
-					if (hadModelRoles) this.#global.modelRoles = previousModelRoles;
-					else delete this.#global.modelRoles;
-					if (previousPatch) this.#modified.set("modelRoles", previousPatch);
-					else this.#modified.delete("modelRoles");
-					this.#rebuildMerged();
-				}
-				throw error;
-			}
+			const previousDefault = shallowStringRecord(getByPath(this.#global, ["modelRoles"])).default;
+			const defaultRevision = await this.#applyGlobalModelRoleMutationAndFlush(() => {
+				this.setGlobalModelRole(role, modelId);
+				return this.#defaultModelRoleRevision;
+			});
+			return { previousDefault, defaultRevision };
 		});
 		this.#globalModelRoleTail = transaction.then(
 			() => undefined,
 			() => undefined,
 		);
 		return transaction;
+	}
+
+	restoreGlobalDefaultModelRoleIfCurrent(commit: GlobalDefaultModelRoleCommit): Promise<boolean> {
+		const transaction = this.#globalModelRoleTail.then(async () => {
+			if (this.#defaultModelRoleRevision !== commit.defaultRevision) return false;
+			await this.#applyGlobalModelRoleMutationAndFlush(() =>
+				this.setGlobalModelRole("default", commit.previousDefault),
+			);
+			return true;
+		});
+		this.#globalModelRoleTail = transaction.then(
+			() => undefined,
+			() => undefined,
+		);
+		return transaction;
+	}
+
+	async #applyGlobalModelRoleMutationAndFlush<T>(mutate: () => T): Promise<T> {
+		const hadModelRoles = Object.hasOwn(this.#global, "modelRoles");
+		const previousModelRoles = structuredClone(this.#global.modelRoles);
+		const previousPatch = this.#modified.get("modelRoles");
+		const result = mutate();
+		const generation = this.#modified.get("modelRoles")?.generation;
+		if (this.#saveTimer) {
+			clearTimeout(this.#saveTimer);
+			this.#saveTimer = undefined;
+		}
+		try {
+			await this.#saveNow({ throwOnError: true });
+		} catch (error) {
+			const currentPatch = this.#modified.get("modelRoles");
+			if (currentPatch?.generation === generation) {
+				if (hadModelRoles) this.#global.modelRoles = previousModelRoles;
+				else delete this.#global.modelRoles;
+				if (previousPatch) this.#modified.set("modelRoles", previousPatch);
+				else this.#modified.delete("modelRoles");
+				this.#rebuildMerged();
+			}
+			throw error;
+		}
+		return result;
 	}
 	/**
 	 * Set an agent model override while keeping any live runtime override aligned.

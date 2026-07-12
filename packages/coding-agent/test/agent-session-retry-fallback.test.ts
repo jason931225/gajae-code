@@ -6,7 +6,11 @@ import { type AssistantMessage, Effort, getBundledModel, type Model, writeModelC
 import { createMockModel } from "@gajae-code/ai/providers/mock";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
-import { AgentSession, type AgentSessionEvent } from "@gajae-code/coding-agent/session/agent-session";
+import {
+	AgentSession,
+	type AgentSessionEvent,
+	DefaultModelSelectionRecoveryError,
+} from "@gajae-code/coding-agent/session/agent-session";
 import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
 import { TempDir } from "@gajae-code/utils";
@@ -868,9 +872,10 @@ describe("AgentSession retry fallback", () => {
 			"retry.fallbackRevertPolicy": "cooldown-expiry",
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		const sessionManager = SessionManager.inMemory();
 		session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager,
 			settings,
 			modelRegistry,
 		});
@@ -885,17 +890,29 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model).toBe(fallbackModel);
 
-		const lateLiveApplyError = new Error("late default selection failure");
-		const originalLiveApply = session.setModelTemporary.bind(session);
-		vi.spyOn(session, "setModelTemporary").mockImplementationOnce(async (...args) => {
-			await originalLiveApply(...args);
-			throw lateLiveApplyError;
+		const latePromotionError = new Error("late default selection failure");
+		vi.spyOn(sessionManager, "promoteDefaultModelSelection").mockReturnValue({
+			kind: "not_promoted",
+			error: latePromotionError,
 		});
 
 		// When
-		const selection = session.setDefaultModelSelection(primaryModel, undefined);
-		await expect(selection).rejects.toBe(lateLiveApplyError);
+		let selectionFailure: unknown;
+		try {
+			await session.setDefaultModelSelection(primaryModel, undefined);
+		} catch (error) {
+			selectionFailure = error;
+		}
 		expect(session.model).toBe(fallbackModel);
+		expect(selectionFailure).toBeInstanceOf(DefaultModelSelectionRecoveryError);
+		if (!(selectionFailure instanceof DefaultModelSelectionRecoveryError)) {
+			throw new Error("Expected typed default-selection recovery failure");
+		}
+		expect(selectionFailure.message).toBe("Default model selection could not be completed after durable selection.");
+		expect(selectionFailure.recovery).toEqual({
+			message: "Default model selection could not be completed after durable selection.",
+			rollback: { disposition: "restored", failures: [] },
+		});
 		now += 240;
 		await session.prompt("Cooldown expiry should restore primary");
 		await session.waitForIdle();

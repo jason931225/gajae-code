@@ -2,20 +2,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, ThinkingLevel } from "@gajae-code/agent-core";
+import { Agent, type AgentTool, ThinkingLevel } from "@gajae-code/agent-core";
 import { Effort, type Model } from "@gajae-code/ai";
 import { AssistantMessageEventStream } from "@gajae-code/ai/utils/event-stream";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
-import { Settings } from "@gajae-code/coding-agent/config/settings";
-import { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
+import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
+import type { CustomTool } from "@gajae-code/coding-agent/extensibility/custom-tools/types";
+import { AgentSession, DefaultModelSelectionRecoveryError } from "@gajae-code/coding-agent/session/agent-session";
 import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
 import {
 	MemorySessionStorage,
 	type SessionStorageWriter,
+	type SessionStorageWriterCloseState,
 	type SessionStorageWriterOpenOptions,
+	SessionStorageWriterRetryableCloseError,
 } from "@gajae-code/coding-agent/session/session-storage";
 import { logger } from "@gajae-code/utils";
+import { z } from "zod";
+import {
+	DEFAULT_MODEL_SELECTION_RECOVERY_MESSAGE,
+	type DefaultModelSelectionRecovery,
+} from "../src/session/default-model-selection";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 const INITIAL_MODEL: Model = {
@@ -76,6 +84,184 @@ class AppendWriterTrackingStorage extends MemorySessionStorage {
 			getCloseError: () => writer.getCloseError(),
 		};
 	}
+}
+
+class PromotionRenameFailureStorage extends MemorySessionStorage {
+	#failNextRename = false;
+
+	failNextPromotion(): void {
+		this.#failNextRename = true;
+	}
+
+	override renameSync(source: string, destination: string): void {
+		if (this.#failNextRename) {
+			this.#failNextRename = false;
+			throw new Error("injected session promotion failure");
+		}
+		super.renameSync(source, destination);
+	}
+}
+
+class EpermRestoredPromotionStorage extends MemorySessionStorage {
+	#promotionRenameAttempt = 0;
+	#promotionArmed = false;
+	#backupRestoreSucceeded = false;
+
+	get backupRestoreSucceeded(): boolean {
+		return this.#backupRestoreSucceeded;
+	}
+
+	failPromotionAfterEpermFallback(): void {
+		this.#promotionRenameAttempt = 0;
+		this.#promotionArmed = true;
+	}
+
+	override renameSync(source: string, destination: string): void {
+		if (this.#promotionArmed && source.endsWith(".default-selection.tmp") && destination.endsWith(".jsonl")) {
+			this.#promotionRenameAttempt++;
+			if (this.#promotionRenameAttempt === 1) {
+				const error = new Error("EPERM primary promotion rename failure");
+				Object.assign(error, { code: "EPERM" });
+				throw error;
+			}
+			if (this.#promotionRenameAttempt === 2) {
+				throw new Error("secondary promotion rename failure");
+			}
+		}
+		super.renameSync(source, destination);
+		if (this.#promotionArmed && source.endsWith(".bak") && destination.endsWith(".jsonl")) {
+			this.#backupRestoreSucceeded = true;
+		}
+	}
+}
+
+class RetryablePromotionCloseStorage extends MemorySessionStorage {
+	#failNextAppendWriterClose = false;
+
+	failNextAppendWriterClose(): void {
+		this.#failNextAppendWriterClose = true;
+	}
+
+	override openWriter(filePath: string, options?: SessionStorageWriterOpenOptions): SessionStorageWriter {
+		const writer = super.openWriter(filePath, options);
+		if (options?.flags === "w") return writer;
+		const storage = this;
+		let closeState: SessionStorageWriterCloseState = "open";
+		let closeError: Error | undefined;
+		return {
+			writeLine: line => writer.writeLine(line),
+			writeLineSync: line => writer.writeLineSync(line),
+			flush: () => writer.flush(),
+			fsync: () => writer.fsync(),
+			async close(): Promise<void> {
+				this.closeSync();
+			},
+			closeSync(): void {
+				if (closeState === "closed") return;
+				if (storage.#failNextAppendWriterClose) {
+					storage.#failNextAppendWriterClose = false;
+					closeState = "close_failed_retryable";
+					closeError = new SessionStorageWriterRetryableCloseError("injected retryable writer close failure");
+					throw closeError;
+				}
+				writer.closeSync();
+				closeState = "closed";
+				closeError = undefined;
+			},
+			getError: () => writer.getError(),
+			getCloseState: () => closeState,
+			getCloseError: () => closeError,
+		};
+	}
+}
+
+class StagedWriteGateStorage extends MemorySessionStorage {
+	#stageWriteEntered: PromiseWithResolvers<void> | undefined;
+	#releaseStageWrite: PromiseWithResolvers<void> | undefined;
+	#stageWriteArmed = false;
+
+	blockNextDefaultSelectionStage(): void {
+		this.#stageWriteEntered = Promise.withResolvers<void>();
+		this.#releaseStageWrite = Promise.withResolvers<void>();
+		this.#stageWriteArmed = true;
+	}
+
+	async waitForDefaultSelectionStageWrite(): Promise<void> {
+		if (!this.#stageWriteEntered) throw new Error("Default selection stage write was not armed");
+		await this.#stageWriteEntered.promise;
+	}
+
+	releaseDefaultSelectionStageWrite(): void {
+		if (!this.#releaseStageWrite) throw new Error("Default selection stage write was not armed");
+		this.#releaseStageWrite.resolve();
+	}
+
+	override openWriter(filePath: string, options?: SessionStorageWriterOpenOptions): SessionStorageWriter {
+		const writer = super.openWriter(filePath, options);
+		const isStagedWrite = options?.flags === "w" && filePath.endsWith(".default-selection.tmp");
+		if (!isStagedWrite || !this.#stageWriteArmed || !this.#stageWriteEntered || !this.#releaseStageWrite)
+			return writer;
+		const entered = this.#stageWriteEntered;
+		const release = this.#releaseStageWrite;
+		this.#stageWriteArmed = false;
+		let firstWrite = true;
+		return {
+			async writeLine(line: string): Promise<void> {
+				if (firstWrite) {
+					firstWrite = false;
+					entered.resolve();
+					await release.promise;
+				}
+				await writer.writeLine(line);
+			},
+			writeLineSync: line => writer.writeLineSync(line),
+			flush: () => writer.flush(),
+			fsync: () => writer.fsync(),
+			close: () => writer.close(),
+			closeSync: () => writer.closeSync(),
+			getError: () => writer.getError(),
+			getCloseState: () => writer.getCloseState(),
+			getCloseError: () => writer.getCloseError(),
+		};
+	}
+}
+
+class StageDiscardFailureStorage extends MemorySessionStorage {
+	#failNextUnlink = false;
+
+	failNextDiscard(): void {
+		this.#failNextUnlink = true;
+	}
+
+	override unlink(filePath: string): Promise<void> {
+		if (this.#failNextUnlink) {
+			this.#failNextUnlink = false;
+			return Promise.reject(new Error("injected stage discard failure"));
+		}
+		return super.unlink(filePath);
+	}
+}
+
+function failDefaultSelectionPromotion(sessionManager: SessionManager, error: Error): void {
+	vi.spyOn(sessionManager, "promoteDefaultModelSelection").mockReturnValue({ kind: "not_promoted", error });
+}
+
+async function expectPostDurableSelectionRecovery(
+	selection: Promise<unknown>,
+	recovery: DefaultModelSelectionRecovery,
+): Promise<void> {
+	let failure: unknown;
+	try {
+		await selection;
+	} catch (error) {
+		failure = error;
+	}
+	expect(failure).toBeInstanceOf(DefaultModelSelectionRecoveryError);
+	if (!(failure instanceof DefaultModelSelectionRecoveryError))
+		throw new Error("Expected default selection recovery error");
+	const publicRecovery = { ...recovery, message: DEFAULT_MODEL_SELECTION_RECOVERY_MESSAGE };
+	expect(failure.message).toBe(publicRecovery.message);
+	expect(failure.recovery).toEqual(publicRecovery);
 }
 
 describe("AgentSession durable default model selection", () => {
@@ -152,7 +338,7 @@ describe("AgentSession durable default model selection", () => {
 		const originalDurableCommit = settings.setGlobalModelRoleAndFlush.bind(settings);
 		const durableCommit = vi.spyOn(settings, "setGlobalModelRoleAndFlush").mockImplementation(async (...args) => {
 			durableAttempted.resolve("durable");
-			await originalDurableCommit(...args);
+			return originalDurableCommit(...args);
 		});
 
 		// When
@@ -227,6 +413,65 @@ describe("AgentSession durable default model selection", () => {
 		expect(settings.get("defaultThinkingLevel")).toBe(Effort.XHigh);
 	});
 
+	it("emits a thinking-level change without appending a duplicate staged marker", async () => {
+		// Given
+		const thinkingEvents: (ThinkingLevel | undefined)[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "thinking_level_changed") thinkingEvents.push(event.thinkingLevel);
+		});
+		const entriesBeforeSelection = sessionManager.getEntries();
+
+		try {
+			// When
+			await session.setDefaultModelSelection(targetModel(), Effort.High);
+
+			// Then
+			expect(thinkingEvents).toEqual([Effort.High]);
+			expect(
+				sessionManager
+					.getEntries()
+					.slice(entriesBeforeSelection.length)
+					.filter(entry => entry.type === "thinking_level_change"),
+			).toHaveLength(1);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("continues default selection without logging raw subscriber failure detail", async () => {
+		// Given
+		const model = targetModel();
+		const subscriberPath = "/private/subscribers/default-selection.ts";
+		const subscriberToken = "subscriber-failure-token";
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "thinking_level_changed") {
+				throw new Error(`subscriber failed at ${subscriberPath} with token ${subscriberToken}`);
+			}
+		});
+		const subscriberWarning = vi.spyOn(logger, "warn");
+
+		try {
+			// When
+			const result = await session.setDefaultModelSelection(model, Effort.High);
+
+			// Then
+			expect(result).toEqual({ provider: "target-provider", modelId: "reasoning", thinkingLevel: Effort.High });
+			expect(session.model).toBe(model);
+			expect(session.thinkingLevel).toBe(Effort.High);
+			expect(sessionManager.buildSessionContext().models.default).toBe("target-provider/reasoning");
+			expect(settings.getGlobal("modelRoles")).toEqual({ default: "target-provider/reasoning:high" });
+			expect(subscriberWarning).toHaveBeenCalledWith("Default model selection event listener failed", {
+				code: "default_model_selection_listener_failed",
+				disposition: "continue",
+			});
+			const warningOutput = JSON.stringify(subscriberWarning.mock.calls);
+			expect(warningOutput).not.toContain(subscriberPath);
+			expect(warningOutput).not.toContain(subscriberToken);
+		} finally {
+			unsubscribe();
+		}
+	});
+
 	it("restores an unchanged explicit default thinking level on resume", async () => {
 		// Given
 		modelRegistry.registerProvider("target-provider", {
@@ -296,15 +541,15 @@ describe("AgentSession durable default model selection", () => {
 		// Given
 		const firstModel = { ...targetModel(), id: "first" };
 		const lastModel = { ...targetModel(), id: "last" };
-		const firstLiveApplyEntered = Promise.withResolvers<void>();
-		const releaseFirstLiveApply = Promise.withResolvers<void>();
-		const originalLiveApply = session.setModelTemporary.bind(session);
-		vi.spyOn(session, "setModelTemporary").mockImplementation(async (model, thinkingLevel, options) => {
-			if (model.id === firstModel.id) {
-				firstLiveApplyEntered.resolve();
-				await releaseFirstLiveApply.promise;
+		const firstDurableCommitEntered = Promise.withResolvers<void>();
+		const releaseFirstDurableCommit = Promise.withResolvers<void>();
+		const originalDurableCommit = settings.setGlobalModelRoleAndFlush.bind(settings);
+		vi.spyOn(settings, "setGlobalModelRoleAndFlush").mockImplementation(async (role, selector) => {
+			if (selector === "target-provider/first:low") {
+				firstDurableCommitEntered.resolve();
+				await releaseFirstDurableCommit.promise;
 			}
-			await originalLiveApply(model, thinkingLevel, options);
+			return originalDurableCommit(role, selector);
 		});
 		const lastPreflightEntered = Promise.withResolvers<void>();
 		const originalGetApiKey = modelRegistry.getApiKey.bind(modelRegistry);
@@ -315,14 +560,14 @@ describe("AgentSession durable default model selection", () => {
 
 		// When
 		const firstSelection = session.setDefaultModelSelection(firstModel, Effort.Low);
-		await firstLiveApplyEntered.promise;
+		await firstDurableCommitEntered.promise;
 		const lastSelection = session.setDefaultModelSelection(lastModel, Effort.High);
 		const preflightRace = Promise.withResolvers<boolean>();
 		void lastPreflightEntered.promise.then(() => preflightRace.resolve(true));
 		setImmediate(() => preflightRace.resolve(false));
 		const lastRequestOvertookFirst = await preflightRace.promise;
 		if (lastRequestOvertookFirst) await lastSelection;
-		releaseFirstLiveApply.resolve();
+		releaseFirstDurableCommit.resolve();
 		await Promise.all([firstSelection, lastSelection]);
 
 		// Then
@@ -363,6 +608,239 @@ describe("AgentSession durable default model selection", () => {
 		expect(sessionManager.getEntries()).toEqual(entriesBefore);
 	});
 
+	it("does not materialize session JSONL when lazy default selection fails", async () => {
+		// Given
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"));
+		const persistentSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [] },
+			}),
+			sessionManager: persistentManager,
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+		const sessionFile = persistentManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected lazy session file path");
+		const selectionError = new Error("session promotion failed");
+		failDefaultSelectionPromotion(persistentManager, selectionError);
+
+		try {
+			// When
+			const selection = persistentSession.setDefaultModelSelection(targetModel(), Effort.Medium);
+
+			// Then
+			await expectPostDurableSelectionRecovery(selection, {
+				message: selectionError.message,
+				rollback: { disposition: "restored", failures: [] },
+			});
+			expect(await Bun.file(sessionFile).exists()).toBeFalse();
+		} finally {
+			await persistentSession.dispose();
+			await persistentManager.close();
+		}
+	});
+
+	it("preserves the staged replacement when session promotion outcome is unknown", async () => {
+		// Given
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"));
+		const persistentSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [] },
+			}),
+			sessionManager: persistentManager,
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await persistentManager.rewriteEntries();
+		const promotionError = new Error("/private/sessions/secret/default-selection.tmp: promotion outcome unknown");
+		let stagedTempPath: string | undefined;
+		vi.spyOn(persistentManager, "promoteDefaultModelSelection").mockImplementation(stage => {
+			stagedTempPath = stage.tempPath;
+			return { kind: "unknown", error: promotionError };
+		});
+
+		try {
+			// When
+			const selection = persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
+
+			// Then
+			await expectPostDurableSelectionRecovery(selection, {
+				message: "Session replacement outcome could not be determined.",
+				rollback: {
+					disposition: "unknown",
+					failures: [{ stage: "session", message: "Session replacement outcome could not be determined." }],
+				},
+			});
+			if (!stagedTempPath) throw new Error("Expected staged replacement path");
+			expect(await Bun.file(stagedTempPath).exists()).toBeTrue();
+			expect(promotionError.message).toContain("/private/sessions/secret");
+			expect(settings.getGlobal("modelRoles")).toEqual({ default: "target-provider/reasoning:high" });
+			expect(persistentSession.model).toBe(INITIAL_MODEL);
+		} finally {
+			await persistentSession.dispose();
+			await persistentManager.close();
+		}
+	});
+
+	it("does not publish target live state when the real staged session promotion rejects", async () => {
+		// Given
+		const storage = new PromotionRenameFailureStorage();
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
+		const persistentSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [] },
+			}),
+			sessionManager: persistentManager,
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await persistentManager.rewriteEntries();
+		const entriesBeforeSelection = persistentManager.getEntries();
+		storage.failNextPromotion();
+
+		try {
+			// When
+			const selection = persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
+
+			// Then
+			await expect(selection).rejects.toThrow(DEFAULT_MODEL_SELECTION_RECOVERY_MESSAGE);
+			expect(persistentSession.model).toBe(INITIAL_MODEL);
+			expect(persistentSession.thinkingLevel).toBe(Effort.Low);
+			expect(persistentManager.getEntries()).toEqual(entriesBeforeSelection);
+		} finally {
+			await persistentSession.dispose();
+			await persistentManager.close();
+		}
+	});
+
+	it("restores the durable default after EPERM fallback restores the prior session file", async () => {
+		// Given
+		const storage = new EpermRestoredPromotionStorage();
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
+		const persistentSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [] },
+			}),
+			sessionManager: persistentManager,
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await persistentManager.rewriteEntries();
+		const sessionFile = persistentManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+		const persistedBeforeSelection = storage.readTextSync(sessionFile);
+		const entriesBeforeSelection = persistentManager.getEntries();
+		storage.failPromotionAfterEpermFallback();
+
+		try {
+			// When
+			const selection = persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
+
+			// Then
+			await expectPostDurableSelectionRecovery(selection, {
+				message: "secondary promotion rename failure",
+				rollback: { disposition: "restored", failures: [] },
+			});
+			expect(settings.getGlobal("modelRoles")).toEqual({});
+			expect(storage.readTextSync(sessionFile)).toBe(persistedBeforeSelection);
+			expect(storage.readTextSync(sessionFile)).not.toContain("target-provider/reasoning");
+			expect(storage.backupRestoreSucceeded).toBeTrue();
+			expect(persistentManager.getEntries()).toEqual(entriesBeforeSelection);
+			expect(persistentSession.model).toBe(INITIAL_MODEL);
+			expect(persistentSession.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await persistentSession.dispose();
+			await persistentManager.close();
+		}
+	});
+
+	it("restores durable state without replacing the session after a retryable promotion-writer close failure", async () => {
+		// Given
+		const storage = new RetryablePromotionCloseStorage();
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
+		const persistentSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [] },
+			}),
+			sessionManager: persistentManager,
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await persistentManager.rewriteEntries();
+		persistentManager.appendMessage({ role: "user", content: "pending append writer", timestamp: Date.now() });
+		const sessionFile = persistentManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+		const persistedBeforeSelection = storage.readTextSync(sessionFile);
+		const entriesBeforeSelection = persistentManager.getEntries();
+		storage.failNextAppendWriterClose();
+
+		try {
+			// When
+			const selection = persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
+
+			// Then
+			await expectPostDurableSelectionRecovery(selection, {
+				message: "Session replacement could not be completed.",
+				rollback: { disposition: "restored", failures: [] },
+			});
+			expect(settings.getGlobal("modelRoles")).toEqual({});
+			expect(storage.readTextSync(sessionFile)).toBe(persistedBeforeSelection);
+			expect(storage.readTextSync(sessionFile)).not.toContain("target-provider/reasoning");
+			expect(persistentManager.getEntries()).toEqual(entriesBeforeSelection);
+			expect(persistentSession.model).toBe(INITIAL_MODEL);
+		} finally {
+			await persistentSession.dispose();
+			await persistentManager.close();
+		}
+	});
+
+	it("rejects a staged snapshot when a later append occurs while its temp write is pending", async () => {
+		// Given
+		const storage = new StagedWriteGateStorage();
+		const manager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
+		manager.appendMessage({ role: "user", content: "A", timestamp: Date.now() });
+		await manager.rewriteEntries();
+		storage.blockNextDefaultSelectionStage();
+
+		try {
+			// When
+			const stagePromise = manager.stageDefaultModelSelection("target-provider/reasoning", Effort.High, {
+				appendThinkingLevel: true,
+			});
+			await storage.waitForDefaultSelectionStageWrite();
+			manager.appendMessage({ role: "user", content: "C", timestamp: Date.now() });
+			storage.releaseDefaultSelectionStageWrite();
+			const stage = await stagePromise;
+
+			// Then
+			expect(manager.promoteDefaultModelSelection(stage)).toEqual({ kind: "not_promoted" });
+			expect(
+				manager
+					.getEntries()
+					.some(
+						entry => entry.type === "message" && entry.message.role === "user" && entry.message.content === "C",
+					),
+			).toBeTrue();
+			await manager.discardDefaultModelSelectionStage(stage);
+		} finally {
+			await manager.close();
+		}
+	});
+
 	it("does not apply the live selection when the durable commit fails", async () => {
 		// Given
 		vi.spyOn(settings, "setGlobalModelRoleAndFlush").mockRejectedValue(new Error("durable write failed"));
@@ -375,6 +853,409 @@ describe("AgentSession durable default model selection", () => {
 		await expect(selection).rejects.toThrow("durable write failed");
 		expect(liveApply).not.toHaveBeenCalled();
 		expect(session.model).toBe(INITIAL_MODEL);
+	});
+
+	it("does not route a durably committed default through the temporary mutation path", async () => {
+		// Given
+		const temporaryMutation = vi.spyOn(session, "setModelTemporary");
+
+		// When
+		await session.setDefaultModelSelection(targetModel(), Effort.High);
+
+		// Then
+		expect(temporaryMutation).not.toHaveBeenCalled();
+		expect(session.model).toEqual(targetModel());
+		expect(sessionManager.buildSessionContext().models.default).toBe("target-provider/reasoning");
+	});
+
+	it("does not overwrite a newer direct thinking mutation after durable selection commit", async () => {
+		// Given
+		const originalDurableCommit = settings.setGlobalModelRoleAndFlush.bind(settings);
+		vi.spyOn(settings, "setGlobalModelRoleAndFlush").mockImplementation(async (role, selector) => {
+			const commit = await originalDurableCommit(role, selector);
+			session.setThinkingLevel(Effort.Medium);
+			return commit;
+		});
+
+		// When
+		const selection = session.setDefaultModelSelection(targetModel(), Effort.High);
+
+		// Then
+		await expect(selection).rejects.toThrow(DEFAULT_MODEL_SELECTION_RECOVERY_MESSAGE);
+		expect(settings.getGlobal("modelRoles")).toEqual({});
+		expect(session.model).toBe(INITIAL_MODEL);
+		expect(session.thinkingLevel).toBe(Effort.Medium);
+	});
+
+	it("allows a staged default selection when an identical RPC host refresh arrives", async () => {
+		// Given
+		const storage = new StagedWriteGateStorage();
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
+		const hostTool: AgentTool = {
+			name: "host_search",
+			label: "Host search",
+			description: "Search through the RPC host",
+			parameters: z.object({}),
+			execute: async () => ({ content: [] }),
+		};
+		const candidateSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [] },
+			}),
+			sessionManager: persistentManager,
+			settings: Settings.isolated({ defaultThinkingLevel: Effort.XHigh }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			thinkingLevel: Effort.Low,
+		});
+		const model = targetModel();
+		await candidateSession.refreshRpcHostTools([hostTool]);
+		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await persistentManager.rewriteEntries();
+		storage.blockNextDefaultSelectionStage();
+
+		try {
+			// When
+			const selection = candidateSession.setDefaultModelSelection(model, Effort.High);
+			await storage.waitForDefaultSelectionStageWrite();
+			await candidateSession.refreshRpcHostTools([hostTool]);
+			storage.releaseDefaultSelectionStageWrite();
+
+			// Then
+			await expect(selection).resolves.toEqual({
+				provider: model.provider,
+				modelId: model.id,
+				thinkingLevel: Effort.High,
+			});
+			expect(candidateSession.model).toBe(model);
+		} finally {
+			await candidateSession.dispose();
+			await persistentManager.close();
+		}
+	});
+
+	it("allows a staged default selection when an identical MCP refresh arrives", async () => {
+		// Given
+		const storage = new StagedWriteGateStorage();
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
+		const mcpTool: CustomTool = {
+			name: "mcp__nucleus_search",
+			label: "nucleus/search",
+			description: "Search the Nucleus MCP server",
+			parameters: z.object({}),
+			mcpServerName: "nucleus",
+			mcpToolName: "search",
+			execute: async () => ({ content: [] }),
+		};
+		const initialMcpTool = mcpTool as unknown as AgentTool;
+		const candidateSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [initialMcpTool] },
+			}),
+			sessionManager: persistentManager,
+			settings: Settings.isolated({ defaultThinkingLevel: Effort.XHigh }),
+			modelRegistry,
+			toolRegistry: new Map([[mcpTool.name, initialMcpTool]]),
+			thinkingLevel: Effort.Low,
+		});
+		const model = targetModel();
+		await candidateSession.refreshMCPTools([mcpTool]);
+		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await persistentManager.rewriteEntries();
+		storage.blockNextDefaultSelectionStage();
+
+		try {
+			// When
+			const selection = candidateSession.setDefaultModelSelection(model, Effort.High);
+			await storage.waitForDefaultSelectionStageWrite();
+			await candidateSession.refreshMCPTools([mcpTool]);
+			storage.releaseDefaultSelectionStageWrite();
+
+			// Then
+			await expect(selection).resolves.toEqual({
+				provider: model.provider,
+				modelId: model.id,
+				thinkingLevel: Effort.High,
+			});
+			expect(candidateSession.model).toBe(model);
+		} finally {
+			await candidateSession.dispose();
+			await persistentManager.close();
+		}
+	});
+
+	it("rejects a prepared target prompt when host tools change while its session stage is pending", async () => {
+		// Given
+		const agentDir = path.join(tempRoot, "selection-agent");
+		await fs.mkdir(agentDir, { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			[
+				"edit:",
+				"  modelVariants:",
+				'    "initial-provider/initial": replace',
+				'    "target-provider/reasoning": patch',
+			].join("\n"),
+		);
+		resetSettingsForTest();
+		const durableSettings = await Settings.init({ cwd: tempRoot, agentDir });
+		const storage = new StagedWriteGateStorage();
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
+		const editTool: AgentTool = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit files",
+			parameters: z.object({}),
+			execute: async () => ({ content: [] }),
+		};
+		const latestHostTool: AgentTool = {
+			name: "host_latest",
+			label: "Latest host tool",
+			description: "Latest host tool description",
+			parameters: z.object({}),
+			execute: async () => ({ content: [] }),
+		};
+		const candidateSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Initial prompt"], tools: [editTool] },
+			}),
+			sessionManager: persistentManager,
+			settings: durableSettings,
+			modelRegistry,
+			toolRegistry: new Map([[editTool.name, editTool]]),
+			thinkingLevel: Effort.Low,
+			rebuildSystemPrompt: async (toolNames, _tools, candidateModel) => ({
+				systemPrompt: [candidateModel ? `candidate:${candidateModel.id}` : `active:${toolNames.join(",")}`],
+			}),
+		});
+		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await persistentManager.rewriteEntries();
+		storage.blockNextDefaultSelectionStage();
+
+		try {
+			// When
+			const selection = candidateSession.setDefaultModelSelection(targetModel(), Effort.High);
+			await storage.waitForDefaultSelectionStageWrite();
+			await candidateSession.refreshRpcHostTools([latestHostTool]);
+			storage.releaseDefaultSelectionStageWrite();
+
+			// Then
+			await expectPostDurableSelectionRecovery(selection, {
+				message: "Default model selection was superseded before session promotion",
+				rollback: { disposition: "restored", failures: [] },
+			});
+			expect(candidateSession.model).toBe(INITIAL_MODEL);
+			expect(candidateSession.thinkingLevel).toBe(Effort.Low);
+			expect(candidateSession.systemPrompt).toEqual(["active:edit,host_latest"]);
+			expect(candidateSession.agent.state.tools.map(tool => tool.name)).toEqual(["edit", "host_latest"]);
+			expect(durableSettings.getGlobal("modelRoles")).toEqual({});
+			expect(persistentManager.buildSessionContext().models.default).toBeUndefined();
+		} finally {
+			await candidateSession.dispose();
+			await persistentManager.close();
+			resetSettingsForTest();
+		}
+	});
+
+	it("does not let an admitted host-tool rebuild overwrite the selected target prompt", async () => {
+		// Given
+		const agentDir = path.join(tempRoot, "selection-agent");
+		await fs.mkdir(agentDir, { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			[
+				"edit:",
+				"  modelVariants:",
+				'    "initial-provider/initial": replace',
+				'    "target-provider/reasoning": patch',
+			].join("\n"),
+		);
+		resetSettingsForTest();
+		const durableSettings = await Settings.init({ cwd: tempRoot, agentDir });
+		const rebuildEntered = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"));
+		const editTool: AgentTool = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit files",
+			parameters: z.object({}),
+			execute: async () => ({ content: [] }),
+		};
+		const latestHostTool: AgentTool = {
+			name: "host_latest",
+			label: "Latest host tool",
+			description: "Latest host tool description",
+			parameters: z.object({}),
+			execute: async () => ({ content: [] }),
+		};
+		const candidateSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Initial prompt"], tools: [editTool] },
+			}),
+			sessionManager: persistentManager,
+			settings: durableSettings,
+			modelRegistry,
+			toolRegistry: new Map([[editTool.name, editTool]]),
+			thinkingLevel: Effort.Low,
+			rebuildSystemPrompt: async (toolNames, _tools, candidateModel) => {
+				if (candidateModel) return { systemPrompt: [`candidate:${candidateModel.id}`] };
+				rebuildEntered.resolve();
+				await releaseRebuild.promise;
+				return { systemPrompt: [`active:${toolNames.join(",")}`] };
+			},
+		});
+
+		try {
+			// When
+			const refresh = candidateSession.refreshRpcHostTools([latestHostTool]);
+			await rebuildEntered.promise;
+			const selection = candidateSession.setDefaultModelSelection(targetModel(), Effort.High);
+			await Bun.sleep(10);
+			releaseRebuild.resolve();
+			await refresh;
+			await selection;
+
+			// Then
+			expect(candidateSession.systemPrompt).toEqual(["candidate:reasoning"]);
+		} finally {
+			await candidateSession.dispose();
+			await persistentManager.close();
+			resetSettingsForTest();
+		}
+	});
+
+	it("keeps the latest prompt when overlapping host-tool rebuilds complete out of order", async () => {
+		// Given
+		const firstRebuildEntered = Promise.withResolvers<void>();
+		const secondRebuildEntered = Promise.withResolvers<void>();
+		const releaseFirstRebuild = Promise.withResolvers<void>();
+		const releaseSecondRebuild = Promise.withResolvers<void>();
+		const manager = SessionManager.inMemory(tempRoot);
+		const editTool: AgentTool = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit files",
+			parameters: z.object({}),
+			execute: async () => ({ content: [] }),
+		};
+		const firstHostTool: AgentTool = {
+			name: "host_first",
+			label: "First host tool",
+			description: "First host tool description",
+			parameters: z.object({}),
+			execute: async () => ({ content: [] }),
+		};
+		const secondHostTool: AgentTool = {
+			name: "host_second",
+			label: "Second host tool",
+			description: "Second host tool description",
+			parameters: z.object({}),
+			execute: async () => ({ content: [] }),
+		};
+		const candidateSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Initial prompt"], tools: [editTool] },
+			}),
+			sessionManager: manager,
+			settings: Settings.isolated({ defaultThinkingLevel: Effort.XHigh }),
+			modelRegistry,
+			toolRegistry: new Map([[editTool.name, editTool]]),
+			thinkingLevel: Effort.Low,
+			rebuildSystemPrompt: async (toolNames, _tools) => {
+				if (toolNames.includes(firstHostTool.name)) {
+					firstRebuildEntered.resolve();
+					await releaseFirstRebuild.promise;
+				}
+				if (toolNames.includes(secondHostTool.name)) {
+					secondRebuildEntered.resolve();
+					await releaseSecondRebuild.promise;
+				}
+				return { systemPrompt: [`active:${toolNames.join(",")}`] };
+			},
+		});
+
+		try {
+			// When
+			const firstRefresh = candidateSession.refreshRpcHostTools([firstHostTool]);
+			await firstRebuildEntered.promise;
+			const secondRefresh = candidateSession.refreshRpcHostTools([secondHostTool]);
+			await secondRebuildEntered.promise;
+			releaseSecondRebuild.resolve();
+			await secondRefresh;
+			releaseFirstRebuild.resolve();
+			await firstRefresh;
+
+			// Then
+			expect(candidateSession.systemPrompt).toEqual(["active:edit,host_second"]);
+		} finally {
+			await candidateSession.dispose();
+			await manager.close();
+		}
+	});
+
+	it("preserves a newer direct transcript mutation when an older selection stage is stale", async () => {
+		// Given
+		const originalDurableCommit = settings.setGlobalModelRoleAndFlush.bind(settings);
+		vi.spyOn(settings, "setGlobalModelRoleAndFlush").mockImplementation(async (role, selector) => {
+			const commit = await originalDurableCommit(role, selector);
+			sessionManager.appendMessage({ role: "user", content: "newer direct mutation", timestamp: Date.now() });
+			return commit;
+		});
+
+		// When
+		const selection = session.setDefaultModelSelection(targetModel(), Effort.High);
+
+		// Then
+		await expect(selection).rejects.toThrow(DEFAULT_MODEL_SELECTION_RECOVERY_MESSAGE);
+		expect(settings.getGlobal("modelRoles")).toEqual({});
+		expect(session.model).toBe(INITIAL_MODEL);
+		expect(sessionManager.getEntries()).toContainEqual(
+			expect.objectContaining({
+				type: "message",
+				message: expect.objectContaining({ content: "newer direct mutation" }),
+			}),
+		);
+	});
+
+	it("retains a successful lazy selection until its later explicit persistence", async () => {
+		// Given
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"));
+		const persistentSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [] },
+			}),
+			sessionManager: persistentManager,
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+		const sessionFile = persistentManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected lazy session file path");
+
+		try {
+			// When
+			await persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
+			expect(await Bun.file(sessionFile).exists()).toBeFalse();
+			await persistentManager.ensureOnDisk();
+
+			// Then
+			const reopened = await SessionManager.open(sessionFile, tempRoot);
+			try {
+				expect(reopened.buildSessionContext().models.default).toBe("target-provider/reasoning");
+			} finally {
+				await reopened.close();
+			}
+		} finally {
+			await persistentSession.dispose();
+			await persistentManager.close();
+		}
 	});
 
 	it("does not restore live state when durable default persistence fails", async () => {
@@ -427,28 +1308,115 @@ describe("AgentSession durable default model selection", () => {
 		expect(sessionManager.buildSessionContext().models.default).toBe("target-provider/after-failure");
 	});
 
-	it("restores the prior durable and live selection when the target live apply fails late", async () => {
+	it("does not publish target selection effects when target edit prompt preparation rejects", async () => {
+		// Given
+		const selectionError = new Error("target edit prompt preparation failed");
+		const agentDir = path.join(tempRoot, "selection-agent");
+		await fs.mkdir(agentDir, { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			[
+				"edit:",
+				"  modelVariants:",
+				'    "initial-provider/initial": replace',
+				'    "target-provider/reasoning": patch',
+			].join("\n"),
+		);
+		resetSettingsForTest();
+		const durableSettings = await Settings.init({ cwd: tempRoot, agentDir });
+		const failingManager = SessionManager.inMemory(tempRoot);
+		const editTool: AgentTool = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit files",
+			parameters: z.object({}),
+			execute: async () => ({ content: [] }),
+		};
+		const failingAgent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [editTool] },
+		});
+		const model = targetModel();
+		let preparedCandidateModel: Model | undefined;
+		const failingSession = new AgentSession({
+			agent: failingAgent,
+			sessionManager: failingManager,
+			settings: durableSettings,
+			modelRegistry,
+			toolRegistry: new Map([[editTool.name, editTool]]),
+			thinkingLevel: Effort.Low,
+			rebuildSystemPrompt: async (_toolNames, _tools, candidateModel) => {
+				preparedCandidateModel = candidateModel;
+				throw selectionError;
+			},
+		});
+		const entriesBeforeSelection = failingManager.getEntries();
+
+		try {
+			const storage = durableSettings.getStorage();
+			if (!storage) throw new Error("Expected durable agent storage");
+
+			// When
+			const selection = failingSession.setDefaultModelSelection(model, Effort.High);
+
+			// Then
+			await expect(selection).rejects.toBe(selectionError);
+			expect(preparedCandidateModel).toBe(model);
+			expect(failingSession.model).toBe(INITIAL_MODEL);
+			expect(failingSession.thinkingLevel).toBe(Effort.Low);
+			expect(failingManager.getEntries()).toEqual(entriesBeforeSelection);
+			expect(storage.getModelUsageOrder()).not.toContain("target-provider/reasoning");
+		} finally {
+			await failingSession.dispose();
+			resetSettingsForTest();
+		}
+	});
+
+	it("restores the prior durable selection without publishing live state when staged promotion is rejected", async () => {
 		// Given
 		const priorModelRoles = { default: "initial-provider/initial:low", planner: "planner/model:medium" };
 		const priorLiveModel = session.model;
 		const priorThinkingLevel = session.thinkingLevel;
 		const model = targetModel();
-		const lateLiveApplyError = new Error("late live apply failure");
+		const lateLiveApplyError = new Error("session promotion failed");
 		settings.set("modelRoles", priorModelRoles);
-		const originalLiveApply = session.setModelTemporary.bind(session);
-		vi.spyOn(session, "setModelTemporary").mockImplementationOnce(async (...args) => {
-			await originalLiveApply(...args);
-			throw lateLiveApplyError;
-		});
+		failDefaultSelectionPromotion(sessionManager, lateLiveApplyError);
 
 		// When
 		const selection = session.setDefaultModelSelection(model, Effort.High);
 
 		// Then
-		await expect(selection).rejects.toBe(lateLiveApplyError);
+		await expectPostDurableSelectionRecovery(selection, {
+			message: lateLiveApplyError.message,
+			rollback: { disposition: "restored", failures: [] },
+		});
 		expect(settings.getGlobal("modelRoles")).toEqual(priorModelRoles);
 		expect(session.model).toBe(priorLiveModel);
 		expect(session.thinkingLevel).toBe(priorThinkingLevel);
+	});
+
+	it("restores the prior durable default while retaining a planner helper update from rejected promotion", async () => {
+		// Given: A is durable before B commits, then promotion makes an unrelated planner update before rejecting B.
+		const priorModelRoles = { default: "initial-provider/initial:low", planner: "planner/original:medium" };
+		const promotionError = new Error("session promotion failed");
+		settings.set("modelRoles", priorModelRoles);
+		vi.spyOn(sessionManager, "promoteDefaultModelSelection").mockImplementation(() => {
+			settings.setModelRole("planner", "planner/newer:high");
+			return { kind: "not_promoted", error: promotionError };
+		});
+
+		// When
+		const selection = session.setDefaultModelSelection(targetModel(), Effort.High);
+
+		// Then: session recovery restores A but preserves the concurrent planner Q update.
+		await expectPostDurableSelectionRecovery(selection, {
+			message: promotionError.message,
+			rollback: { disposition: "restored", failures: [] },
+		});
+		expect(settings.getGlobal("modelRoles")).toEqual({
+			default: "initial-provider/initial:low",
+			planner: "planner/newer:high",
+		});
 	});
 
 	it("restores the exact prior model when the failed target shares its selector but changes API metadata", async () => {
@@ -460,18 +1428,17 @@ describe("AgentSession durable default model selection", () => {
 			api: "openai-completions",
 			baseUrl: "https://replacement.example.invalid/v1",
 		};
-		const lateLiveApplyError = new Error("late live apply failure");
-		const originalLiveApply = session.setModelTemporary.bind(session);
-		vi.spyOn(session, "setModelTemporary").mockImplementationOnce(async (...args) => {
-			await originalLiveApply(...args);
-			throw lateLiveApplyError;
-		});
+		const lateLiveApplyError = new Error("session promotion failed");
+		failDefaultSelectionPromotion(sessionManager, lateLiveApplyError);
 
 		// When
 		const selection = session.setDefaultModelSelection(targetWithDifferentApi, Effort.High);
 
 		// Then
-		await expect(selection).rejects.toBe(lateLiveApplyError);
+		await expectPostDurableSelectionRecovery(selection, {
+			message: lateLiveApplyError.message,
+			rollback: { disposition: "restored", failures: [] },
+		});
 		expect(session.model).toBe(priorLiveModel);
 		expect(session.model?.api).toBe("anthropic-messages");
 		expect(session.model?.baseUrl).toBe("https://example.invalid");
@@ -498,7 +1465,7 @@ describe("AgentSession durable default model selection", () => {
 		expect(sessionManager.buildSessionContext()).toEqual(contextBeforeSelection);
 	});
 
-	it("closes an already-open persisted append writer when late live apply rollback rewrites the transcript", async () => {
+	it("closes an already-open persisted append writer before promoting the staged transcript", async () => {
 		// Given
 		const storage = new AppendWriterTrackingStorage();
 		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
@@ -512,23 +1479,15 @@ describe("AgentSession durable default model selection", () => {
 			modelRegistry,
 			thinkingLevel: Effort.Low,
 		});
-		const lateLiveApplyError = new Error("late live apply failure");
 		await persistentManager.ensureOnDisk();
 		persistentManager.appendMessage({ role: "user", content: "open hot writer", timestamp: Date.now() });
 		await persistentManager.flush();
 		expect(storage.openAppendWriterCount).toBe(1);
-		const originalLiveApply = persistentSession.setModelTemporary.bind(persistentSession);
-		vi.spyOn(persistentSession, "setModelTemporary").mockImplementationOnce(async (...args) => {
-			await originalLiveApply(...args);
-			throw lateLiveApplyError;
-		});
-
 		try {
 			// When
-			const selection = persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
+			await persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
 
 			// Then
-			await expect(selection).rejects.toBe(lateLiveApplyError);
 			expect(storage.openAppendWriterCount).toBe(0);
 		} finally {
 			await persistentSession.dispose();
@@ -536,7 +1495,7 @@ describe("AgentSession durable default model selection", () => {
 		}
 	});
 
-	it("restores the exact persisted transcript and context when target live apply fails late", async () => {
+	it("keeps the exact persisted transcript and context when staged promotion is rejected", async () => {
 		// Given
 		const persistentManager = SessionManager.create(tempRoot, tempRoot);
 		const persistentSession = new AgentSession({
@@ -549,25 +1508,24 @@ describe("AgentSession durable default model selection", () => {
 			modelRegistry,
 			thinkingLevel: Effort.Low,
 		});
-		const lateLiveApplyError = new Error("late live apply failure");
+		const lateLiveApplyError = new Error("session promotion failed");
 		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
 		await persistentManager.rewriteEntries();
 		const sessionFile = persistentSession.sessionFile;
 		if (!sessionFile) throw new Error("Expected persisted session file");
 		const entriesBeforeSelection = persistentManager.getEntries();
 		const contextBeforeSelection = persistentManager.buildSessionContext();
-		const originalLiveApply = persistentSession.setModelTemporary.bind(persistentSession);
-		vi.spyOn(persistentSession, "setModelTemporary").mockImplementationOnce(async (...args) => {
-			await originalLiveApply(...args);
-			throw lateLiveApplyError;
-		});
+		failDefaultSelectionPromotion(persistentManager, lateLiveApplyError);
 
 		try {
 			// When
 			const selection = persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
 
 			// Then
-			await expect(selection).rejects.toBe(lateLiveApplyError);
+			await expectPostDurableSelectionRecovery(selection, {
+				message: lateLiveApplyError.message,
+				rollback: { disposition: "restored", failures: [] },
+			});
 			expect(persistentManager.getEntries()).toEqual(entriesBeforeSelection);
 			expect(persistentManager.buildSessionContext()).toEqual(contextBeforeSelection);
 			await persistentManager.flush();
@@ -585,7 +1543,87 @@ describe("AgentSession durable default model selection", () => {
 		}
 	});
 
-	it("restores a model-less session's live model, thinking, entries, and context when target live apply fails late", async () => {
+	it("restores the durable default when staged cleanup fails after promotion rejection", async () => {
+		// Given
+		const storage = new StageDiscardFailureStorage();
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
+		const persistentSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [] },
+			}),
+			sessionManager: persistentManager,
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+		const priorModelRoles = { default: "initial-provider/initial:low", planner: "planner/model:medium" };
+		const promotionError = new Error("session promotion rejected");
+		settings.set("modelRoles", priorModelRoles);
+		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await persistentManager.rewriteEntries();
+		failDefaultSelectionPromotion(persistentManager, promotionError);
+		storage.failNextDiscard();
+
+		try {
+			// When
+			const selection = persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
+
+			// Then
+			await expectPostDurableSelectionRecovery(selection, {
+				message: promotionError.message,
+				rollback: {
+					disposition: "partial",
+					failures: [{ stage: "session", message: "Session replacement recovery could not be completed." }],
+				},
+			});
+			expect(settings.getGlobal("modelRoles")).toEqual(priorModelRoles);
+		} finally {
+			await persistentSession.dispose();
+			await persistentManager.close();
+		}
+	});
+
+	it("restores the durable default when staged cleanup fails after the stage becomes stale", async () => {
+		// Given
+		const storage = new StageDiscardFailureStorage();
+		const persistentManager = SessionManager.create(tempRoot, path.join(tempRoot, "sessions"), storage);
+		const persistentSession = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: INITIAL_MODEL, systemPrompt: ["Test"], tools: [] },
+			}),
+			sessionManager: persistentManager,
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+		const priorModelRoles = { default: "initial-provider/initial:low", planner: "planner/model:medium" };
+		const originalDurableCommit = settings.setGlobalModelRoleAndFlush.bind(settings);
+		settings.set("modelRoles", priorModelRoles);
+		persistentManager.appendMessage({ role: "user", content: "persisted transcript", timestamp: Date.now() });
+		await persistentManager.rewriteEntries();
+		vi.spyOn(settings, "setGlobalModelRoleAndFlush").mockImplementation(async (role, selector) => {
+			const commit = await originalDurableCommit(role, selector);
+			persistentManager.appendMessage({ role: "user", content: "newer transcript mutation", timestamp: Date.now() });
+			return commit;
+		});
+		storage.failNextDiscard();
+
+		try {
+			// When
+			const selection = persistentSession.setDefaultModelSelection(targetModel(), Effort.High);
+
+			// Then
+			await expect(selection).rejects.toThrow(DEFAULT_MODEL_SELECTION_RECOVERY_MESSAGE);
+			expect(settings.getGlobal("modelRoles")).toEqual(priorModelRoles);
+		} finally {
+			await persistentSession.dispose();
+			await persistentManager.close();
+		}
+	});
+
+	it("keeps a model-less session's live model, thinking, entries, and context when staged promotion is rejected", async () => {
 		// Given
 		const modelLessManager = SessionManager.inMemory(tempRoot);
 		const modelLessSession = new AgentSession({
@@ -600,23 +1638,22 @@ describe("AgentSession durable default model selection", () => {
 		});
 		const priorModelRoles = { planner: "planner/model:medium" };
 		const priorThinkingLevel = modelLessSession.thinkingLevel;
-		const lateLiveApplyError = new Error("late live apply failure");
+		const lateLiveApplyError = new Error("session promotion failed");
 		settings.set("modelRoles", priorModelRoles);
 		modelLessManager.appendMessage({ role: "user", content: "model-less transcript", timestamp: Date.now() });
 		const entriesBeforeSelection = modelLessManager.getEntries();
 		const contextBeforeSelection = modelLessManager.buildSessionContext();
-		const originalLiveApply = modelLessSession.setModelTemporary.bind(modelLessSession);
-		vi.spyOn(modelLessSession, "setModelTemporary").mockImplementationOnce(async (...args) => {
-			await originalLiveApply(...args);
-			throw lateLiveApplyError;
-		});
+		failDefaultSelectionPromotion(modelLessManager, lateLiveApplyError);
 
 		try {
 			// When
 			const selection = modelLessSession.setDefaultModelSelection(targetModel(), Effort.High);
 
 			// Then
-			await expect(selection).rejects.toBe(lateLiveApplyError);
+			await expectPostDurableSelectionRecovery(selection, {
+				message: lateLiveApplyError.message,
+				rollback: { disposition: "restored", failures: [] },
+			});
 			expect(settings.getGlobal("modelRoles")).toEqual(priorModelRoles);
 			expect(modelLessSession.model).toBeUndefined();
 			expect(modelLessSession.thinkingLevel).toBe(priorThinkingLevel);
@@ -627,35 +1664,24 @@ describe("AgentSession durable default model selection", () => {
 		}
 	});
 
-	it("preserves the target live apply error when restoring the prior live selection fails", async () => {
+	it("preserves the session promotion error without attempting a live rollback", async () => {
 		// Given
 		const priorLiveModel = session.model;
 		const model = targetModel();
-		const lateLiveApplyError = new Error("late live apply failure");
-		const liveRollbackError = new Error("live rollback failure");
-		const originalLiveApply = session.setModelTemporary.bind(session);
-		const liveApply = vi.spyOn(session, "setModelTemporary").mockImplementationOnce(async (...args) => {
-			await originalLiveApply(...args);
-			throw lateLiveApplyError;
-		});
-		const originalSetModel = session.agent.setModel.bind(session.agent);
-		const restoreModel = vi.spyOn(session.agent, "setModel").mockImplementation(appliedModel => {
-			if (appliedModel === priorLiveModel) throw liveRollbackError;
-			originalSetModel(appliedModel);
-		});
-		const rollbackWarning = vi.spyOn(logger, "warn");
+		const lateLiveApplyError = new Error("session promotion failed");
+		failDefaultSelectionPromotion(sessionManager, lateLiveApplyError);
+		const setModel = vi.spyOn(session.agent, "setModel");
 
 		// When
 		const selection = session.setDefaultModelSelection(model, Effort.High);
 
 		// Then
-		await expect(selection).rejects.toBe(lateLiveApplyError);
-		expect(liveApply).toHaveBeenCalledWith(model, Effort.High);
-		expect(restoreModel).toHaveBeenCalledWith(priorLiveModel);
-		expect(rollbackWarning).toHaveBeenCalledWith(
-			"Failed to restore live default model selection after live apply failure",
-			{ error: "Error: live rollback failure" },
-		);
+		await expectPostDurableSelectionRecovery(selection, {
+			message: lateLiveApplyError.message,
+			rollback: { disposition: "restored", failures: [] },
+		});
+		expect(setModel).not.toHaveBeenCalled();
+		expect(session.model).toBe(priorLiveModel);
 	});
 
 	it.each([
@@ -675,18 +1701,17 @@ describe("AgentSession durable default model selection", () => {
 		const defaultEntriesBeforeSelection = entriesBeforeSelection.filter(
 			entry => entry.type === "model_change" && entry.role === "default",
 		);
-		const liveApplyError = new Error("late live apply failure");
-		const originalLiveApply = session.setModelTemporary.bind(session);
-		vi.spyOn(session, "setModelTemporary").mockImplementation(async (...args) => {
-			await originalLiveApply(...args);
-			throw liveApplyError;
-		});
+		const liveApplyError = new Error("session promotion failed");
+		failDefaultSelectionPromotion(sessionManager, liveApplyError);
 
 		// When
 		const selection = session.setDefaultModelSelection(targetModel(), Effort.High);
 
 		// Then
-		await expect(selection).rejects.toBe(liveApplyError);
+		await expectPostDurableSelectionRecovery(selection, {
+			message: liveApplyError.message,
+			rollback: { disposition: "restored", failures: [] },
+		});
 		expect(settings.getGlobal("modelRoles")).toEqual(previousModelRoles);
 		expect(
 			sessionManager.getEntries().filter(entry => entry.type === "model_change" && entry.role === "default"),
@@ -700,37 +1725,45 @@ describe("AgentSession durable default model selection", () => {
 	])("restores %s when post-commit live apply fails", async (_description, previousModelRoles) => {
 		// Given
 		settings.set("modelRoles", previousModelRoles);
-		vi.spyOn(session, "setModelTemporary").mockRejectedValue(new Error("live apply failed"));
+		failDefaultSelectionPromotion(sessionManager, new Error("session promotion failed"));
 
 		// When
 		const selection = session.setDefaultModelSelection(targetModel(), Effort.High);
 
 		// Then
-		await expect(selection).rejects.toThrow("live apply failed");
+		await expect(selection).rejects.toThrow(DEFAULT_MODEL_SELECTION_RECOVERY_MESSAGE);
 		expect(settings.getGlobal("modelRoles")).toEqual(previousModelRoles);
 		expect(session.model).toBe(INITIAL_MODEL);
 	});
 
-	it("preserves the live apply error when restoring the durable default also fails", async () => {
+	it("logs stable durable recovery diagnostics without raw restore error detail", async () => {
 		// Given
-		const liveApplyError = new Error("live apply failed");
-		const rollbackError = new Error("durable rollback failed");
-		const originalDurableCommit = settings.setGlobalModelRoleAndFlush.bind(settings);
-		vi.spyOn(settings, "setGlobalModelRoleAndFlush").mockImplementation(async (role, modelId) => {
-			if (modelId === undefined) throw rollbackError;
-			await originalDurableCommit(role, modelId);
-		});
-		vi.spyOn(session, "setModelTemporary").mockRejectedValue(liveApplyError);
+		const liveApplyError = new Error("session promotion failed");
+		const restorePath = "/private/sessions/default-selection.json";
+		const restoreToken = "durable-restore-token";
+		const rollbackError = new Error(`durable rollback failed at ${restorePath} with token ${restoreToken}`);
+		vi.spyOn(settings, "restoreGlobalDefaultModelRoleIfCurrent").mockRejectedValue(rollbackError);
+		failDefaultSelectionPromotion(sessionManager, liveApplyError);
 		const rollbackWarning = vi.spyOn(logger, "warn");
 
 		// When
 		const selection = session.setDefaultModelSelection(targetModel(), Effort.High);
 
 		// Then
-		await expect(selection).rejects.toBe(liveApplyError);
+		await expectPostDurableSelectionRecovery(selection, {
+			message: liveApplyError.message,
+			rollback: {
+				disposition: "partial",
+				failures: [{ stage: "durable", message: "Durable default selection recovery could not be completed." }],
+			},
+		});
+		expect(rollbackWarning).toHaveBeenCalled();
+		const warningOutput = JSON.stringify(rollbackWarning.mock.calls);
+		expect(warningOutput).not.toContain(restorePath);
+		expect(warningOutput).not.toContain(restoreToken);
 		expect(rollbackWarning).toHaveBeenCalledWith(
-			"Failed to restore durable default model selection after live apply failure",
-			{ error: "Error: durable rollback failed" },
+			"Failed to restore durable default model selection after session promotion failure",
+			{ code: "default_model_selection_recovery_failed", rollbackStage: "durable" },
 		);
 	});
 });

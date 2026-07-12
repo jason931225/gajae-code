@@ -388,6 +388,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#baseReservedSlashCommandNames: Set<string> = new Set();
 	#cleanupUnsubscribe?: () => void;
 	#subprocessTeardownUnsubscribe?: () => void;
+	#petProtocolUnsubscribe?: () => void;
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
 	#planModePreviousTools: string[] | undefined;
@@ -622,7 +623,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// pet mode was applied and dropped (no protocol yet at startup).
 		// Re-apply the configured mode when capability arrives so the pet
 		// appears without the user re-running /pet.
-		onImageProtocolChanged(protocol => {
+		this.#petProtocolUnsubscribe?.();
+		this.#petProtocolUnsubscribe = onImageProtocolChanged(protocol => {
 			if (!protocol) return;
 			const saved = settings.get("pet.mode");
 			if (saved !== "off" && this.petWidget && this.petWidget.mode === "off") {
@@ -2086,6 +2088,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#petProtocolUnsubscribe?.();
+		this.#petProtocolUnsubscribe = undefined;
 		this.petWidget?.dispose();
 		this.petWidget = undefined;
 		if (this.loadingAnimation) {

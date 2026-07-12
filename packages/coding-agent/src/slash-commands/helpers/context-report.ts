@@ -102,12 +102,17 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 			return "Context usage is unavailable: no model is selected for this session.";
 		}
 		const promptUsage = findLastAssistantUsage(history.activeMessages);
-		const usedPct = (breakdown.usedTokens / breakdown.contextWindow) * 100;
+		const activeContext =
+			breakdown.usedTokens === null
+				? `Active context: unknown / ${breakdown.contextWindow.toLocaleString()} tokens (exact count unknown until next response) (${contextUsageSourceLabel(breakdown.source)})`
+				: `Active context: ${breakdown.usedTokens.toLocaleString()} / ${breakdown.contextWindow.toLocaleString()} tokens (${((breakdown.usedTokens / breakdown.contextWindow) * 100).toFixed(1)}% used) (${contextUsageSourceLabel(breakdown.source)})`;
 		const lines = [
 			"Context usage",
 			`Model: ${breakdown.model?.provider ?? "unknown"}/${breakdown.model?.id ?? "unknown"}`,
-			`Active context: ${breakdown.usedTokens.toLocaleString()} / ${breakdown.contextWindow.toLocaleString()} tokens (${usedPct.toFixed(1)}% used) (${contextUsageSourceLabel(breakdown.source)})`,
-			...(breakdown.source === "provider_anchor" && breakdown.estimatedCategoryTotal !== breakdown.usedTokens
+			activeContext,
+			...(breakdown.source !== "unknown" &&
+			breakdown.usedTokens !== null &&
+			breakdown.estimatedCategoryTotal !== breakdown.usedTokens
 				? [
 						`Estimated category total: ${breakdown.estimatedCategoryTotal.toLocaleString()} tokens (composition below is estimated)`,
 					]
@@ -122,7 +127,13 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 		if (breakdown.autoCompactBufferTokens > 0) {
 			lines.push(formatTokenLine("Reserve", breakdown.autoCompactBufferTokens, breakdown.contextWindow));
 		}
-		lines.push(formatTokenLine("Free", breakdown.freeTokens, breakdown.contextWindow));
+		lines.push(
+			formatTokenLine(
+				breakdown.usedTokens === null ? "Free (estimated)" : "Free",
+				breakdown.freeTokens,
+				breakdown.contextWindow,
+			),
+		);
 		lines.push(
 			"",
 			"History",

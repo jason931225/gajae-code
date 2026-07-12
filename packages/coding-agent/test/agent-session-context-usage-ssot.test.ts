@@ -89,6 +89,13 @@ function requireContextUsage(session: AgentSession) {
 	return usage;
 }
 
+function appendCompactionBoundary(sessionManager: SessionManager, firstKeptEntryId: string): number {
+	sessionManager.appendCompaction("summary", "summary", firstKeptEntryId, 1_000);
+	const compaction = sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+	if (!compaction || compaction.type !== "compaction") throw new Error("Expected compaction entry");
+	return new Date(compaction.timestamp).getTime();
+}
+
 afterEach(async () => {
 	for (const session of sessions.splice(0)) {
 		await session.dispose();
@@ -158,7 +165,7 @@ describe("AgentSession context usage source of truth", () => {
 		});
 	});
 
-	it("rejects provider usage predating the latest compaction boundary", async () => {
+	it("reports unknown when all provider usage predates the latest compaction boundary", async () => {
 		const { session, sessionManager } = await createSession();
 		const staleAssistant = createAssistant({
 			usage: createUsage(150_000),
@@ -168,15 +175,82 @@ describe("AgentSession context usage source of truth", () => {
 		const staleAssistantId = sessionManager.appendMessage(staleAssistant);
 		session.agent.appendMessage(staleAssistant);
 		sessionManager.appendCompaction("summary", "summary", staleAssistantId, 150_000);
-		// Persisted message-entry order can lag its message timestamp; the existing
-		// post-compaction gate accepts this entry, while the shared estimator must not.
+		// Persisted message-entry order can lag its message timestamp. Boundary-aware
+		// anchoring must still reject the stale response and preserve unknown usage.
 		sessionManager.appendMessage(staleAssistant);
 
-		const usage = requireContextUsage(session);
-		const expectedTokens = computeNonMessageTokens(session) + estimateDisplayMessages([staleAssistant]);
+		expect(requireContextUsage(session)).toEqual({
+			tokens: null,
+			contextWindow,
+			percent: null,
+			source: "unknown",
+		});
+	});
 
-		expect(usage.tokens).toBe(expectedTokens);
-		expect(usage.tokens).toBeLessThan(15_000);
-		expect(usage.source).toBe("heuristic");
+	it("anchors past a later zero-usage success after compaction", async () => {
+		const { session, sessionManager } = await createSession();
+		const keptUser = { role: "user" as const, content: "keep this", timestamp: Date.now() - 1_000 };
+		const keptUserId = sessionManager.appendMessage(keptUser);
+		const boundaryTs = appendCompactionBoundary(sessionManager, keptUserId);
+		const anchor = createAssistant({ usage: createUsage(150_000), timestamp: boundaryTs + 1 });
+		const zeroUsage = createAssistant({ usage: createUsage(0), timestamp: boundaryTs + 2 });
+		sessionManager.appendMessage(anchor);
+		sessionManager.appendMessage(zeroUsage);
+		session.agent.replaceMessages([anchor, zeroUsage]);
+
+		const usage = requireContextUsage(session);
+		expect(usage.tokens).toBe(calculateContextTokens(anchor.usage) + estimateDisplayMessages([zeroUsage]));
+		expect(usage.source).toBe("provider_anchor");
+	});
+
+	it("uses an earlier post-compaction anchor after aborted and error turns", async () => {
+		const { session, sessionManager } = await createSession();
+		const keptUser = { role: "user" as const, content: "keep this", timestamp: Date.now() - 1_000 };
+		const keptUserId = sessionManager.appendMessage(keptUser);
+		const boundaryTs = appendCompactionBoundary(sessionManager, keptUserId);
+		const anchor = createAssistant({ usage: createUsage(150_000), timestamp: boundaryTs + 1 });
+		const aborted = createAssistant({ usage: createUsage(80_000), stopReason: "aborted", timestamp: boundaryTs + 2 });
+		const errored = createAssistant({ usage: createUsage(70_000), stopReason: "error", timestamp: boundaryTs + 3 });
+		sessionManager.appendMessage(anchor);
+		sessionManager.appendMessage(aborted);
+		sessionManager.appendMessage(errored);
+		session.agent.replaceMessages([anchor, aborted, errored]);
+
+		const usage = requireContextUsage(session);
+		expect(usage.tokens).toBe(calculateContextTokens(anchor.usage) + estimateDisplayMessages([aborted, errored]));
+		expect(usage.source).toBe("provider_anchor");
+	});
+
+	it("rejects an assistant whose timestamp equals the compaction boundary", async () => {
+		const { session, sessionManager } = await createSession();
+		const keptUser = { role: "user" as const, content: "keep this", timestamp: Date.now() - 1_000 };
+		const keptUserId = sessionManager.appendMessage(keptUser);
+		const boundaryTs = appendCompactionBoundary(sessionManager, keptUserId);
+		const boundaryAssistant = createAssistant({ usage: createUsage(150_000), timestamp: boundaryTs });
+		sessionManager.appendMessage(boundaryAssistant);
+		session.agent.replaceMessages([boundaryAssistant]);
+
+		expect(requireContextUsage(session)).toEqual({
+			tokens: null,
+			contextWindow,
+			percent: null,
+			source: "unknown",
+		});
+	});
+
+	it("skips a NaN timestamp anchor without hiding an earlier valid post-compaction anchor", async () => {
+		const { session, sessionManager } = await createSession();
+		const keptUser = { role: "user" as const, content: "keep this", timestamp: Date.now() - 1_000 };
+		const keptUserId = sessionManager.appendMessage(keptUser);
+		const boundaryTs = appendCompactionBoundary(sessionManager, keptUserId);
+		const anchor = createAssistant({ usage: createUsage(150_000), timestamp: boundaryTs + 1 });
+		const nanTimestampAssistant = createAssistant({ usage: createUsage(125_000), timestamp: Number.NaN });
+		sessionManager.appendMessage(anchor);
+		sessionManager.appendMessage(nanTimestampAssistant);
+		session.agent.replaceMessages([anchor, nanTimestampAssistant]);
+
+		const usage = requireContextUsage(session);
+		expect(usage.tokens).toBe(calculateContextTokens(anchor.usage) + estimateDisplayMessages([nanTimestampAssistant]));
+		expect(usage.source).toBe("provider_anchor");
 	});
 });

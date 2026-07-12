@@ -212,6 +212,15 @@ By default, `get_state` omits large static fields. Request `include: ["tools"]` 
 }
 ```
 
+| Field | Contract |
+| --- | --- |
+| `tokens` | `number \| null`. `null` when the count is unknown, such as immediately after compaction. |
+| `contextWindow` | `number`. |
+| `percent` | `number \| null`. `null` when the count is unknown. |
+| `source` | `"provider_anchor" \| "heuristic" \| "unknown"`. `provider_anchor` uses a provider-reported total for already-sent context plus a heuristic estimate of trailing unsent messages; `heuristic` has no provider usage anchor and estimates the full context, including fixed system/tool context; `unknown` is post-compaction, when an exact count is unavailable until the next provider response. |
+
+`contextUsage` may be absent when no model or context window is configured. `source` is additive, so older clients can ignore it.
+
 ### `set_todos` payload
 
 Replaces the in-memory todo state for the current session and returns the normalized phase list:

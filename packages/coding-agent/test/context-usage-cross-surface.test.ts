@@ -145,11 +145,33 @@ describe("context usage cross-surface parity", () => {
 		expect(usage.percent).toBeNull();
 		expect(rendered).toContain("?");
 		expect(breakdown.source).toBe("unknown");
-		expect(breakdown.usedTokens).toBe(breakdown.estimatedCategoryTotal);
+		expect(breakdown.usedTokens).toBeNull();
 		expect(Bun.stripANSI(renderContextUsage(breakdown, theme))).toContain(
-			"estimated; exact count unknown until next response",
+			"unknown/200k tokens (exact count unknown until next response)",
 		);
-		expect(buildReport(session)).toContain("estimated; exact count unknown until next response");
+		expect(Bun.stripANSI(renderContextUsage(breakdown, theme))).toContain("Free space (estimated)");
+		expect(buildReport(session)).toContain(
+			"Active context: unknown / 200,000 tokens (exact count unknown until next response)",
+		);
 		component.dispose();
+	});
+
+	it("copies a heuristic snapshot total verbatim instead of substituting category estimates", () => {
+		const usage: ContextUsage = {
+			tokens: 150_000,
+			contextWindow,
+			percent: 75,
+			source: "heuristic",
+		};
+		const session = makeSession(usage);
+		const breakdown = computeContextBreakdown(session);
+		const panel = Bun.stripANSI(renderContextUsage(breakdown, theme));
+		const report = buildReport(session);
+
+		expect(breakdown.source).toBe("heuristic");
+		expect(breakdown.usedTokens).toBe(usage.tokens);
+		expect(breakdown.estimatedCategoryTotal).not.toBe(usage.tokens);
+		expect(panel).toContain("Estimated category total:");
+		expect(report).toContain("Estimated category total:");
 	});
 });

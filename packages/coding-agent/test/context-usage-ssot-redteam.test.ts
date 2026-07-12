@@ -1,0 +1,380 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import type { AgentSideConnection, PromptRequest, SessionNotification } from "@agentclientprotocol/sdk";
+import { Agent, type AgentMessage } from "@gajae-code/agent-core";
+import { calculateContextTokens, estimateMessageTokensHeuristic } from "@gajae-code/agent-core/compaction";
+import { type AssistantMessage, getBundledModel, type Model, type Usage } from "@gajae-code/ai";
+import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
+import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
+import type { ContextUsage } from "@gajae-code/coding-agent/extensibility/extensions/types";
+import { AcpAgent } from "@gajae-code/coding-agent/modes/acp/acp-agent";
+import { StatusLineComponent } from "../src/modes/components/status-line";
+import { computeContextBreakdown, renderContextUsage } from "@gajae-code/coding-agent/modes/utils/context-usage";
+import { initTheme, theme } from "@gajae-code/coding-agent/modes/theme/theme";
+import { AgentSession, type AgentSessionEvent } from "@gajae-code/coding-agent/session/agent-session";
+import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
+import { convertToLlm } from "@gajae-code/coding-agent/session/messages";
+import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
+
+const contextWindow = 200_000;
+const sessions: AgentSession[] = [];
+const authStorages: AuthStorage[] = [];
+
+function createUsage(totalTokens: number): Usage {
+	return {
+		input: totalTokens,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+function createAssistant(options: { usage: Usage; timestamp?: number; text?: string }): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: options.text ?? "ok" }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason: "stop",
+		usage: options.usage,
+		timestamp: options.timestamp ?? Date.now(),
+	};
+}
+
+function estimateDisplayMessages(messages: readonly AgentMessage[]): number {
+	let tokens = 0;
+	for (const message of messages) {
+		for (const llmMessage of convertToLlm([message])) {
+			tokens += estimateMessageTokensHeuristic(llmMessage);
+		}
+	}
+	return tokens;
+}
+
+async function createSession(messages: AgentMessage[] = []): Promise<{
+	session: AgentSession;
+	sessionManager: SessionManager;
+}> {
+	const bundledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!bundledModel) throw new Error("Expected bundled anthropic model");
+
+	const authStorage = await AuthStorage.create(":memory:");
+	authStorage.setRuntimeApiKey("anthropic", "test-key");
+	authStorages.push(authStorage);
+
+	const sessionManager = SessionManager.inMemory();
+	const agent = new Agent({
+		initialState: {
+			model: { ...bundledModel, contextWindow },
+			systemPrompt: ["Test system prompt"],
+			tools: [],
+			messages,
+		},
+	});
+	const session = new AgentSession({
+		agent,
+		sessionManager,
+		settings: Settings.isolated({ "compaction.enabled": false, "todo.reminders": false }),
+		modelRegistry: new ModelRegistry(authStorage),
+	});
+	sessions.push(session);
+	return { session, sessionManager };
+}
+
+function requireContextUsage(session: AgentSession): ContextUsage {
+	const usage = session.getContextUsage();
+	if (!usage) throw new Error("Expected context usage");
+	return usage;
+}
+
+function createDisplaySession(
+	contextUsage: ContextUsage | undefined,
+	model: Model | null | undefined = testModel,
+): AgentSession {
+	const resolvedModel = model ?? undefined;
+	const messages: AgentMessage[] = [{ role: "user", content: "small prompt", timestamp: 1 }];
+	return {
+		state: { model: resolvedModel, messages },
+		model: resolvedModel,
+		messages,
+		systemPrompt: ["short system prompt"],
+		agent: { state: { tools: [] } },
+		skills: [],
+		settings: Settings.instance,
+		modelRegistry: { isUsingOAuth: () => false },
+		sessionManager: {
+			getUsageStatistics: () => ({
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				premiumRequests: 0,
+				cost: 0,
+			}),
+			getSessionName: () => "red-team",
+		},
+		isStreaming: false,
+		isFastModeActive: () => false,
+		getAsyncJobSnapshot: () => ({ running: [] }),
+		getGoalModeState: () => undefined,
+		getContextUsage: () => contextUsage,
+	} as unknown as AgentSession;
+}
+
+function configureForModel(component: StatusLineComponent): void {
+	component.updateSettings({
+		preset: "custom",
+		leftSegments: ["model"],
+		rightSegments: [],
+		showSkillHud: false,
+		showHookStatus: false,
+		sessionAccent: false,
+	});
+}
+
+const testModel: Model = {
+	id: "red-team-model",
+	name: "Red Team Model",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://example.invalid",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow,
+	maxTokens: 8_192,
+};
+
+class ZeroUsageAcpSession {
+	readonly sessionManager = SessionManager.inMemory();
+	readonly sessionId = this.sessionManager.getSessionId();
+	readonly agent = { sessionId: this.sessionId, waitForIdle: async () => this.waitForIdle() };
+	readonly customCommands: [] = [];
+	readonly extensionRunner = undefined;
+	readonly skills: [] = [];
+	readonly skillsSettings = { enableSkillCommands: false };
+	readonly contextUsage: ContextUsage = {
+		tokens: 0,
+		contextWindow,
+		percent: 0,
+		source: "provider_anchor",
+	};
+	readonly #listeners = new Set<(event: AgentSessionEvent) => void>();
+	isStreaming = false;
+	queuedMessageCount = 0;
+	model: Model | undefined = testModel;
+	thinkingLevel: string | undefined;
+	systemPrompt = "system";
+
+	get settings(): Settings {
+		return Settings.instance;
+	}
+
+	get sessionName(): string {
+		return this.sessionManager.getSessionName() ?? "redteam-session";
+	}
+
+	getAvailableModels(): Model[] {
+		return [testModel];
+	}
+
+	getAvailableThinkingLevels(): readonly string[] {
+		return [];
+	}
+
+	getPlanModeState(): undefined {
+		return undefined;
+	}
+
+	setClientBridge(_bridge: unknown): void {}
+
+	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
+
+	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
+	}
+
+	getContextUsage(): ContextUsage {
+		return this.contextUsage;
+	}
+
+	async prompt(_text: string): Promise<void> {
+		this.isStreaming = true;
+		const assistant = createAssistant({ usage: createUsage(1) });
+		for (const listener of this.#listeners) {
+			listener({ type: "agent_end", messages: [assistant] } as AgentSessionEvent);
+		}
+		this.isStreaming = false;
+	}
+
+	async waitForIdle(): Promise<void> {}
+
+	async drainAsyncJobDeliveriesForAcp(): Promise<boolean> {
+		return false;
+	}
+}
+
+beforeAll(async () => {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true });
+	await initTheme();
+});
+
+afterEach(async () => {
+	for (const session of sessions.splice(0)) {
+		await session.dispose();
+	}
+	for (const authStorage of authStorages.splice(0)) {
+		authStorage.close();
+	}
+	vi.restoreAllMocks();
+});
+
+afterAll(() => {
+	resetSettingsForTest();
+});
+
+describe("context usage SSOT red-team probes", () => {
+	it("rejects a timestamp-less stale assistant at a compaction boundary", async () => {
+		const { session, sessionManager } = await createSession();
+		const staleAssistant = createAssistant({ usage: createUsage(150_000), text: "pre-compaction response" });
+		delete (staleAssistant as { timestamp?: number }).timestamp;
+
+		const staleAssistantId = sessionManager.appendMessage(staleAssistant);
+		session.agent.appendMessage(staleAssistant);
+		sessionManager.appendCompaction("summary", "summary", staleAssistantId, 150_000);
+		// This represents delayed persistence of the old message after the compaction entry.
+		sessionManager.appendMessage(staleAssistant);
+
+		expect(requireContextUsage(session)).toEqual({
+			tokens: null,
+			contextWindow,
+			percent: null,
+			source: "unknown",
+		});
+	});
+
+	it("uses an earlier positive post-compaction anchor after a zero-usage success", async () => {
+		const { session, sessionManager } = await createSession();
+		const keptUser = { role: "user" as const, content: "kept", timestamp: Date.now() - 10_000 };
+		const keptUserId = sessionManager.appendMessage(keptUser);
+		session.agent.appendMessage(keptUser);
+		sessionManager.appendCompaction("summary", "summary", keptUserId, 1_000);
+
+		const positive = createAssistant({ usage: createUsage(150_000), timestamp: Date.now() + 1 });
+		const zero = createAssistant({ usage: createUsage(0), timestamp: Date.now() + 2 });
+		sessionManager.appendMessage(positive);
+		session.agent.appendMessage(positive);
+		sessionManager.appendMessage(zero);
+		session.agent.appendMessage(zero);
+
+		const usage = requireContextUsage(session);
+		expect(usage.tokens).toBe(calculateContextTokens(positive.usage) + estimateDisplayMessages([zero]));
+		expect(usage.source).toBe("provider_anchor");
+	});
+
+	it("renders provider usage above the context window without negative free/reserve tokens", () => {
+		const usage: ContextUsage = {
+			tokens: 300_000,
+			contextWindow,
+			percent: 150,
+			source: "provider_anchor",
+		};
+		const session = createDisplaySession(usage);
+		const component = new StatusLineComponent(session);
+		configureForModel(component);
+
+		const breakdown = computeContextBreakdown(session);
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		expect(breakdown.source).toBe("provider_anchor");
+		expect(breakdown.usedTokens).toBe(300_000);
+		expect(breakdown.autoCompactBufferTokens).toBeGreaterThanOrEqual(0);
+		expect(breakdown.freeTokens).toBe(0);
+		expect(rendered).toContain("150.0%");
+		expect(() => renderContextUsage(breakdown, theme)).not.toThrow();
+		component.dispose();
+	});
+
+	it("uses the status-line heuristic fallback when context usage is unavailable with no model", () => {
+		const session = createDisplaySession(undefined, null);
+		const component = new StatusLineComponent(session);
+		configureForModel(component);
+
+		const cached = component.getCachedContextBreakdown();
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		expect(cached.usedTokens).toBeGreaterThan(0);
+		expect(cached.contextWindow).toBe(0);
+		expect(rendered).toContain("no-model");
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["context_pct"],
+			rightSegments: [],
+			showSkillHud: false,
+			showHookStatus: false,
+			sessionAccent: false,
+		});
+		expect(Bun.stripANSI(component.render(160).join("\n"))).toContain("?/0");
+		component.dispose();
+	});
+
+	it("keeps reserve and free arithmetic non-negative for heuristic and provider-anchor breakdowns", () => {
+		const heuristic = computeContextBreakdown(
+			createDisplaySession({ tokens: 1, contextWindow, percent: 0.0005, source: "heuristic" }),
+		);
+		const providerAnchor = computeContextBreakdown(
+			createDisplaySession({ tokens: 300_000, contextWindow, percent: 150, source: "provider_anchor" }),
+		);
+
+		for (const breakdown of [heuristic, providerAnchor]) {
+			expect(breakdown.autoCompactBufferTokens).toBeGreaterThanOrEqual(0);
+			expect(breakdown.freeTokens).toBeGreaterThanOrEqual(0);
+		}
+		expect(heuristic.source).toBe("heuristic");
+		expect(providerAnchor.source).toBe("provider_anchor");
+	});
+
+	it("emits ACP usage_update for a known zero-token snapshot", async () => {
+		const updates: SessionNotification[] = [];
+		const abortController = new AbortController();
+		const connection = {
+			sessionUpdate: async (notification: SessionNotification) => {
+				updates.push(notification);
+			},
+			signal: abortController.signal,
+			closed: Promise.withResolvers<void>().promise,
+		} as unknown as AgentSideConnection;
+		const session = new ZeroUsageAcpSession();
+		const agent = new AcpAgent(connection, async () => session as unknown as AgentSession);
+
+		try {
+			const created = await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
+			await agent.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "zero usage" }] } as PromptRequest);
+
+			const usageUpdate = updates.find(update => update.update.sessionUpdate === "usage_update");
+			expect(usageUpdate).toBeDefined();
+			expect(usageUpdate?.update).toMatchObject({
+				sessionUpdate: "usage_update",
+				size: contextWindow,
+				used: 0,
+			});
+		} finally {
+			abortController.abort();
+		}
+	});
+
+	it("retains only heuristic deltas after a provider anchor", async () => {
+		const { session, sessionManager } = await createSession();
+		const anchor = createAssistant({ usage: createUsage(150_000) });
+		const trailing = { role: "user" as const, content: "unsent", timestamp: Date.now() + 1 };
+		sessionManager.appendMessage(anchor);
+		sessionManager.appendMessage(trailing);
+		session.agent.replaceMessages([anchor, trailing]);
+
+		const usage = requireContextUsage(session);
+		expect(usage.tokens).toBe(calculateContextTokens(anchor.usage) + estimateDisplayMessages([trailing]));
+		expect(usage.source).toBe("provider_anchor");
+	});
+});

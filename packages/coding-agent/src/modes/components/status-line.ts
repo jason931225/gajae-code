@@ -706,7 +706,7 @@ export class StatusLineComponent implements Component {
 				: contextUsage.percent
 			: contextWindow > 0
 				? (contextTokens / contextWindow) * 100
-				: 0;
+				: null;
 		// Suppress the inline model percentage when a standalone context_pct
 		// segment is also rendered, so the value is not shown twice.
 		const contextPctSegmentActive =

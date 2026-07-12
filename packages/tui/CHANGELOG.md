@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Terminal graphics protocols are no longer assumed under tmux/screen: the blind Kitty fallback for `TERM=tmux-*`/`screen-*` (and detected kitty/iTerm2 protocols leaking through multiplexer env) emitted raw graphics escapes the multiplexer consumed, leaving the Gajae composer pet invisible while its out-of-band cursor writes intermittently corrupted the TUI frame. Image protocols are now dropped under a multiplexer unless `PI_FORCE_IMAGE_PROTOCOL` forces one, and the startup sixel capability probe now also runs under tmux/screen so sixel-capable chains (e.g. sixel-built tmux on a sixel terminal) re-enable graphics automatically via DA1 evidence.
 
 ## [0.10.0] - 2026-07-12
 ### Fixed

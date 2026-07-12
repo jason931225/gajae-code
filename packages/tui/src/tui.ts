@@ -9,7 +9,13 @@ import { getKeybindings } from "./keybindings";
 import { isKeyRelease } from "./keys";
 import { renderMetrics } from "./metrics";
 import type { Terminal } from "./terminal";
-import { ImageProtocol, setCellDimensions, setTerminalImageProtocol, TERMINAL } from "./terminal-capabilities";
+import {
+	ImageProtocol,
+	isUnderTerminalMultiplexer,
+	setCellDimensions,
+	setTerminalImageProtocol,
+	TERMINAL,
+} from "./terminal-capabilities";
 import {
 	Ellipsis,
 	extractSegments,
@@ -1008,8 +1014,7 @@ export class TUI extends Container {
 
 	#querySixelSupport(): void {
 		if (TERMINAL.imageProtocol) return;
-		if (process.platform !== "win32") return;
-		if (!Bun.env.WT_SESSION) return;
+		if (!this.#isSixelProbeCandidate()) return;
 		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
 
 		this.#clearSixelProbeState();
@@ -1021,6 +1026,20 @@ export class TUI extends Container {
 		this.#sixelProbeTimeout = setTimeout(() => {
 			this.#finishSixelProbe(false);
 		}, 250);
+	}
+
+	/**
+	 * Terminals worth probing for sixel support:
+	 * - Windows Terminal (>=1.22 renders sixel but exposes no env marker), and
+	 * - tmux/screen, which answer DA1 themselves and advertise sixel (";4")
+	 *   only when they can composite sixel for the attached client. Sixel is
+	 *   the only graphics path that survives a multiplexer without DCS
+	 *   passthrough wrapping, so a positive probe re-enables images that the
+	 *   multiplexer suppression in terminal-capabilities dropped.
+	 */
+	#isSixelProbeCandidate(): boolean {
+		if (process.platform === "win32" && Bun.env.WT_SESSION) return true;
+		return isUnderTerminalMultiplexer();
 	}
 
 	#handleSixelProbeInput(data: string): InputListenerResult {

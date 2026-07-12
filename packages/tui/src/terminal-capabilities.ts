@@ -53,6 +53,17 @@ export function isNotificationSuppressed(): boolean {
 	return value === "off" || value === "0" || value === "false";
 }
 
+/**
+ * Returns whether the process runs under a terminal multiplexer (tmux or GNU
+ * screen). Multiplexers intercept graphics escapes and OSC 8 hyperlinks
+ * instead of forwarding them to the outer terminal.
+ */
+export function isUnderTerminalMultiplexer(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (env.TMUX) return true;
+	const term = env.TERM?.toLowerCase() ?? "";
+	return term.startsWith("tmux") || term.startsWith("screen");
+}
+
 let terminalGraphicsFallbackDepth = 0;
 let cursorNeutralImageAllowedDepth = 0;
 
@@ -137,7 +148,7 @@ function getFallbackImageProtocol(terminalId: TerminalId): ImageProtocol | null 
 	if (!process.stdout.isTTY) return null;
 	if (terminalId === "vscode" || terminalId === "alacritty") return null;
 	const term = Bun.env.TERM?.toLowerCase() ?? "";
-	if (term.includes("screen") || term.includes("tmux") || term.includes("ghostty")) {
+	if (term.includes("ghostty")) {
 		return ImageProtocol.Kitty;
 	}
 	return null;
@@ -220,10 +231,10 @@ export const TERMINAL = (() => {
 			);
 		}
 	}
+	const underMultiplexer = isUnderTerminalMultiplexer();
 	// tmux and screen multiplexers do not reliably forward OSC 8 hyperlinks
 	// to the outer terminal, so force them off regardless of detected terminal.
-	const term = Bun.env.TERM?.toLowerCase() ?? "";
-	if (resolved.hyperlinks && (Bun.env.TMUX || term.startsWith("tmux") || term.startsWith("screen"))) {
+	if (resolved.hyperlinks && underMultiplexer) {
 		resolved = new TerminalInfo(
 			resolved.id,
 			resolved.imageProtocol,
@@ -231,6 +242,15 @@ export const TERMINAL = (() => {
 			false,
 			resolved.notifyProtocol,
 		);
+	}
+	// tmux and screen consume raw kitty/iTerm2 graphics escapes instead of
+	// forwarding them (no DCS passthrough wrapping is emitted), so a detected
+	// image protocol draws nothing while its out-of-band cursor writes corrupt
+	// the frame. Drop the protocol under a multiplexer unless one was forced
+	// explicitly; the runtime sixel probe re-enables sixel when the
+	// multiplexer proves end-to-end support via DA1.
+	if (resolved.imageProtocol && forcedImageProtocol === undefined && underMultiplexer) {
+		resolved = new TerminalInfo(resolved.id, null, resolved.trueColor, resolved.hyperlinks, resolved.notifyProtocol);
 	}
 	return resolved;
 })();

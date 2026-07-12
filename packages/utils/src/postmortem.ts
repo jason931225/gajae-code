@@ -7,6 +7,7 @@
  */
 import inspector from "node:inspector";
 import { isMainThread } from "node:worker_threads";
+import { BROKEN_PIPE_EXIT_CODE, isBrokenPipeError } from "./broken-pipe";
 import * as logger from "./logger";
 import { safeStderrWrite } from "./safe-stderr";
 
@@ -93,6 +94,18 @@ if (isMainThread) {
 			safeStderrWrite(`Inspector opened: ${url}\n`);
 		})
 		.on("uncaughtException", async err => {
+			if (isBrokenPipeError(err)) {
+				// The peer of one of our output pipes exited before we finished
+				// writing — typically a shell consumer of stdout, e.g.
+				// `gjc --help | head -1`. Standard CLI behavior is SIGPIPE
+				// semantics: terminate quietly instead of dumping a fatal
+				// internal-error report and failing with exit code 1. No logging
+				// here: a console log transport would write to the same broken
+				// pipe and re-enter this handler.
+				await runCleanup(Reason.UNCAUGHT_EXCEPTION);
+				process.exit(BROKEN_PIPE_EXIT_CODE);
+				return;
+			}
 			safeStderrWrite(formatFatalError("Uncaught Exception", err));
 			logger.error("Uncaught exception", { err, stack: err.stack });
 			await runCleanup(Reason.UNCAUGHT_EXCEPTION);
@@ -100,6 +113,14 @@ if (isMainThread) {
 		})
 		.on("unhandledRejection", async reason => {
 			const err = reason instanceof Error ? reason : new Error(String(reason));
+			if (isBrokenPipeError(err)) {
+				// A broken output pipe surfacing through a rejected write promise
+				// gets the same quiet-shutdown (and no-logging) policy as the
+				// uncaughtException broken-pipe branch above.
+				await runCleanup(Reason.UNHANDLED_REJECTION);
+				process.exit(BROKEN_PIPE_EXIT_CODE);
+				return;
+			}
 			safeStderrWrite(formatFatalError("Unhandled Rejection", err));
 			logger.error("Unhandled rejection", { err, stack: err.stack });
 			await runCleanup(Reason.UNHANDLED_REJECTION);

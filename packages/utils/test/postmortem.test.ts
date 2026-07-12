@@ -65,3 +65,52 @@ describe("postmortem cleanup re-entry", () => {
 		expect(hasRecursiveCleanupError(combinedOutput(result))).toBe(false);
 	});
 });
+
+describe("postmortem broken-pipe policy", () => {
+	// Regression for the `gjc --help | true` crash: a consumer that closes our
+	// stdout pipe must terminate the process quietly (SIGPIPE semantics, exit
+	// 141) instead of crashing with a fatal "Uncaught Exception" dump.
+	async function runPipelineScenario(scenario: string): Promise<ScenarioResult> {
+		const proc = Bun.spawn(
+			[
+				"bash",
+				"-c",
+				`${JSON.stringify(process.execPath)} ${JSON.stringify(fixturePath)} ${JSON.stringify(scenario)} | true; exit \${PIPESTATUS[0]}`,
+			],
+			{
+				cwd: path.join(import.meta.dir, ".."),
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		return { stdout, stderr, exitCode };
+	}
+
+	it("exits quietly with 141 when the stdout pipe consumer is gone (uncaughtException path)", async () => {
+		const result = await runPipelineScenario("broken-pipe-stdout-write");
+
+		expect(result.exitCode).toBe(141); // 128 + SIGPIPE
+		expect(result.stderr).not.toContain("[Uncaught Exception]");
+		expect(result.stderr).not.toContain("EPIPE");
+	}, 15_000);
+
+	it("exits quietly with 141 when a broken-pipe write surfaces as an unhandled rejection", async () => {
+		const result = await runScenario("broken-pipe-unhandled-rejection");
+
+		expect(result.exitCode).toBe(141);
+		expect(result.stderr).not.toContain("[Unhandled Rejection]");
+	}, 15_000);
+
+	it("keeps the fatal dump and exit code 1 for non-pipe uncaught exceptions", async () => {
+		const result = await runScenario("non-pipe-uncaught-exception");
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("[Uncaught Exception]");
+		expect(result.stderr).toContain("fixture: genuine fatal error");
+	}, 15_000);
+});

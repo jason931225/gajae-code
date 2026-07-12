@@ -11,7 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 
-import { $pickenv, logger, readLines, Snowflake } from "@gajae-code/utils";
+import { $pickenv, isBrokenPipeError, logger, readLines, Snowflake } from "@gajae-code/utils";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -289,7 +289,16 @@ export async function runRpcMode(
 		process.stdout.write(line);
 	};
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
-		frameSink(`${JSON.stringify(obj)}\n`);
+		try {
+			frameSink(`${JSON.stringify(obj)}\n`);
+		} catch (err) {
+			// The frame consumer (stdio parent or UDS client) vanished mid-write.
+			// Dropping the frame beats crashing the whole RPC server; the sink is
+			// swappable (--listen serves later clients), so do not latch it dead —
+			// just skip frames while the current peer is gone.
+			if (!isBrokenPipeError(err)) throw err;
+			logger.debug("RPC frame dropped: sink pipe is broken", { type: (obj as { type?: string }).type });
+		}
 	};
 	// stdio announces readiness immediately; the UDS server announces it per client connection.
 	if (!options?.listen) {

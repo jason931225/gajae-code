@@ -6,7 +6,7 @@
  * - `gjc --mode json "prompt"` - JSON event stream
  */
 import { type AssistantMessage, type ImageContent, isContextOverflow } from "@gajae-code/ai";
-import { logger, sanitizeText } from "@gajae-code/utils";
+import { isBrokenPipeError, logger, sanitizeText } from "@gajae-code/utils";
 import type { AgentSession } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { initializeExtensions } from "./runtime-init";
@@ -65,11 +65,28 @@ function formatContextOverflowError(message: AssistantMessage, autoCompactionEna
 export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<void> {
 	const { mode, messages = [], initialMessage, initialImages } = options;
 
+	// Print-mode stdout is routinely piped onward (`gjc -p ... | jq`, `| head`).
+	// When that consumer exits early, Bun surfaces the next write as a
+	// synchronous EPIPE throw. Inside the agent-event subscription below such a
+	// throw would rip through event dispatch (and become a fatal uncaught
+	// exception), so once the pipe is known-broken all further stdout writes
+	// latch to a no-op: the run still completes and the session persists.
+	let stdoutBroken = false;
+	const writeStdout = (chunk: string): void => {
+		if (stdoutBroken) return;
+		try {
+			process.stdout.write(chunk);
+		} catch (err) {
+			if (!isBrokenPipeError(err)) throw err;
+			stdoutBroken = true;
+		}
+	};
+
 	// Emit session header for JSON mode
 	if (mode === "json") {
 		const header = session.sessionManager.getHeader();
 		if (header) {
-			process.stdout.write(`${JSON.stringify(header)}\n`);
+			writeStdout(`${JSON.stringify(header)}\n`);
 		}
 	}
 	// Set up extensions for print mode (no UI, no command context)
@@ -88,7 +105,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	session.subscribe(event => {
 		// In JSON mode, output all events
 		if (mode === "json") {
-			process.stdout.write(`${JSON.stringify(event)}\n`);
+			writeStdout(`${JSON.stringify(event)}\n`);
 		}
 	});
 
@@ -151,7 +168,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			// Output text content
 			for (const content of assistantMsg.content) {
 				if (content.type === "text") {
-					process.stdout.write(`${sanitizeText(content.text)}\n`);
+					writeStdout(`${sanitizeText(content.text)}\n`);
 				}
 			}
 		}
@@ -160,10 +177,17 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// Ensure stdout is fully flushed before returning
 	// This prevents race conditions where the process exits before all output is written
 	await new Promise<void>((resolve, reject) => {
-		process.stdout.write("", err => {
-			if (err) reject(err);
-			else resolve();
-		});
+		try {
+			process.stdout.write("", err => {
+				if (err && !isBrokenPipeError(err)) reject(err);
+				else resolve();
+			});
+		} catch (err) {
+			// Bun throws synchronously when the pipe consumer is already gone;
+			// there is nothing left to flush to, so this is not an error.
+			if (isBrokenPipeError(err)) resolve();
+			else reject(err);
+		}
 	});
 
 	await session.dispose();

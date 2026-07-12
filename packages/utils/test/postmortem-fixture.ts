@@ -55,6 +55,38 @@ async function runCompletedCleanupExitNoop(): Promise<void> {
 	writeResult({ count });
 }
 
+async function runBrokenPipeStdoutWrite(): Promise<void> {
+	// The test harness runs this scenario as `bun fixture.ts ... | true`, so the
+	// stdout pipe's read end is closed almost immediately. Under Bun the write
+	// below then throws a synchronous EPIPE from an async tick, which must reach
+	// the postmortem uncaughtException handler — NOT be caught here.
+	await Bun.sleep(50); // let `true` exit and close the pipe's read end
+	setTimeout(async () => {
+		await Promise.resolve();
+		for (let i = 0; i < 256; i++) {
+			process.stdout.write(`${"x".repeat(8192)}\n`);
+		}
+	}, 10);
+	await Bun.sleep(2_000);
+}
+
+async function runBrokenPipeUnhandledRejection(): Promise<void> {
+	const epipe = Object.assign(new Error("EPIPE: broken pipe, write"), {
+		code: "EPIPE",
+		syscall: "write",
+		errno: -32,
+	});
+	void Promise.reject(epipe);
+	await Bun.sleep(2_000);
+}
+
+async function runNonPipeUncaughtException(): Promise<void> {
+	setTimeout(() => {
+		throw new Error("fixture: genuine fatal error");
+	}, 10);
+	await Bun.sleep(2_000);
+}
+
 const scenario = process.argv[2];
 switch (scenario) {
 	case "exit-reentry-while-running":
@@ -65,6 +97,15 @@ switch (scenario) {
 		break;
 	case "completed-cleanup-exit-noop":
 		await runCompletedCleanupExitNoop();
+		break;
+	case "broken-pipe-stdout-write":
+		await runBrokenPipeStdoutWrite();
+		break;
+	case "broken-pipe-unhandled-rejection":
+		await runBrokenPipeUnhandledRejection();
+		break;
+	case "non-pipe-uncaught-exception":
+		await runNonPipeUncaughtException();
 		break;
 	default:
 		throw new Error(`unknown postmortem fixture scenario: ${scenario ?? "(missing)"}`);

@@ -8,6 +8,7 @@ import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
 import type { ContextUsage } from "@gajae-code/coding-agent/extensibility/extensions/types";
 import { AcpAgent } from "@gajae-code/coding-agent/modes/acp/acp-agent";
+import type { ExtensionRunner } from "@gajae-code/coding-agent/extensibility/extensions/runner";
 import { StatusLineComponent } from "../src/modes/components/status-line";
 import {
 	computeContextBreakdown,
@@ -63,7 +64,7 @@ function estimateDisplayMessages(messages: readonly AgentMessage[]): number {
 	return tokens;
 }
 
-async function createSession(messages: AgentMessage[] = []): Promise<{
+async function createSession(messages: AgentMessage[] = [], extensionRunner?: ExtensionRunner): Promise<{
 	session: AgentSession;
 	sessionManager: SessionManager;
 }> {
@@ -87,6 +88,7 @@ async function createSession(messages: AgentMessage[] = []): Promise<{
 		agent,
 		sessionManager,
 		settings: Settings.isolated({ "compaction.enabled": false, "todo.reminders": false }),
+		extensionRunner,
 		modelRegistry: new ModelRegistry(authStorage),
 	});
 	sessions.push(session);
@@ -532,6 +534,161 @@ describe("context usage SSOT red-team probes", () => {
 
 		await session.prompt("pending", { expandPromptTemplates: false });
 		expect(autoCompactionStarts).toBe(1);
+	});
+
+	it("invalidates an in-place non-last message mutation after touchContext", async () => {
+		const earlier = { role: "user" as const, content: "short earlier message", timestamp: 1 };
+		const last = { role: "user" as const, content: "unchanged tail", timestamp: 2 };
+		const { session, sessionManager } = await createSession([earlier, last]);
+		const before = requireContextUsage(session);
+		const revision = sessionManager.revisionSnapshot();
+
+		// Direct mutations bypass Agent-owned mutators, so callers must explicitly
+		// notify context consumers after changing committed context in place.
+		const liveEarlier = session.messages[0] as { content: string };
+		liveEarlier.content += " expanded earlier content".repeat(400);
+		session.agent.touchContext();
+		const after = requireContextUsage(session);
+		const { session: independentlyRecomputed } = await createSession([
+			{ ...earlier, content: liveEarlier.content },
+			{ ...last },
+		]);
+		const expectedAfterMutation = requireContextUsage(independentlyRecomputed);
+
+		expect(session.messages.at(-1)).toBe(last);
+		expect(sessionManager.revisionSnapshot()).toEqual(revision);
+		expect(after).toEqual(expectedAfterMutation);
+		expect(after.tokens).toBeGreaterThan(before.tokens ?? 0);
+	});
+
+	it("invalidates the last-assistant snapshot when usage attaches or stop reason changes", async () => {
+		const assistant = createAssistant({ usage: createUsage(150_000), text: "partial response" });
+		delete (assistant as Partial<AssistantMessage>).usage;
+		const { session } = await createSession([assistant]);
+		const before = requireContextUsage(session);
+		expect(before.source).toBe("heuristic");
+
+		const liveAssistant = session.messages[0] as AssistantMessage;
+		liveAssistant.usage = createUsage(150_000);
+		const attached = requireContextUsage(session);
+		expect(attached).toMatchObject({
+			tokens: calculateContextTokens(liveAssistant.usage),
+			source: "provider_anchor",
+		});
+
+		liveAssistant.stopReason = "aborted";
+		const aborted = requireContextUsage(session);
+		expect(aborted).not.toBe(attached);
+		expect(aborted.tokens).toBe(estimateDisplayMessages([liveAssistant]) + computeNonMessageTokens(session));
+		expect(aborted.source).toBe("heuristic");
+	});
+
+	it("invalidates after same-length replacement with an unchanged-shape last message", async () => {
+		const earlier = { role: "user" as const, content: "short earlier message", timestamp: 1 };
+		const last = { role: "user" as const, content: "unchanged tail", timestamp: 2 };
+		const { session, sessionManager } = await createSession([earlier, last]);
+		const before = requireContextUsage(session);
+		const revision = sessionManager.revisionSnapshot();
+
+		session.agent.replaceMessages([
+			{ ...earlier, content: "replacement earlier content".repeat(400) },
+			{ ...last },
+		]);
+		const after = requireContextUsage(session);
+
+		expect(session.messages).toHaveLength(2);
+		expect(session.messages.at(-1)).not.toBe(last);
+		expect(sessionManager.revisionSnapshot()).toEqual(revision);
+		expect(after).not.toBe(before);
+		expect(after.tokens).toBeGreaterThan(before.tokens ?? 0);
+	});
+
+	it("invalidates after real compaction and returns unknown until a new assistant responds", async () => {
+		const extensionRunner = {
+			hasHandlers: (eventType: string) => eventType === "session_before_compact",
+			emit: async (event: {
+				type: string;
+				preparation?: { firstKeptEntryId: string; tokensBefore: number };
+			}) => {
+				if (event.type !== "session_before_compact" || !event.preparation) return undefined;
+				return {
+					compaction: {
+						summary: "compacted summary",
+						shortSummary: "compacted",
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						details: {},
+					},
+				};
+			},
+		} as unknown as ExtensionRunner;
+		const earlier = { role: "user" as const, content: "history to compact ".repeat(100), timestamp: 1 };
+		const last = { role: "user" as const, content: "latest user message", timestamp: 2 };
+		const { session, sessionManager } = await createSession([earlier, last], extensionRunner);
+		sessionManager.appendMessage(earlier);
+		sessionManager.appendMessage(last);
+		session.settings.override("compaction.keepRecentTokens", 1);
+		requireContextUsage(session);
+		const revision = sessionManager.revisionSnapshot();
+
+		await session.compact();
+
+		expect(sessionManager.revisionSnapshot().entry).toBeGreaterThan(revision.entry);
+		expect(requireContextUsage(session)).toEqual({
+			tokens: null,
+			contextWindow,
+			percent: null,
+			source: "unknown",
+		});
+	});
+
+	it("invalidates when the model id changes without changing its context window", async () => {
+		const { session } = await createSession([{ role: "user", content: "prompt", timestamp: 1 }]);
+		const before = requireContextUsage(session);
+		const model = session.model;
+		if (!model) throw new Error("Expected model");
+
+		session.agent.setModel({ ...model, id: "same-window-cache-invalidation-model", contextWindow });
+		const after = requireContextUsage(session);
+
+		expect(after).not.toBe(before);
+		expect(after.contextWindow).toBe(contextWindow);
+		expect(after.tokens).toBe(before.tokens);
+	});
+
+	it("invalidates a same-length system-prompt swap via setSystemPrompt", async () => {
+		const sparsePrompt = "a".repeat(1_000);
+		const densePrompt = "中".repeat(1_000);
+		const { session } = await createSession();
+		session.agent.setSystemPrompt([sparsePrompt]);
+		const sparseTokens = computeNonMessageTokens(session);
+		const before = requireContextUsage(session);
+
+		session.agent.setSystemPrompt([densePrompt]);
+		const denseTokens = computeNonMessageTokens(session);
+		const after = requireContextUsage(session);
+
+		expect(densePrompt).toHaveLength(sparsePrompt.length);
+		expect(denseTokens).toBeGreaterThan(sparseTokens);
+		expect(after.tokens).toBe(denseTokens);
+		expect(after.tokens).toBeGreaterThan(before.tokens ?? 0);
+	});
+
+	it("refreshes every streamed last-assistant text growth", async () => {
+		const assistant = createAssistant({ usage: createUsage(1), stopReason: "aborted", text: "stream" });
+		const { session } = await createSession([assistant]);
+		const liveAssistant = session.messages[0] as AssistantMessage;
+		const textBlock = liveAssistant.content[0];
+		if (!textBlock || textBlock.type !== "text") throw new Error("Expected text block");
+
+		let previous = requireContextUsage(session);
+		for (let step = 0; step < 3; step++) {
+			textBlock.text += " streamed growth".repeat(100);
+			const current = requireContextUsage(session);
+			expect(current).not.toBe(previous);
+			expect(current.tokens).toBeGreaterThan(previous.tokens ?? 0);
+			previous = current;
+		}
 	});
 
 });

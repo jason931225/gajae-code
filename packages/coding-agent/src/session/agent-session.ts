@@ -1246,6 +1246,7 @@ export class AgentSession {
 	#contextUsageCache: { key: string; value: ContextUsage } | undefined;
 	#contextUsageMessageIds = new WeakMap<AgentMessage, number>();
 	#nextContextUsageMessageId = 0;
+	#contextUsageEstimateCount = 0;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -2223,6 +2224,7 @@ export class AgentSession {
 			(this.#planCompactAbortPending || this.#silentAbortPending)
 		) {
 			(event.message as AssistantMessage).errorMessage = SILENT_ABORT_MARKER;
+			this.agent.touchContext();
 			this.#planCompactAbortPending = false;
 			this.#silentAbortPending = false;
 		}
@@ -11470,7 +11472,8 @@ export class AgentSession {
 		if (contextWindow <= 0) return undefined;
 
 		const cacheKey = this.#contextUsageCacheKey(model, contextWindow);
-		if (this.#contextUsageCache?.key === cacheKey) return this.#contextUsageCache.value;
+		if (this.#contextUsageCache?.key === cacheKey) return { ...this.#contextUsageCache.value };
+		this.#contextUsageEstimateCount++;
 
 		// After compaction, the last assistant usage reflects pre-compaction context size.
 		// We can only trust usage from an assistant that responded after the latest compaction.
@@ -11493,7 +11496,11 @@ export class AgentSession {
 		}
 
 		this.#contextUsageCache = { key: cacheKey, value };
-		return value;
+		return { ...value };
+	}
+
+	getContextUsageObservabilityForTests(): { estimateCount: number } {
+		return { estimateCount: this.#contextUsageEstimateCount };
 	}
 
 	#contextUsageCacheKey(model: Model, contextWindow: number): string {
@@ -11501,7 +11508,7 @@ export class AgentSession {
 		const lastMessage = messages[messages.length - 1];
 		// Entry and leaf revisions change whenever the active branch changes, avoiding getBranch() on warm reads.
 		const revision = this.sessionManager.revisionSnapshot();
-		return `${model.id}|${contextWindow}|${messages.length}|${this.#contextUsageMessageFingerprint(lastMessage)}|${revision.entry}:${revision.leaf}|${this.#computeContextUsageNonMessageInputsKey()}`;
+		return `${this.agent.contextRevision}|${model.id}|${contextWindow}|${messages.length}|${this.#contextUsageMessageFingerprint(lastMessage)}|${revision.entry}:${revision.leaf}|${this.#computeContextUsageNonMessageInputsKey()}`;
 	}
 
 	#contextUsageMessageFingerprint(message: AgentMessage | undefined): string {

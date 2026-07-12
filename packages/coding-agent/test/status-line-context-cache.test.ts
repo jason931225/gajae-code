@@ -5,7 +5,7 @@
  * avoid materializing the session branch or re-estimating the message history.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { Agent, type AgentMessage } from "@gajae-code/agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@gajae-code/agent-core";
 import { getBundledModel } from "@gajae-code/ai";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
@@ -71,8 +71,26 @@ function requireContextUsage(session: AgentSession) {
 	return usage;
 }
 
+function getContextUsageEstimateCount(session: AgentSession): number {
+	return session.getContextUsageObservabilityForTests().estimateCount;
+}
+
+function expectContextUsageRecomputed(session: AgentSession, previousEstimateCount: number): void {
+	expect(getContextUsageEstimateCount(session)).toBe(previousEstimateCount + 1);
+}
+
+function createTestTool(name: string, description: string): AgentTool {
+	return {
+		name,
+		label: name,
+		description,
+		parameters: {},
+		execute: async () => ({ content: [], details: {} }),
+	} as unknown as AgentTool;
+}
+
 describe("AgentSession display context snapshot cache", () => {
-	it("keeps warm context usage refreshes O(1) without rematerializing the branch", async () => {
+	it("keeps warm context usage refreshes O(1) without rematerializing the branch or re-estimating history", async () => {
 		const { session, sessionManager } = await createSession(
 			Array.from({ length: 200 }, (_, index) => ({
 				role: "user" as const,
@@ -82,18 +100,19 @@ describe("AgentSession display context snapshot cache", () => {
 		);
 
 		const materializationsBeforeWarmup = sessionManager.getObservabilityStatsForTests().getBranchMaterializerCallCount;
+		const estimatesBeforeWarmup = getContextUsageEstimateCount(session);
 		requireContextUsage(session);
 		const materializationsAfterWarmup = sessionManager.getObservabilityStatsForTests().getBranchMaterializerCallCount;
+		const estimatesAfterWarmup = getContextUsageEstimateCount(session);
 		expect(materializationsAfterWarmup - materializationsBeforeWarmup).toBe(1);
+		expect(estimatesAfterWarmup).toBe(estimatesBeforeWarmup + 1);
 
-		const start = performance.now();
 		for (let index = 0; index < 20; index++) requireContextUsage(session);
-		const elapsedMs = performance.now() - start;
 
 		expect(sessionManager.getObservabilityStatsForTests().getBranchMaterializerCallCount).toBe(
 			materializationsAfterWarmup,
 		);
-		expect(elapsedMs).toBeLessThan(100);
+		expect(getContextUsageEstimateCount(session)).toBe(estimatesAfterWarmup);
 	});
 
 	it("invalidates when the streaming last message grows in place", async () => {
@@ -101,9 +120,11 @@ describe("AgentSession display context snapshot cache", () => {
 		const streaming = session.messages[0] as { content: string };
 
 		const before = requireContextUsage(session);
+		const estimateCount = getContextUsageEstimateCount(session);
 		streaming.content += " longer streamed content".repeat(100);
 		const after = requireContextUsage(session);
 
+		expectContextUsageRecomputed(session, estimateCount);
 		expect(after.tokens).toBeGreaterThan(before.tokens ?? 0);
 	});
 
@@ -111,20 +132,87 @@ describe("AgentSession display context snapshot cache", () => {
 		const { session } = await createSession([{ role: "user", content: "first", timestamp: 1 }]);
 
 		const before = requireContextUsage(session);
+		const estimateCount = getContextUsageEstimateCount(session);
 		session.agent.appendMessage({ role: "user", content: "second message ".repeat(100), timestamp: 2 });
 		const after = requireContextUsage(session);
 
+		expectContextUsageRecomputed(session, estimateCount);
 		expect(after.tokens).toBeGreaterThan(before.tokens ?? 0);
 	});
 
-	it("invalidates when the message array is replaced at the same length", async () => {
-		const { session } = await createSession([{ role: "user", content: "short", timestamp: 1 }]);
+	it("invalidates same-length replacement that keeps the tail object", async () => {
+		const earlier = { role: "user" as const, content: "short earlier message", timestamp: 1 };
+		const tail = { role: "user" as const, content: "unchanged tail", timestamp: 2 };
+		const { session } = await createSession([earlier, tail]);
 
 		const before = requireContextUsage(session);
-		session.agent.replaceMessages([{ role: "user", content: "replacement ".repeat(100), timestamp: 1 }]);
+		const estimateCount = getContextUsageEstimateCount(session);
+		session.agent.replaceMessages([{ ...earlier, content: "replacement earlier content".repeat(100) }, tail]);
 		const after = requireContextUsage(session);
 
+		expect(session.messages.at(-1)).toBe(tail);
+		expectContextUsageRecomputed(session, estimateCount);
 		expect(after.tokens).toBeGreaterThan(before.tokens ?? 0);
+	});
+
+	it("invalidates an in-place non-last message mutation after touchContext", async () => {
+		const { session } = await createSession([
+			{ role: "user", content: "short earlier message", timestamp: 1 },
+			{ role: "user", content: "unchanged tail", timestamp: 2 },
+		]);
+
+		const before = requireContextUsage(session);
+		const estimateCount = getContextUsageEstimateCount(session);
+		(session.messages[0] as { content: string }).content += " expanded earlier content".repeat(100);
+		session.agent.touchContext();
+		const after = requireContextUsage(session);
+
+		expectContextUsageRecomputed(session, estimateCount);
+		expect(after.tokens).toBeGreaterThan(before.tokens ?? 0);
+	});
+
+	it("invalidates a same-length system-prompt swap", async () => {
+		const sparsePrompt = "a".repeat(1_000);
+		const densePrompt = "中".repeat(1_000);
+		const { session } = await createSession();
+		session.agent.setSystemPrompt([sparsePrompt]);
+
+		const before = requireContextUsage(session);
+		const estimateCount = getContextUsageEstimateCount(session);
+		session.agent.setSystemPrompt([densePrompt]);
+		const after = requireContextUsage(session);
+
+		expect(densePrompt).toHaveLength(sparsePrompt.length);
+		expectContextUsageRecomputed(session, estimateCount);
+		expect(after.tokens).toBeGreaterThan(before.tokens ?? 0);
+	});
+
+	it("invalidates a same-count tools swap", async () => {
+		const { session } = await createSession();
+		session.agent.setTools([createTestTool("first-tool", "first tool")]);
+
+		const before = requireContextUsage(session);
+		const estimateCount = getContextUsageEstimateCount(session);
+		session.agent.setTools([createTestTool("replacement-tool", "replacement tool ".repeat(100))]);
+		const after = requireContextUsage(session);
+
+		expectContextUsageRecomputed(session, estimateCount);
+		expect(after.tokens).toBeGreaterThan(before.tokens ?? 0);
+	});
+
+	it("invalidates when the last message is removed", async () => {
+		const { session } = await createSession([
+			{ role: "user", content: "first message ".repeat(100), timestamp: 1 },
+			{ role: "user", content: "second message ".repeat(100), timestamp: 2 },
+		]);
+
+		const before = requireContextUsage(session);
+		const estimateCount = getContextUsageEstimateCount(session);
+		session.agent.popMessage();
+		const after = requireContextUsage(session);
+
+		expectContextUsageRecomputed(session, estimateCount);
+		expect(after.tokens).toBeLessThan(before.tokens ?? Number.POSITIVE_INFINITY);
 	});
 
 	it("invalidates after compaction and reports unknown until a new assistant usage anchor", async () => {
@@ -133,9 +221,12 @@ describe("AgentSession display context snapshot cache", () => {
 		const keptEntryId = sessionManager.appendMessage(kept);
 
 		requireContextUsage(session);
+		const estimateCount = getContextUsageEstimateCount(session);
 		sessionManager.appendCompaction("summary", "summary", keptEntryId, 1_000);
+		const usage = requireContextUsage(session);
 
-		expect(requireContextUsage(session)).toEqual({
+		expectContextUsageRecomputed(session, estimateCount);
+		expect(usage).toEqual({
 			tokens: null,
 			contextWindow,
 			percent: null,
@@ -146,13 +237,44 @@ describe("AgentSession display context snapshot cache", () => {
 	it("invalidates when the model changes", async () => {
 		const { session } = await createSession([{ role: "user", content: "prompt", timestamp: 1 }]);
 		const before = requireContextUsage(session);
+		const estimateCount = getContextUsageEstimateCount(session);
 		const model = session.model;
 		if (!model) throw new Error("Expected model");
 
 		session.agent.setModel({ ...model, id: "cache-invalidation-model", contextWindow: 100_000 });
 		const after = requireContextUsage(session);
 
+		expectContextUsageRecomputed(session, estimateCount);
 		expect(after.contextWindow).toBe(100_000);
 		expect(after.percent).toBe((before.tokens! / 100_000) * 100);
+	});
+
+	it("invalidates on leaf-only branch switches", async () => {
+		const message = { role: "user" as const, content: "prompt", timestamp: 1 };
+		const { session, sessionManager } = await createSession([message]);
+		const entryId = sessionManager.appendMessage(message);
+
+		requireContextUsage(session);
+		const afterWarmup = getContextUsageEstimateCount(session);
+		sessionManager.resetLeaf();
+		requireContextUsage(session);
+		expectContextUsageRecomputed(session, afterWarmup);
+
+		const afterResetLeaf = getContextUsageEstimateCount(session);
+		sessionManager.branch(entryId);
+		requireContextUsage(session);
+		expectContextUsageRecomputed(session, afterResetLeaf);
+	});
+
+	it("returns independent snapshots without poisoning the cached value", async () => {
+		const { session } = await createSession([{ role: "user", content: "prompt", timestamp: 1 }]);
+		const first = requireContextUsage(session);
+		const estimateCount = getContextUsageEstimateCount(session);
+		first.tokens = -1;
+		const second = requireContextUsage(session);
+
+		expect(getContextUsageEstimateCount(session)).toBe(estimateCount);
+		expect(second).not.toBe(first);
+		expect(second.tokens).not.toBe(-1);
 	});
 });

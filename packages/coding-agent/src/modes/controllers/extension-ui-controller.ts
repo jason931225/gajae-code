@@ -50,19 +50,9 @@ export class ExtensionUiController {
 		overlay?.hide();
 	}
 
-	/**
-	 * Re-mount the composer after a transient hook UI closes. Prefer the pet-aware
-	 * restore (InteractiveMode.restoreComposer) so the editor keeps its reserved
-	 * pet columns; fall back to a plain editor swap for contexts that predate it
-	 * (e.g. lightweight test doubles).
-	 */
+	/** Re-mount the pet-aware composer after a transient hook UI closes. */
 	#restoreComposerEditor(): void {
-		if (typeof this.ctx.restoreComposer === "function") {
-			this.ctx.restoreComposer();
-		} else {
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
-		}
+		this.ctx.restoreComposer();
 	}
 
 	/**

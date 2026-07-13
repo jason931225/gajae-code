@@ -82,8 +82,12 @@ function notificationFrame(frame: Record<string, unknown>): Record<string, unkno
 		: frame;
 }
 
-function eventName(frame: Record<string, unknown>): string | undefined {
-	return frame.type === "event" && typeof frame.name === "string" ? frame.name : undefined;
+function eventName(frame: Record<string, unknown>, normalized: Record<string, unknown>): string | undefined {
+	if (frame.type === "event") {
+		if (typeof frame.name === "string") return frame.name;
+		if (typeof frame.kind === "string") return frame.kind;
+	}
+	return typeof normalized.type === "string" ? normalized.type : undefined;
 }
 
 function sessionIdFrom(frame: Record<string, unknown>): string | undefined {
@@ -364,7 +368,7 @@ export class ChatDaemonRuntime {
 		const frameSessionId = sessionIdFrom(normalizedFrame) ?? sessionIdFrom(frame);
 		if (frameSessionId !== undefined && frameSessionId !== attached.sessionId) return;
 		const sessionId = attached.sessionId;
-		const name = eventName(frame);
+		const name = eventName(frame, normalizedFrame);
 		if (name === "session_closed" || name === "session_terminated") {
 			await this.close(sessionId);
 			return;

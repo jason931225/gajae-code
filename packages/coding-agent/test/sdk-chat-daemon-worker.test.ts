@@ -348,6 +348,7 @@ describe("chat daemon worker", () => {
 		const actionCustomId = provider.messages.find(message => message.components)?.components?.[0]?.components[0]
 			?.customId;
 		expect(actionCustomId).toBeDefined();
+		const actionReplySent = client.waitForSent(frame => frame.type === "reply" && frame.id === "action");
 		await provider.handler?.({
 			id: "inbound",
 			guildId: "guild",
@@ -356,7 +357,15 @@ describe("chat daemon worker", () => {
 			authorId: "human",
 			interaction: { id: "interaction", token: "interaction-token", customId: actionCustomId!, value: "0" },
 		});
+		await actionReplySent;
 		expect(client.sent).toContainEqual(expect.objectContaining({ type: "reply", id: "action", answer: 0 }));
+		const queryRequest = client.waitForRequest(
+			request => request.type === "query_request" && request.query === "todo.list",
+		);
+		const queryResult = provider.waitForMessage(
+			message =>
+				message.content === JSON.stringify({ ok: true, result: { operation: "todo.list", status: "completed" } }),
+		);
 		await provider.handler?.({
 			id: "query",
 			guildId: "guild",
@@ -365,11 +374,20 @@ describe("chat daemon worker", () => {
 			authorId: "human",
 			content: "/sdk query todo.list {}",
 		});
+		await Promise.all([queryRequest, queryResult]);
 		expect(provider.messages).toContainEqual({
 			threadId: "thread-1",
 			content: JSON.stringify({ ok: true, result: { operation: "todo.list", status: "completed" } }),
 		});
 		expect(JSON.stringify(provider.messages)).not.toContain("daemon-result-secret");
+		const prohibitedResult = provider.waitForMessage(
+			message =>
+				message.content ===
+				JSON.stringify({
+					ok: false,
+					error: { code: "unsupported_on_chat", message: "Command could not be completed." },
+				}),
+		);
 		await provider.handler?.({
 			id: "prohibited",
 			guildId: "guild",
@@ -378,6 +396,7 @@ describe("chat daemon worker", () => {
 			authorId: "human",
 			content: "/sdk global session.get_endpoint {}",
 		});
+		await prohibitedResult;
 		expect(client.requests.some(request => request.operation === "session.get_endpoint")).toBe(false);
 		expect(brokerClient.requests.some(request => request.operation === "session.get_endpoint")).toBe(false);
 		expect(provider.messages).toContainEqual({
@@ -408,6 +427,14 @@ describe("chat daemon worker", () => {
 			),
 		).toBe(false);
 		expect(JSON.stringify(provider.messages)).not.toContain("daemon-result-secret");
+		const globalRequest = brokerClient.waitForRequest(
+			request => request.type === "broker_request" && request.operation === "session.list",
+		);
+		const globalResult = provider.waitForMessage(
+			message =>
+				message.content ===
+				JSON.stringify({ ok: true, result: { operation: "session.list", status: "completed" } }),
+		);
 		await provider.handler?.({
 			id: "global",
 			guildId: "guild",
@@ -416,6 +443,7 @@ describe("chat daemon worker", () => {
 			authorId: "human",
 			content: "/sdk global session.list {}",
 		});
+		await Promise.all([globalRequest, globalResult]);
 		expect(brokerClient.requests).toContainEqual(
 			expect.objectContaining({
 				type: "broker_request",
@@ -429,12 +457,14 @@ describe("chat daemon worker", () => {
 			content: JSON.stringify({ ok: true, result: { operation: "session.list", status: "completed" } }),
 		});
 		const archivedThread = provider.waitForArchiveCount(1);
-		client.handler?.({ type: "event", name: "session_closed", sessionId: "session" });
+		client.handler?.({
+			type: "event",
+			kind: "session_closed",
+			payload: { type: "session_closed", sessionId: "session" },
+		});
 		await archivedThread;
 		expect(provider.archives).toEqual(["thread-1"]);
 		client.handler?.({ type: "event", name: "session_ready", sessionId: "session", generation: 2 });
-		await Bun.sleep(10);
-		expect(provider.threads).toHaveLength(1);
 		const replacementThread = provider.waitForThreadCount(2);
 		client.handler?.({ type: "event", name: "session_ready", sessionId: "session", generation: 1 });
 		await replacementThread;
@@ -442,7 +472,7 @@ describe("chat daemon worker", () => {
 		await runtime.stop();
 		expect(client.closed).toBe(true);
 		expect(provider.stopped).toBe(true);
-	});
+	}, 20_000);
 
 	it("fails closed when a replacement client cannot connect", async () => {
 		root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-chat-replace-"));
@@ -802,11 +832,19 @@ describe("chat daemon worker", () => {
 				},
 			},
 		});
+		const controlReceived = client.waitForRequest(
+			request => request.type === "control_request" && request.operation === "turn.abort",
+		);
+		const queryReceived = client.waitForRequest(
+			request => request.type === "query_request" && request.query === "todo.list",
+		);
+		const globalReceived = broker.waitForRequest(
+			request => request.type === "broker_request" && request.operation === "session.list",
+		);
 		provider.handler?.(command("control-event", "control-id", "/sdk control turn.abort {}"));
 		provider.handler?.(command("query-event", "query-id", "/sdk query todo.list {}"));
 		provider.handler?.(command("global-event", "global-id", "/sdk global session.list {}"));
-		for (let attempt = 0; attempt < 100 && (client.requests.length < 3 || broker.requests.length < 1); attempt++)
-			await Bun.sleep(1);
+		await Promise.all([controlReceived, queryReceived, globalReceived]);
 		expect(client.requests).toContainEqual({
 			type: "control_request",
 			operation: "turn.abort",

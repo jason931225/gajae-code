@@ -1530,7 +1530,7 @@ export function createNotificationsExtension(
 ): void {
 	const runtimes = new Map<string, SessionRuntime>();
 	const disabledSessions = new Set<string>();
-	const sessionStartPromises = new Map<string, Promise<void>>();
+	const sessionStartPromises = new Map<string, Promise<"started" | "already" | "disabled" | "failed">>();
 	let activeRuntimeId: string | undefined;
 	let identityControlInFlight = false;
 	let deferredIdentityRotation: { event: { previousSessionFile?: string }; ctx: ExtensionContext } | undefined;
@@ -1648,6 +1648,8 @@ export function createNotificationsExtension(
 		const sdkEnabledForSession = shouldHostSdk(settings, isNotificationEligibleContext(ctx));
 		if (!isNotificationEligibleContext(ctx) || (!notificationsEnabledForSession && !sdkEnabledForSession))
 			return "disabled";
+		const pendingStart = sessionStartPromises.get(id);
+		if (pendingStart) return pendingStart;
 		if (runtimes.has(id)) {
 			activeRuntimeId = id;
 			return "already";
@@ -1988,11 +1990,11 @@ export function createNotificationsExtension(
 		};
 		runtimes.set(id, runtime);
 		activeRuntimeId = id;
-		const startSettled = Promise.withResolvers<void>();
+		const startSettled = Promise.withResolvers<"started" | "already" | "disabled" | "failed">();
 		sessionStartPromises.set(id, startSettled.promise);
-		const finishStartup = (): void => {
+		const finishStartup = (result: "started" | "already" | "disabled" | "failed"): void => {
 			if (sessionStartPromises.get(id) === startSettled.promise) sessionStartPromises.delete(id);
-			startSettled.resolve();
+			startSettled.resolve(result);
 		};
 		const cleanupAbandonedStartup = async (): Promise<void> => {
 			try {
@@ -2274,28 +2276,24 @@ export function createNotificationsExtension(
 		try {
 			await host.start();
 			if (runtimes.get(id) !== runtime) {
-				finishStartup();
+				finishStartup("failed");
 				await cleanupAbandonedStartup();
 				return "failed";
 			}
-			// Publish the initial replayable identity before server.start() writes the
-			// endpoint. A client that discovers the endpoint must never observe a
-			// session_ready-only generation while startup continues asynchronously.
-			try {
-				pushSessionFrame(runtime, {
-					type: "identity_header",
-					sessionId: id,
-					...buildIdentity(ctx.cwd, ctx.sessionManager.getSessionName()),
-				});
-			} catch (e) {
-				logger.warn(`notifications: identity_header failed: ${String(e)}`);
-			}
+			// Start the notification transport before publishing the identity. This keeps
+			// the SDK replay order (session_ready, then identity_header) while ensuring
+			// notification delivery never targets an unstarted native server.
 			const endpoint = await server.start();
 			if (runtimes.get(id) !== runtime) {
-				finishStartup();
+				finishStartup("failed");
 				await cleanupAbandonedStartup();
 				return "failed";
 			}
+			pushSessionFrame(runtime, {
+				type: "identity_header",
+				sessionId: id,
+				...buildIdentity(ctx.cwd, ctx.sessionManager.getSessionName()),
+			});
 			const agentDir = settings?.getAgentDir?.();
 			if (agentDir) {
 				try {
@@ -2464,11 +2462,11 @@ export function createNotificationsExtension(
 			};
 			activeRuntime.disposeGateEmitterListener = registerWorkflowGateEmitterListener(id, attachWorkflowGate);
 			if (ctx.workflowGate) attachWorkflowGate(ctx.workflowGate);
-			finishStartup();
+			finishStartup("started");
 			return "started";
 		} catch (e) {
 			logger.warn(`notifications: failed to start server: ${String(e)}`);
-			finishStartup();
+			finishStartup("failed");
 			if (!(await stopSession(id, "session", runtime))) await cleanupAbandonedStartup();
 			return "failed";
 		}
@@ -2518,9 +2516,8 @@ export function createNotificationsExtension(
 					return;
 				}
 				disabledSessions.delete(id);
-				const existing = runtimes.get(id);
-				if (existing) existing.enableNotifications();
-				const result = existing ? "started" : await startSession(ctx);
+				const result = await startSession(ctx);
+				if (result === "started" || result === "already") runtimes.get(id)?.enableNotifications();
 				ctx.ui.notify(
 					result === "started"
 						? "Notifications enabled for this session."

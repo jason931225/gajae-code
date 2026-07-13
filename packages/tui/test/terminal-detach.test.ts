@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "bun:test";
-import { ProcessTerminal, type Terminal, type TerminalAppearance } from "@gajae-code/tui/terminal";
+import {
+	__stdoutErrorSubscriberCountForTests,
+	ProcessTerminal,
+	type Terminal,
+	type TerminalAppearance,
+} from "@gajae-code/tui/terminal";
 import { type Component, CURSOR_MARKER, TUI } from "@gajae-code/tui/tui";
 
 class StaticComponent implements Component {
@@ -188,9 +193,11 @@ describe("terminal detach handling", () => {
 		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 		const resumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
 		const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
+		const ambientListener = (): void => {};
+		process.stdout.on("error", ambientListener);
 		await Bun.sleep(300);
 		const listenersBeforeStart = new Set(process.stdout.listeners("error"));
-		let listenersAddedByStart: unknown[] = [];
+		const subscribersBeforeStart = __stdoutErrorSubscriberCountForTests();
 
 		try {
 			withStdoutProperty("isTTY", true, () => {
@@ -199,8 +206,9 @@ describe("terminal detach handling", () => {
 					() => {},
 				);
 				const listenersAfterStart = process.stdout.listeners("error");
-				listenersAddedByStart = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
+				const listenersAddedByStart = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
 				expect(listenersAddedByStart.length).toBeLessThanOrEqual(1);
+				expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart + 1);
 				terminal.stop();
 				expect(process.stdout.listeners("error")).toEqual(listenersAfterStart);
 				expect(() => {
@@ -209,13 +217,14 @@ describe("terminal detach handling", () => {
 				expect(terminal.available).toBe(false);
 			});
 			await Bun.sleep(300);
-			for (const listener of listenersAddedByStart)
-				expect(process.stdout.listeners("error")).not.toContain(listener);
+			expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart);
+			expect(process.stdout.listeners("error")).toContain(ambientListener);
 		} finally {
 			terminal.stop();
 			writeSpy.mockRestore();
 			resumeSpy.mockRestore();
 			pauseSpy.mockRestore();
+			process.stdout.removeListener("error", ambientListener);
 		}
 	});
 	it("shares one stdout error listener across terminals during cleanup grace periods", async () => {
@@ -223,9 +232,11 @@ describe("terminal detach handling", () => {
 		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 		const resumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
 		const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
+		const ambientListener = (): void => {};
+		process.stdout.on("error", ambientListener);
 		await Bun.sleep(300);
 		const listenersBeforeStart = new Set(process.stdout.listeners("error"));
-		let listenersAddedByStarts: unknown[] = [];
+		const subscribersBeforeStart = __stdoutErrorSubscriberCountForTests();
 
 		try {
 			withStdoutProperty("isTTY", true, () => {
@@ -237,21 +248,23 @@ describe("terminal detach handling", () => {
 					terminal.stop();
 				}
 				const listenersAfterStart = process.stdout.listeners("error");
-				listenersAddedByStarts = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
+				const listenersAddedByStarts = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
 				expect(listenersAddedByStarts.length).toBeLessThanOrEqual(1);
+				expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart + terminals.length);
 				expect(() => {
 					process.stdout.emit("error", Object.assign(new Error("shared detached stdout"), { code: "EIO" }));
 				}).not.toThrow();
 				expect(terminals.every(terminal => !terminal.available)).toBe(true);
 			});
 			await Bun.sleep(300);
-			for (const listener of listenersAddedByStarts)
-				expect(process.stdout.listeners("error")).not.toContain(listener);
+			expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart);
+			expect(process.stdout.listeners("error")).toContain(ambientListener);
 		} finally {
 			for (const terminal of terminals) terminal.stop();
 			writeSpy.mockRestore();
 			resumeSpy.mockRestore();
 			pauseSpy.mockRestore();
+			process.stdout.removeListener("error", ambientListener);
 		}
 	});
 

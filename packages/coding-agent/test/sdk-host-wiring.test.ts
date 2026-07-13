@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NotificationServer } from "@gajae-code/natives";
 import type { Settings } from "../src/config/settings";
 import { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import type {
@@ -53,12 +54,14 @@ function start(
 	settings?: Settings,
 	sendUserMessage: ExtensionActions["sendUserMessage"] = () => {},
 	forwardPreflightCallbacks = false,
+	commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>(),
 ): Map<string, (event: unknown, context: unknown) => unknown> {
 	const handlers = new Map<string, (event: unknown, context: unknown) => unknown>();
 	createNotificationsExtension(
 		{
 			on: (event: string, handler: (event: unknown, context: unknown) => unknown) => handlers.set(event, handler),
-			registerCommand: () => {},
+			registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) =>
+				commands.set(name, command),
 			getThinkingLevel: () =>
 				typeof ctx.getThinkingLevel === "function" ? (ctx.getThinkingLevel as () => unknown)() : undefined,
 			sendUserMessage: (
@@ -273,6 +276,68 @@ test("interactive extension context advertises typed SDK controls and forwards p
 	).rejects.toMatchObject({ code: "invalid_input" });
 });
 
+test("startup starts NotificationServer before publishing identity_header", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-host-identity-startup-"));
+	dirs.push(cwd);
+	const sessionId = `identity-startup-${Date.now()}`;
+	const prototype = NotificationServer.prototype as unknown as {
+		start: () => Promise<unknown>;
+		pushFrame: (frame: string) => void;
+	};
+	const startServer = prototype.start;
+	const pushFrame = prototype.pushFrame;
+	let started = false;
+	let identityDelivered = false;
+	prototype.start = async function (this: typeof prototype): Promise<unknown> {
+		const endpoint = await startServer.call(this);
+		started = true;
+		return endpoint;
+	};
+	prototype.pushFrame = function (this: typeof prototype, frame: string): void {
+		if ((JSON.parse(frame) as { type?: string }).type === "identity_header") {
+			expect(started).toBe(true);
+			identityDelivered = true;
+		}
+		pushFrame.call(this, frame);
+	};
+
+	process.env.GJC_NOTIFICATIONS = "1";
+	const sessionContext = context(cwd, sessionId);
+	const handlers = start(sessionContext);
+	try {
+		await waitFor(() => identityDelivered, "startup identity delivery");
+	} finally {
+		prototype.start = startServer;
+		prototype.pushFrame = pushFrame;
+	}
+	await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+});
+
+test("concurrent /notify on waits for startup before activating notification answers", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-host-notify-startup-"));
+	dirs.push(cwd);
+	const sessionId = `notify-startup-${Date.now()}`;
+	const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+	const messages: Array<{ message: string; level: string }> = [];
+	const sessionContext = {
+		...context(cwd, sessionId),
+		ui: { notify: (message: string, level: string) => messages.push({ message, level }) },
+	};
+
+	const handlers = start(sessionContext, undefined, () => {}, false, commands);
+	process.env.GJC_NOTIFICATIONS = "1";
+	const notify = commands.get("notify");
+	expect(notify).toBeDefined();
+	await Promise.all([notify!.handler("on", sessionContext), notify!.handler("on", sessionContext)]);
+
+	expect(getAskAnswerSource(sessionId)).toBeDefined();
+	expect(messages).toEqual([
+		{ message: "Notifications enabled for this session.", level: "info" },
+		{ message: "Notifications enabled for this session.", level: "info" },
+	]);
+	await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+});
+
 test("SDK host replays event frames over direct v3 ingress and routes queries through the v2 control-command seam", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-host-"));
 	dirs.push(cwd);
@@ -303,6 +368,10 @@ test("SDK host replays event frames over direct v3 ingress and routes queries th
 	const replayEvents = replay?.events as Array<Record<string, unknown>>;
 	expect(replayEvents.length).toBeGreaterThanOrEqual(4);
 	expect(replayEvents.map(event => event.seq)).toEqual(replayEvents.map((_event, index) => index + 1));
+	expect(replayEvents.slice(0, 2)).toEqual([
+		expect.objectContaining({ type: "event", name: "session_ready", sessionId }),
+		expect.objectContaining({ payload: expect.objectContaining({ type: "identity_header", sessionId }) }),
+	]);
 	expect(replayEvents).toEqual(
 		expect.arrayContaining([
 			expect.objectContaining({ type: "event", name: "session_ready", sessionId }),

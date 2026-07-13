@@ -291,7 +291,9 @@ import {
 	type DefaultModelSelectionResult,
 	type DefaultModelSelectionRollbackStage,
 } from "./default-model-selection";
+
 export { DefaultModelSelectionRecoveryError } from "./default-model-selection";
+
 import type {
 	ClientBridge,
 	ClientBridgePermissionOption,

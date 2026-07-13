@@ -253,8 +253,14 @@ export class ReverseLeaseRuntime {
 
 	dispose(): void {
 		clearInterval(this.#sweepTimer);
+		for (const [id, request] of this.#outstanding) {
+			this.#outstanding.delete(id);
+			request.reject(new Error("request_cancelled"));
+			this.#onCancel?.(id, "lease_released");
+		}
 		for (const capability of [...this.#installedCapabilities]) this.#removeDefinitions(capability);
 		this.#leases.clear();
+		this.#idempotency.clear();
 	}
 
 	#owner(connectionId: string, leaseId: string): ProviderLease {

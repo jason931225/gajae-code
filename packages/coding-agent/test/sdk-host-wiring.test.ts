@@ -276,7 +276,7 @@ test("interactive extension context advertises typed SDK controls and forwards p
 	).rejects.toMatchObject({ code: "invalid_input" });
 });
 
-test("startup starts NotificationServer before publishing identity_header", async () => {
+test("startup records identity before an early lifecycle event and publishes it only after NotificationServer starts", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-host-identity-startup-"));
 	dirs.push(cwd);
 	const sessionId = `identity-startup-${Date.now()}`;
@@ -288,9 +288,11 @@ test("startup starts NotificationServer before publishing identity_header", asyn
 	const pushFrame = prototype.pushFrame;
 	let started = false;
 	let identityDelivered = false;
+	let emitEarlyLifecycle = () => {};
 	prototype.start = async function (this: typeof prototype): Promise<unknown> {
 		const endpoint = await startServer.call(this);
 		started = true;
+		emitEarlyLifecycle();
 		return endpoint;
 	};
 	prototype.pushFrame = function (this: typeof prototype, frame: string): void {
@@ -300,12 +302,37 @@ test("startup starts NotificationServer before publishing identity_header", asyn
 		}
 		pushFrame.call(this, frame);
 	};
-
 	process.env.GJC_NOTIFICATIONS = "1";
 	const sessionContext = context(cwd, sessionId);
 	const handlers = start(sessionContext);
+	emitEarlyLifecycle = () => {
+		void handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	};
 	try {
 		await waitFor(() => identityDelivered, "startup identity delivery");
+		const endpointFile = path.join(cwd, ".gjc", "state", "sdk", `${sessionId}.json`);
+		const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+		const frames: Record<string, unknown>[] = [];
+		const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+		sockets.push(socket);
+		socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+		await new Promise<void>((resolve, reject) => {
+			socket.addEventListener("open", () => resolve(), { once: true });
+			socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+		});
+		socket.send(JSON.stringify({ type: "event_replay", id: "identity-order", sinceGeneration: 1, sinceSeq: 0 }));
+		await waitFor(() => frames.some(frame => frame.id === "identity-order"), "identity replay");
+		const replay = frames.find(frame => frame.id === "identity-order")!;
+		const events = replay.events as Array<Record<string, unknown>>;
+		expect(events.map(event => event.payload)).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ type: "identity_header", sessionId }),
+				expect.objectContaining({ type: "activity", sessionId, state: "busy" }),
+			]),
+		);
+		expect(
+			events.findIndex(event => (event.payload as { type?: string } | undefined)?.type === "identity_header"),
+		).toBeLessThan(events.findIndex(event => (event.payload as { type?: string } | undefined)?.type === "activity"));
 	} finally {
 		prototype.start = startServer;
 		prototype.pushFrame = pushFrame;
@@ -336,6 +363,52 @@ test("concurrent /notify on waits for startup before activating notification ans
 		{ message: "Notifications enabled for this session.", level: "info" },
 	]);
 	await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+});
+
+test("/notify on refuses a startup result for a rotated runtime identity", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-host-notify-rotation-"));
+	dirs.push(cwd);
+	const initialSessionId = `notify-rotation-a-${Date.now()}`;
+	let currentSessionId = initialSessionId;
+	const nextSessionId = `notify-rotation-b-${Date.now()}`;
+	const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+	const messages: Array<{ message: string; level: string }> = [];
+	const sessionContext = context(cwd, currentSessionId) as Record<string, unknown> & {
+		sessionManager: { getSessionId: () => string };
+		ui?: { notify: (message: string, level: string) => void };
+	};
+	sessionContext.sessionManager.getSessionId = () => currentSessionId;
+	sessionContext.ui = { notify: (message: string, level: string) => messages.push({ message, level }) };
+	const prototype = NotificationServer.prototype as unknown as { start: () => Promise<unknown> };
+	const startServer = prototype.start;
+	const startReached = Promise.withResolvers<void>();
+	const allowStart = Promise.withResolvers<void>();
+	prototype.start = async function (this: typeof prototype): Promise<unknown> {
+		startReached.resolve();
+		await allowStart.promise;
+		return await startServer.call(this);
+	};
+	const handlers = start(sessionContext, undefined, () => {}, false, commands);
+	process.env.GJC_NOTIFICATIONS = "1";
+	try {
+		const enabling = commands.get("notify")!.handler("on", sessionContext);
+		await startReached.promise;
+		currentSessionId = nextSessionId;
+		allowStart.resolve();
+		await enabling;
+		await waitFor(() => messages.length === 1, "rotated notify result");
+		expect(messages).toEqual([
+			{
+				message: "Notifications were not enabled because the active session changed during startup.",
+				level: "warning",
+			},
+		]);
+		expect(getAskAnswerSource(initialSessionId)).toBeUndefined();
+	} finally {
+		prototype.start = startServer;
+		currentSessionId = initialSessionId;
+		await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+	}
 });
 
 test("SDK host replays event frames over direct v3 ingress and routes queries through the v2 control-command seam", async () => {

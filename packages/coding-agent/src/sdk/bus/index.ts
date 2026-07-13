@@ -2280,20 +2280,24 @@ export function createNotificationsExtension(
 				await cleanupAbandonedStartup();
 				return "failed";
 			}
-			// Start the notification transport before publishing the identity. This keeps
-			// the SDK replay order (session_ready, then identity_header) while ensuring
-			// notification delivery never targets an unstarted native server.
+			// Startup contract: identity is committed to the replayable SDK event log
+			// immediately after the host starts, before awaiting notification transport
+			// startup. The native transport receives the same frame only after it is
+			// serving, so it is never an invalid pre-start broadcast; late SDK consumers
+			// recover identity from event_replay rather than ephemeral delivery.
+			const identityHeader = {
+				type: "identity_header",
+				sessionId: id,
+				...buildIdentity(ctx.cwd, ctx.sessionManager.getSessionName()),
+			};
+			host.emitEvent({ kind: identityHeader.type, payload: identityHeader });
 			const endpoint = await server.start();
 			if (runtimes.get(id) !== runtime) {
 				finishStartup("failed");
 				await cleanupAbandonedStartup();
 				return "failed";
 			}
-			pushSessionFrame(runtime, {
-				type: "identity_header",
-				sessionId: id,
-				...buildIdentity(ctx.cwd, ctx.sessionManager.getSessionName()),
-			});
+			server.pushFrame(JSON.stringify(identityHeader));
 			const agentDir = settings?.getAgentDir?.();
 			if (agentDir) {
 				try {
@@ -2517,16 +2521,18 @@ export function createNotificationsExtension(
 				}
 				disabledSessions.delete(id);
 				const result = await startSession(ctx);
-				if (result === "started" || result === "already") runtimes.get(id)?.enableNotifications();
+				const liveRuntime = sessionId(ctx) === id && activeRuntimeId === id ? runtimes.get(id) : undefined;
+				const enabled = (result === "started" || result === "already") && liveRuntime?.host.started === true;
+				if (enabled) liveRuntime.enableNotifications();
 				ctx.ui.notify(
-					result === "started"
-						? "Notifications enabled for this session."
-						: result === "already"
-							? "Notifications already enabled for this session."
-							: result === "failed"
-								? "Notifications failed to start for this session."
-								: "Notifications are not configured. Run `gjc notify setup` or set GJC_NOTIFICATIONS=1.",
-					result === "failed" ? "error" : result === "disabled" ? "warning" : "info",
+					enabled
+						? result === "started"
+							? "Notifications enabled for this session."
+							: "Notifications already enabled for this session."
+						: result === "failed"
+							? "Notifications failed to start for this session."
+							: "Notifications were not enabled because the active session changed during startup.",
+					enabled ? "info" : result === "failed" ? "error" : "warning",
 				);
 				return;
 			}

@@ -271,6 +271,7 @@ describe("planTargetedTasks PR-mode targeting", () => {
 		"packages/coding-agent/test/cli.test.ts",
 		"packages/coding-agent/test/rlm-live-model-e2e.test.ts",
 		"packages/coding-agent/test/startup-update-contract.test.ts",
+		"packages/coding-agent/test/sdk-host-wiring.test.ts",
 	];
 
 	function targeted(paths: readonly string[]) {
@@ -286,6 +287,21 @@ describe("planTargetedTasks PR-mode targeting", () => {
 		expect(keys).not.toContain("test:packages/coding-agent/test/edit/bar.test.ts");
 		const testTask = tasks.find(task => task.key === "test:packages/coding-agent/test/edit/foo.test.ts");
 		expect(testTask?.command).toEqual(["bun", "test", "packages/coding-agent/test/edit/foo.test.ts"]);
+	});
+
+	test("SDK, coordinator, and SDK host wiring changes include only coding-agent shard 1", () => {
+		const shardOne = "test:@gajae-code/coding-agent:shard-1-of-8";
+		for (const changedPath of [
+			"packages/coding-agent/src/sdk/bus/index.ts",
+			"packages/coding-agent/src/coordinator/contract.ts",
+			"packages/coding-agent/test/sdk-host-wiring.test.ts",
+		]) {
+			const tasks = targeted([changedPath]);
+			const keys = tasks.map(task => task.key);
+			expect(keys).toContain(shardOne);
+			expect(tasks.find(task => task.key === shardOne)?.command).toEqual(["bun", "test", "--shard=1/8"]);
+			expect(keys.filter(key => key.startsWith("test:@gajae-code/coding-agent:shard-"))).toEqual([shardOne]);
+		}
 	});
 
 	test("a deleted test path is not scheduled as a runnable test shard", () => {

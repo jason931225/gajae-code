@@ -80,6 +80,35 @@ describe("directed reverse RPC leases", () => {
 		expect(cancelled).toHaveLength(1);
 	});
 
+	test("dispose rejects pending requests and clears reverse lease state", async () => {
+		const sent: Array<Record<string, unknown>> = [];
+		const removed: string[] = [];
+		const cancelled: string[] = [];
+		const runtime = new ReverseLeaseRuntime({
+			sendFrame: (_connectionId, frame) => {
+				sent.push(frame);
+			},
+			onDefinitionsRemoved: capability => {
+				removed.push(capability);
+			},
+			onCancel: requestId => {
+				cancelled.push(requestId);
+			},
+		});
+		runtime.registerProvider("owner", "permission", [{ name: "request" }], undefined, "first");
+		const pending = runtime.request("permission", "request", { toolCallId: "call-1" });
+		const requestId = String(sent[0].id);
+		runtime.dispose();
+		await expect(pending).rejects.toThrow("request_cancelled");
+		expect(cancelled).toEqual([requestId]);
+		expect(removed).toEqual(["permission"]);
+		expect(runtime.getLease("permission")).toBeUndefined();
+		expect(runtime.getInstalledDefinitions("permission")).toBeUndefined();
+		expect(() => runtime.request("permission", "request", {})).toThrow("provider_required");
+		expect(runtime.registerProvider("next", "permission", [], undefined, "first").connectionId).toBe("next");
+		runtime.dispose();
+	});
+
 	test("accepts structured error responses without a result payload", async () => {
 		const sent: Array<Record<string, unknown>> = [];
 		const runtime = new ReverseLeaseRuntime({

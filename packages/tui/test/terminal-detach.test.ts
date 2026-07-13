@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import {
+	__stdoutErrorDispatcherInstalledForTests,
 	__stdoutErrorSubscriberCountForTests,
 	ProcessTerminal,
 	type Terminal,
@@ -198,6 +199,7 @@ describe("terminal detach handling", () => {
 		await Bun.sleep(300);
 		const listenersBeforeStart = new Set(process.stdout.listeners("error"));
 		const subscribersBeforeStart = __stdoutErrorSubscriberCountForTests();
+		const dispatcherWasInstalled = __stdoutErrorDispatcherInstalledForTests();
 
 		try {
 			withStdoutProperty("isTTY", true, () => {
@@ -207,7 +209,8 @@ describe("terminal detach handling", () => {
 				);
 				const listenersAfterStart = process.stdout.listeners("error");
 				const listenersAddedByStart = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
-				expect(listenersAddedByStart.length).toBeLessThanOrEqual(1);
+				expect(listenersAddedByStart).toHaveLength(dispatcherWasInstalled ? 0 : 1);
+				expect(__stdoutErrorDispatcherInstalledForTests()).toBe(true);
 				expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart + 1);
 				terminal.stop();
 				expect(process.stdout.listeners("error")).toEqual(listenersAfterStart);
@@ -219,6 +222,7 @@ describe("terminal detach handling", () => {
 			await Bun.sleep(300);
 			expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart);
 			expect(process.stdout.listeners("error")).toContain(ambientListener);
+			expect(__stdoutErrorDispatcherInstalledForTests()).toBe(dispatcherWasInstalled);
 		} finally {
 			terminal.stop();
 			writeSpy.mockRestore();
@@ -237,6 +241,7 @@ describe("terminal detach handling", () => {
 		await Bun.sleep(300);
 		const listenersBeforeStart = new Set(process.stdout.listeners("error"));
 		const subscribersBeforeStart = __stdoutErrorSubscriberCountForTests();
+		const dispatcherWasInstalled = __stdoutErrorDispatcherInstalledForTests();
 
 		try {
 			withStdoutProperty("isTTY", true, () => {
@@ -249,7 +254,8 @@ describe("terminal detach handling", () => {
 				}
 				const listenersAfterStart = process.stdout.listeners("error");
 				const listenersAddedByStarts = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
-				expect(listenersAddedByStarts.length).toBeLessThanOrEqual(1);
+				expect(listenersAddedByStarts).toHaveLength(dispatcherWasInstalled ? 0 : 1);
+				expect(__stdoutErrorDispatcherInstalledForTests()).toBe(true);
 				expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart + terminals.length);
 				expect(() => {
 					process.stdout.emit("error", Object.assign(new Error("shared detached stdout"), { code: "EIO" }));
@@ -259,6 +265,7 @@ describe("terminal detach handling", () => {
 			await Bun.sleep(300);
 			expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart);
 			expect(process.stdout.listeners("error")).toContain(ambientListener);
+			expect(__stdoutErrorDispatcherInstalledForTests()).toBe(dispatcherWasInstalled);
 		} finally {
 			for (const terminal of terminals) terminal.stop();
 			writeSpy.mockRestore();

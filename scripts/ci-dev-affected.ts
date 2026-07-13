@@ -11,6 +11,15 @@ const PACKAGE_SCOPES = ["dependencies", "devDependencies", "peerDependencies", "
 // validation below the shard timeout by splitting package-wide/full-workspace
 // TypeScript suites across the matrix instead of one root-test runner.
 const CODING_AGENT_TEST_SHARDS = 8;
+// SDK and coordinator lifecycle changes need the stable first package shard in
+// addition to their targeted coverage. That shard owns broader integration
+// coverage which is not discoverable by the basename mapper.
+const CODING_AGENT_SHARD_ONE_COVERAGE_PATHS = [
+	"packages/coding-agent/src/sdk/",
+	"packages/coding-agent/src/coordinator/",
+	"packages/coding-agent/test/sdk-host-wiring.test.ts",
+] as const;
+
 
 // Keys for tasks that compile the @gajae-code/natives addon. They run once in
 // the dedicated dev-ci native-build job (not as matrix shards) and publish the
@@ -564,6 +573,10 @@ export function planTargetedTasks(paths: readonly string[], packages: readonly W
 		for (const testFile of behavioralTestsFor(changedPath)) {
 			addTestFileTask(tasks, testFile);
 		}
+		if (isCodingAgentShardOneCoveragePath(changedPath)) {
+			addCodingAgentTestShard(tasks, 1);
+		}
+
 		if (mappedTests.length > 0) {
 			continue;
 		}
@@ -624,14 +637,18 @@ function addPackageTestTasks(tasks: Map<string, Task>, workspacePackage: Workspa
 	}
 
 	for (let shard = 1; shard <= CODING_AGENT_TEST_SHARDS; shard++) {
-		add(
-			tasks,
-			`test:${workspacePackage.name}:shard-${shard}-of-${CODING_AGENT_TEST_SHARDS}`,
-			`Test ${workspacePackage.name} shard ${shard}/${CODING_AGENT_TEST_SHARDS}`,
-			["bun", "test", `--shard=${shard}/${CODING_AGENT_TEST_SHARDS}`],
-			resolvePackageCwd(workspacePackage.dir),
-		);
+		addCodingAgentTestShard(tasks, shard);
 	}
+}
+
+function addCodingAgentTestShard(tasks: Map<string, Task>, shard: number): void {
+	add(
+		tasks,
+		`test:@gajae-code/coding-agent:shard-${shard}-of-${CODING_AGENT_TEST_SHARDS}`,
+		`Test @gajae-code/coding-agent shard ${shard}/${CODING_AGENT_TEST_SHARDS}`,
+		["bun", "test", `--shard=${shard}/${CODING_AGENT_TEST_SHARDS}`],
+		resolvePackageCwd("packages/coding-agent"),
+	);
 }
 
 // Resolve the directly-named test(s) for a changed path: the changed file itself
@@ -657,6 +674,12 @@ function mappedTestsFor(changedPath: string, packages: readonly WorkspacePackage
 // remain necessary even when it owns a dedicated contract test.
 function behavioralTestsFor(changedPath: string): readonly string[] {
 	return BEHAVIORAL_OWNER_TESTS[changedPath] ?? [];
+}
+
+function isCodingAgentShardOneCoveragePath(changedPath: string): boolean {
+	return CODING_AGENT_SHARD_ONE_COVERAGE_PATHS.some(coveragePath =>
+		coveragePath.endsWith("/") ? changedPath.startsWith(coveragePath) : changedPath === coveragePath,
+	);
 }
 
 function owningPackage(changedPath: string, packages: readonly WorkspacePackage[]): WorkspacePackage | undefined {

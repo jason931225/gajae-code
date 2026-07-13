@@ -272,6 +272,8 @@ describe("planTargetedTasks PR-mode targeting", () => {
 		"packages/coding-agent/test/rlm-live-model-e2e.test.ts",
 		"packages/coding-agent/test/startup-update-contract.test.ts",
 		"packages/coding-agent/test/sdk-host-wiring.test.ts",
+		"packages/coding-agent/test/sdk/index.test.ts",
+		"packages/coding-agent/test/other/index.test.ts",
 	];
 
 	function targeted(paths: readonly string[]) {
@@ -304,6 +306,15 @@ describe("planTargetedTasks PR-mode targeting", () => {
 			expect(tasks.find(task => task.key === shardOne)?.command).toEqual(["bun", "test", "--shard=1/8"]);
 			expect(keys.filter(key => key.startsWith("test:@gajae-code/coding-agent:shard-"))).toEqual([shardOne]);
 		}
+	});
+
+	test("basename collisions fall back to package checks instead of arbitrary tests", () => {
+		const tasks = targeted(["packages/coding-agent/src/sdk/bus/index.ts"]);
+		const keys = tasks.map(task => task.key);
+		expect(keys).toContain("check:@gajae-code/coding-agent");
+		expect(keys).toContain("test:@gajae-code/coding-agent:shard-1-of-8");
+		expect(keys).not.toContain("test:packages/coding-agent/test/sdk/index.test.ts");
+		expect(keys).not.toContain("test:packages/coding-agent/test/other/index.test.ts");
 	});
 
 	test("a deleted test path is not scheduled as a runnable test shard", () => {

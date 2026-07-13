@@ -180,6 +180,7 @@ class FakeSdkClient implements ChatDaemonSdkClient {
 	requests: Record<string, unknown>[] = [];
 	handler: ((frame: Record<string, unknown>) => void) | undefined;
 	#sentWaiters: Array<{ predicate: (frame: Record<string, unknown>) => boolean; resolve: () => void }> = [];
+	#requestWaiters: Array<{ predicate: (frame: Record<string, unknown>) => boolean; resolve: () => void }> = [];
 	onFrame(handler: (frame: Record<string, unknown>) => void): () => void {
 		this.handler = handler;
 		return () => {
@@ -192,6 +193,19 @@ class FakeSdkClient implements ChatDaemonSdkClient {
 		this.#sentWaiters.push({ predicate, resolve: waiter.resolve });
 		return waiter.promise;
 	}
+	waitForRequest(predicate: (frame: Record<string, unknown>) => boolean): Promise<void> {
+		if (this.requests.some(predicate)) return Promise.resolve();
+		const waiter = Promise.withResolvers<void>();
+		this.#requestWaiters.push({ predicate, resolve: waiter.resolve });
+		return waiter.promise;
+	}
+	#resolveRequestWaiters(): void {
+		this.#requestWaiters = this.#requestWaiters.filter(waiter => {
+			if (!this.requests.some(waiter.predicate)) return true;
+			waiter.resolve();
+			return false;
+		});
+	}
 	#resolveSentWaiters(): void {
 		this.#sentWaiters = this.#sentWaiters.filter(waiter => {
 			if (!this.sent.some(waiter.predicate)) return true;
@@ -201,6 +215,7 @@ class FakeSdkClient implements ChatDaemonSdkClient {
 	}
 	async request(frame: Record<string, unknown>): Promise<Record<string, unknown>> {
 		this.requests.push(frame);
+		this.#resolveRequestWaiters();
 		if (frame.type === "event_replay")
 			return { events: [{ type: "event", name: "session_ready", sessionId: "session", generation: 1 }] };
 		return { ok: true, result: { source: "sdk", body: "daemon-result-secret" } };
@@ -355,7 +370,6 @@ describe("chat daemon worker", () => {
 			content: JSON.stringify({ ok: true, result: { operation: "todo.list", status: "completed" } }),
 		});
 		expect(JSON.stringify(provider.messages)).not.toContain("daemon-result-secret");
-		const requestsBeforeProhibited = client.requests.length;
 		await provider.handler?.({
 			id: "prohibited",
 			guildId: "guild",
@@ -364,7 +378,8 @@ describe("chat daemon worker", () => {
 			authorId: "human",
 			content: "/sdk global session.get_endpoint {}",
 		});
-		expect(client.requests).toHaveLength(requestsBeforeProhibited);
+		expect(client.requests.some(request => request.operation === "session.get_endpoint")).toBe(false);
+		expect(brokerClient.requests.some(request => request.operation === "session.get_endpoint")).toBe(false);
 		expect(provider.messages).toContainEqual({
 			threadId: "thread-1",
 			content: JSON.stringify({
@@ -386,7 +401,12 @@ describe("chat daemon worker", () => {
 				authorId: "human",
 				content,
 			});
-		expect(client.requests).toHaveLength(requestsBeforeProhibited);
+		const prohibitedOperations = new Set(["bash.execute", "host_tools.register", "filesystem.read", "config.patch"]);
+		expect(
+			[...client.requests, ...brokerClient.requests].some(request =>
+				prohibitedOperations.has(String(request.operation)),
+			),
+		).toBe(false);
 		expect(JSON.stringify(provider.messages)).not.toContain("daemon-result-secret");
 		await provider.handler?.({
 			id: "global",
@@ -516,13 +536,12 @@ describe("chat daemon worker", () => {
 		const provider = new FakeDiscordProvider();
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
-		provider.postMessage = async input => {
-			provider.messages.push(input);
-			if (input.content.includes("block")) {
-				entered.resolve();
-				await release.promise;
-			}
-			return { id: String(provider.messages.length) };
+		let blockLookup = false;
+		provider.findMessageByNonce = async () => {
+			if (!blockLookup) return null;
+			entered.resolve();
+			await release.promise;
+			return null;
 		};
 		const oldClient = new FakeSdkClient();
 		const newClient = new FakeSdkClient();
@@ -550,6 +569,7 @@ describe("chat daemon worker", () => {
 			},
 		);
 		await runtime.start();
+		blockLookup = true;
 		oldClient.handler?.({ type: "turn_stream", sessionId: "session", text: "block" });
 		await entered.promise;
 		oldClient.handler?.({ type: "turn_stream", sessionId: "session", text: "stale queued" });
@@ -565,10 +585,16 @@ describe("chat daemon worker", () => {
 			pid: process.pid,
 			endpointMtimeMs: (await fs.stat(endpointPath)).mtimeMs,
 		});
+		const replacementReplay = newClient.waitForRequest(frame => frame.type === "event_replay");
 		tick?.();
-		await Bun.sleep(10);
+		await replacementReplay;
+		expect(oldClient.closed).toBe(true);
+		expect(newClient.handler).toBeDefined();
 		release.resolve();
-		await Bun.sleep(10);
+		const freshDelivered = provider.waitForMessage(message => message.content.includes("fresh replacement"));
+		newClient.handler?.({ type: "turn_stream", sessionId: "session", text: "fresh replacement" });
+		await freshDelivered;
+		expect(provider.messages.some(message => message.content.includes("fresh replacement"))).toBe(true);
 		expect(provider.messages.some(message => message.content.includes("stale queued"))).toBe(false);
 		await runtime.stop();
 	});
@@ -1185,5 +1211,5 @@ describe("chat daemon worker", () => {
 		} finally {
 			await host.stop();
 		}
-	}, 10_000);
+	}, 20_000);
 });

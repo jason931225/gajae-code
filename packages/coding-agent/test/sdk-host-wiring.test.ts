@@ -351,18 +351,38 @@ test("concurrent /notify on waits for startup before activating notification ans
 		ui: { notify: (message: string, level: string) => messages.push({ message, level }) },
 	};
 
+	const prototype = NotificationServer.prototype as unknown as { start: () => Promise<unknown> };
+	const startServer = prototype.start;
+	const startReached = Promise.withResolvers<void>();
+	const allowStart = Promise.withResolvers<void>();
+	prototype.start = async function (this: typeof prototype): Promise<unknown> {
+		startReached.resolve();
+		await allowStart.promise;
+		return await startServer.call(this);
+	};
 	const handlers = start(sessionContext, undefined, () => {}, false, commands);
 	process.env.GJC_NOTIFICATIONS = "1";
-	const notify = commands.get("notify");
-	expect(notify).toBeDefined();
-	await Promise.all([notify!.handler("on", sessionContext), notify!.handler("on", sessionContext)]);
+	try {
+		const notify = commands.get("notify");
+		expect(notify).toBeDefined();
+		const firstEnable = notify!.handler("on", sessionContext);
+		const secondEnable = notify!.handler("on", sessionContext);
+		await startReached.promise;
+		expect(messages).toEqual([]);
+		expect(getAskAnswerSource(sessionId)).toBeUndefined();
+		allowStart.resolve();
+		await Promise.all([firstEnable, secondEnable]);
 
-	expect(getAskAnswerSource(sessionId)).toBeDefined();
-	expect(messages).toEqual([
-		{ message: "Notifications enabled for this session.", level: "info" },
-		{ message: "Notifications enabled for this session.", level: "info" },
-	]);
-	await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+		expect(getAskAnswerSource(sessionId)).toBeDefined();
+		expect(messages).toEqual([
+			{ message: "Notifications enabled for this session.", level: "info" },
+			{ message: "Notifications enabled for this session.", level: "info" },
+		]);
+	} finally {
+		allowStart.resolve();
+		prototype.start = startServer;
+		await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+	}
 });
 
 test("/notify on refuses a startup result for a rotated runtime identity", async () => {
@@ -408,6 +428,49 @@ test("/notify on refuses a startup result for a rotated runtime identity", async
 		prototype.start = startServer;
 		currentSessionId = initialSessionId;
 		await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+	}
+});
+
+test("/notify on fences teardown and permits a later same-ID replacement runtime", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-host-notify-teardown-"));
+	dirs.push(cwd);
+	const sessionId = `notify-teardown-${Date.now()}`;
+	const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+	const messages: Array<{ message: string; level: string }> = [];
+	const sessionContext = {
+		...context(cwd, sessionId),
+		ui: { notify: (message: string, level: string) => messages.push({ message, level }) },
+	};
+	const prototype = NotificationServer.prototype as unknown as { start: () => Promise<unknown> };
+	const startServer = prototype.start;
+	const startReached = Promise.withResolvers<void>();
+	const allowStart = Promise.withResolvers<void>();
+	prototype.start = async function (this: typeof prototype): Promise<unknown> {
+		startReached.resolve();
+		await allowStart.promise;
+		return await startServer.call(this);
+	};
+	const handlers = start(sessionContext, undefined, () => {}, false, commands);
+	process.env.GJC_NOTIFICATIONS = "1";
+	try {
+		const enabling = commands.get("notify")!.handler("on", sessionContext);
+		await startReached.promise;
+		const shuttingDown = handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+		allowStart.resolve();
+		await Promise.all([enabling, shuttingDown]);
+		expect(messages).toEqual([
+			{
+				message: "Notifications were not enabled because the active session changed during startup.",
+				level: "warning",
+			},
+		]);
+		expect(getAskAnswerSource(sessionId)).toBeUndefined();
+		await commands.get("notify")!.handler("on", sessionContext);
+		expect(messages.at(-1)).toEqual({ message: "Notifications enabled for this session.", level: "info" });
+		expect(getAskAnswerSource(sessionId)).toBeDefined();
+		await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+	} finally {
+		prototype.start = startServer;
 	}
 });
 

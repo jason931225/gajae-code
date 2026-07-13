@@ -656,7 +656,8 @@ function addCodingAgentTestShard(tasks: Map<string, Task>, shard: number): void 
 // Resolve the directly-named test(s) for a changed path: the changed file itself
 // if it is a test, otherwise test files whose basename is `<base>.test.ts(x)` and
 // which live within the changed file's owning package (or its directory for
-// root-level files). Returns [] when there is no direct mapping.
+// root-level files). Returns [] when there is no unique direct mapping, so basename
+// collisions fall back to package-level checks instead of selecting arbitrary tests.
 function mappedTestsFor(changedPath: string, packages: readonly WorkspacePackage[], testFiles: readonly string[]): string[] {
 	if (isTestFilePath(changedPath)) {
 		return testFiles.includes(changedPath) ? [changedPath] : [];
@@ -668,7 +669,10 @@ function mappedTestsFor(changedPath: string, packages: readonly WorkspacePackage
 	const wanted = new Set([`${base}.test.ts`, `${base}.test.tsx`]);
 	const owner = owningPackage(changedPath, packages);
 	const scopePrefix = owner ? `${owner.dir}/` : `${path.posix.dirname(changedPath)}/`;
-	return testFiles.filter(testFile => wanted.has(path.posix.basename(testFile)) && testFile.startsWith(scopePrefix));
+	const matches = testFiles.filter(
+		testFile => wanted.has(path.posix.basename(testFile)) && testFile.startsWith(scopePrefix),
+	);
+	return matches.length === 1 ? matches : [];
 }
 
 // Resolve explicit behavioral-owner tests. Unlike mappedTestsFor(), these tests

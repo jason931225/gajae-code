@@ -82,6 +82,7 @@ export class ReverseLeaseRuntime {
 	readonly #outstanding = new Map<string, Outstanding>();
 	readonly #installedCapabilities = new Set<string>();
 	readonly #sweepTimer: ReturnType<typeof setInterval>;
+	#disposing = false;
 
 	constructor(options: ReverseLeaseOptions) {
 		this.#now = options.now ?? Date.now;
@@ -101,6 +102,7 @@ export class ReverseLeaseRuntime {
 		expectedLeaseId?: string,
 		idempotencyKey?: string,
 	): ProviderLease {
+		if (this.#disposing) throw new Error("reverse runtime is disposing");
 		const key = `${connectionId}\u0000${idempotencyKey ?? ""}`;
 		const fingerprint = registrationFingerprint(capability, definitions, expectedLeaseId);
 		const replay = idempotencyKey ? this.#idempotency.get(key) : undefined;
@@ -187,6 +189,7 @@ export class ReverseLeaseRuntime {
 	}
 
 	request(capability: string, method: string, payload: unknown): Promise<unknown> {
+		if (this.#disposing) throw new Error("reverse runtime is disposing");
 		this.#assertPayload(payload);
 		const lease = this.#liveLease(capability);
 		if (!lease) {
@@ -258,6 +261,8 @@ export class ReverseLeaseRuntime {
 	}
 
 	dispose(): void {
+		if (this.#disposing) return;
+		this.#disposing = true;
 		clearInterval(this.#sweepTimer);
 		const outstanding = [...this.#outstanding.entries()];
 		const installedCapabilities = [...this.#installedCapabilities];
@@ -276,6 +281,7 @@ export class ReverseLeaseRuntime {
 				this.#onDefinitionsRemoved?.(capability);
 			} catch {}
 		}
+		this.#disposing = false;
 	}
 
 	#owner(connectionId: string, leaseId: string): ProviderLease {

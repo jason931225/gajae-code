@@ -505,6 +505,8 @@ interface SessionRuntime {
 	disposeGateListener: () => void;
 	/** Whether notification-only delivery and answer resources are active. */
 	notificationsActive: boolean;
+	/** Set as soon as terminal teardown is requested, before startup settles. */
+	stopping: boolean;
 	/** Recreates notification-only resources after `/notify on`. */
 	enableNotifications: () => void;
 	/** Deregisters canonical workflow-gate terminal cleanup. */
@@ -1551,6 +1553,9 @@ export function createNotificationsExtension(
 		reason: "session" | "notifications" = "session",
 		expectedRuntime?: SessionRuntime,
 	): Promise<boolean> {
+		const requestedRuntime = runtimes.get(id);
+		if (expectedRuntime && requestedRuntime !== expectedRuntime) return false;
+		if (reason === "session" && requestedRuntime) requestedRuntime.stopping = true;
 		const pendingStart = sessionStartPromises.get(id);
 		if (pendingStart) await pendingStart;
 		const rt = runtimes.get(id);
@@ -1978,6 +1983,7 @@ export function createNotificationsExtension(
 			disposeGateEmitterListener: () => {},
 			workflowGate: undefined,
 			gatePresentations,
+			stopping: false,
 			cancelPostmortemCleanup: () => {},
 			stopBrokerHeartbeat,
 
@@ -2530,7 +2536,8 @@ export function createNotificationsExtension(
 					activeRuntimeId === id &&
 					runtimes.get(id) === expectedRuntime &&
 					expectedRuntime?.host.started === true &&
-					expectedRuntime.host.generation === expectedGeneration;
+					expectedRuntime.host.generation === expectedGeneration &&
+					expectedRuntime.stopping === false;
 				if (enabled) expectedRuntime.enableNotifications();
 				ctx.ui.notify(
 					enabled

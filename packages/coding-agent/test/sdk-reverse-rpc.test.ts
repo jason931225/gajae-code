@@ -111,14 +111,26 @@ describe("directed reverse RPC leases", () => {
 
 	test("dispose remains atomic when external cleanup hooks throw", async () => {
 		let requestId = "";
-		const runtime = new ReverseLeaseRuntime({
+		const reentryErrors: string[] = [];
+		let runtime!: ReverseLeaseRuntime;
+		runtime = new ReverseLeaseRuntime({
 			sendFrame: (_connectionId, frame) => {
 				requestId = String(frame.id);
 			},
 			onDefinitionsRemoved: () => {
+				try {
+					runtime.registerProvider("reentrant", "permission", []);
+				} catch (error) {
+					reentryErrors.push(String(error));
+				}
 				throw new Error("definition cleanup failed");
 			},
 			onCancel: () => {
+				try {
+					runtime.request("permission", "request", {});
+				} catch (error) {
+					reentryErrors.push(String(error));
+				}
 				throw new Error("cancel hook failed");
 			},
 		});
@@ -129,6 +141,8 @@ describe("directed reverse RPC leases", () => {
 		expect(runtime.getLease("permission")).toBeUndefined();
 		expect(runtime.getInstalledDefinitions("permission")).toBeUndefined();
 		expect(() => runtime.respond("owner", requestId, "missing", {})).toThrow("unknown_request");
+		expect(reentryErrors).toHaveLength(2);
+		expect(reentryErrors.every(error => error.includes("reverse runtime is disposing"))).toBe(true);
 		expect(runtime.registerProvider("next", "permission", [], undefined, "key").connectionId).toBe("next");
 		runtime.dispose();
 	});

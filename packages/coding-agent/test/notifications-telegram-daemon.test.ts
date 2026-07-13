@@ -764,6 +764,54 @@ describe("telegram daemon", () => {
 		expect(daemonConstructed).toBe(false);
 	});
 
+	test("requests startup replay and restores identity from replay envelopes", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const s = setPrivateAgentDir(settings(agentDir), agentDir);
+		const bot = new FakeBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: s,
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			rich: { enabled: false },
+			WebSocketImpl: FakeWs as any,
+		});
+		daemon.connectSession("S", "ws://s", "ts");
+		const socket = FakeWs.instances[0]!;
+		socket.dispatchEvent(new Event("open"));
+		expect(socket.sent.map(frame => JSON.parse(frame))).toContainEqual({
+			type: "event_replay",
+			id: "telegram-startup-replay:S",
+			sinceGeneration: 1,
+			sinceSeq: 0,
+		});
+		await daemon.handleSessionMessage(daemon.sessions.get("S")!, {
+			type: "event_replay_result",
+			events: [
+				{
+					type: "event",
+					name: "action_needed",
+					payload: { type: "action_needed", kind: "ask", id: "stale", question: "Old?", options: ["No"] },
+				},
+				{
+					type: "event",
+					name: "identity_header",
+					payload: { type: "identity_header", sessionId: "S", repo: "gajae-code", branch: "dev" },
+				},
+				{
+					type: "event",
+					name: "action_needed",
+					payload: { type: "action_needed", kind: "ask", id: "live", question: "Now?", options: ["Yes"] },
+				},
+			],
+		});
+		expect(bot.calls.some(call => call.method === "createForumTopic")).toBe(true);
+		expect(daemon.sessions.get("S")!.pending.has("stale")).toBe(false);
+		expect(daemon.sessions.get("S")!.pending.has("live")).toBe(true);
+	});
+
 	test("callback alias from session B routes only to session B", async () => {
 		FakeWs.instances = [];
 		const agentDir = tempAgentDir();

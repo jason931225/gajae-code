@@ -1774,6 +1774,16 @@ export class TelegramNotificationDaemon {
 						}),
 					);
 				} catch {}
+				try {
+					session.ws.send(
+						JSON.stringify({
+							type: "event_replay",
+							id: `telegram-startup-replay:${sessionId}`,
+							sinceGeneration: 1,
+							sinceSeq: 0,
+						}),
+					);
+				} catch {}
 			}
 			// Eagerly create the session's Telegram topic as soon as it connects, so
 			// a thread exists the moment a notifications-enabled session is live —
@@ -2665,6 +2675,24 @@ export class TelegramNotificationDaemon {
 	}
 
 	async handleSessionMessage(session: SessionSocket, msg: any): Promise<void> {
+		if (msg?.type === "event_replay_result" && Array.isArray(msg.events)) {
+			const replayed: Record<string, unknown>[] = (msg.events as unknown[]).flatMap(
+				(event: unknown): Record<string, unknown>[] => {
+					if (!event || typeof event !== "object" || Array.isArray(event)) return [];
+					const envelope = event as Record<string, unknown>;
+					const payload = envelope.payload;
+					return [
+						payload && typeof payload === "object" && !Array.isArray(payload)
+							? (payload as Record<string, unknown>)
+							: envelope,
+					];
+				},
+			);
+			const identityIndex = replayed.findLastIndex(frame => frame.type === "identity_header");
+			if (identityIndex < 0) return;
+			for (const frame of replayed.slice(identityIndex)) await this.handleSessionMessage(session, frame);
+			return;
+		}
 		if (await this.sessionRouter.dispatch(session, msg as Record<string, unknown>)) return;
 		if (typeof msg?.type === "string" && TelegramNotificationDaemon.THREADED_FRAMES.has(msg.type)) {
 			const send = renderThreadedFrame(msg);

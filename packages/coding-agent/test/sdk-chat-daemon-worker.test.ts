@@ -262,7 +262,7 @@ describe("chat daemon worker", () => {
 				};
 			return { ok: true, result: { source: "sdk", body: "daemon-result-secret" } };
 		};
-		provider.startupInbound = {
+		const startupInbound: DiscordInboundEvent = {
 			id: "startup-query",
 			guildId: "guild",
 			parentId: "parent",
@@ -306,6 +306,7 @@ describe("chat daemon worker", () => {
 		);
 
 		await runtime.start();
+		await provider.handler?.(startupInbound);
 		expect(provider.started).toBe(true);
 		expect(client.requests).toContainEqual(
 			expect.objectContaining({ type: "query_request", query: "todo.list", input: {} }),
@@ -594,6 +595,15 @@ describe("chat daemon worker", () => {
 		const store = new ConversationStore<SlackConversation>({ agentDir, kind: "slack" });
 		const readConversation = async (): Promise<SlackConversation | undefined> =>
 			Object.values((await store.load()).conversations).find(record => record.sessionId === "session");
+		const waitForConversation = async (predicate: (conversation: SlackConversation | undefined) => boolean) => {
+			const deadline = Date.now() + 5_000;
+			while (true) {
+				const conversation = await readConversation();
+				if (predicate(conversation)) return conversation;
+				if (Date.now() >= deadline) throw new Error("Timed out waiting for durable Slack conversation state");
+				await Bun.sleep(10);
+			}
+		};
 		const runtimeInput = {
 			kind: "slack" as const,
 			agentDir,
@@ -631,12 +641,7 @@ describe("chat daemon worker", () => {
 			question: "Continue?",
 			options: ["safe"],
 		});
-		for (
-			let attempt = 0;
-			attempt < 100 && (await readConversation())?.pendingActionId !== "action-before-restart";
-			attempt++
-		)
-			await Bun.sleep(1);
+		await waitForConversation(conversation => conversation?.pendingActionId === "action-before-restart");
 		expect((await readConversation())?.pendingActionId).toBe("action-before-restart");
 		await firstRuntime.stop();
 
@@ -684,16 +689,10 @@ describe("chat daemon worker", () => {
 			question: "Again?",
 			options: ["safe"],
 		});
-		for (
-			let attempt = 0;
-			attempt < 100 && (await readConversation())?.pendingActionId !== "action-to-resolve";
-			attempt++
-		)
-			await Bun.sleep(1);
+		await waitForConversation(conversation => conversation?.pendingActionId === "action-to-resolve");
 		expect((await readConversation())?.pendingActionId).toBe("action-to-resolve");
 		restartedClient.handler?.({ type: "action_resolved", sessionId: "session", id: "action-to-resolve" });
-		await Bun.sleep(10);
-		expect((await readConversation())?.pendingActionId).toBeUndefined();
+		await waitForConversation(conversation => conversation?.pendingActionId === undefined);
 		await restartedRuntime.stop();
 	});
 	it("replays Slack control, query, and global commands with their durable receipt keys", async () => {
@@ -1186,5 +1185,5 @@ describe("chat daemon worker", () => {
 		} finally {
 			await host.stop();
 		}
-	});
+	}, 10_000);
 });

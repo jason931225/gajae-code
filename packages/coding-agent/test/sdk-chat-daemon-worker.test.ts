@@ -241,6 +241,27 @@ describe("chat daemon worker", () => {
 		});
 		const provider = new FakeDiscordProvider();
 		const client = new FakeSdkClient();
+		client.request = async frame => {
+			client.requests.push(frame);
+			if (frame.type === "event_replay")
+				return {
+					events: [
+						{ type: "event", name: "session_ready", sessionId: "session", generation: 1 },
+						{
+							type: "event",
+							name: "identity_header",
+							payload: {
+								type: "identity_header",
+								sessionId: "session",
+								title: "Replay identity",
+								repo: "replay-repo",
+								branch: "replay-branch",
+							},
+						},
+					],
+				};
+			return { ok: true, result: { source: "sdk", body: "daemon-result-secret" } };
+		};
 		provider.startupInbound = {
 			id: "startup-query",
 			guildId: "guild",
@@ -291,6 +312,10 @@ describe("chat daemon worker", () => {
 		);
 		expect(provider.threads).toHaveLength(1);
 		const turnStreamPosted = provider.waitForMessage(message => message.content === "GJC turn stream\noutbound");
+		expect(provider.messages).toContainEqual({
+			threadId: "thread-1",
+			content: "GJC identity header\ntitle: Replay identity\nrepo: replay-repo\nbranch: replay-branch",
+		});
 		client.handler?.({ type: "turn_stream", sessionId: "session", text: "outbound" });
 		await turnStreamPosted;
 		expect(provider.messages).toContainEqual({ threadId: "thread-1", content: "GJC turn stream\noutbound" });

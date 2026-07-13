@@ -205,16 +205,22 @@ export class ReverseLeaseRuntime {
 				resolve,
 				reject,
 			});
-			Promise.resolve(
-				this.#sendFrame(lease.connectionId, {
+			let delivery: void | Promise<void>;
+			try {
+				delivery = this.#sendFrame(lease.connectionId, {
 					type: "reverse_request",
 					id,
 					capability,
 					connectionId: lease.connectionId,
 					leaseId: lease.leaseId,
 					payload: { method, payload },
-				}),
-			).catch(error => {
+				});
+			} catch (error) {
+				this.#outstanding.delete(id);
+				reject(error instanceof Error ? error : new Error(String(error)));
+				return;
+			}
+			Promise.resolve(delivery).catch(error => {
 				this.#outstanding.delete(id);
 				reject(error instanceof Error ? error : new Error(String(error)));
 			});
@@ -253,14 +259,23 @@ export class ReverseLeaseRuntime {
 
 	dispose(): void {
 		clearInterval(this.#sweepTimer);
-		for (const [id, request] of this.#outstanding) {
-			this.#outstanding.delete(id);
-			request.reject(new Error("request_cancelled"));
-			this.#onCancel?.(id, "lease_released");
-		}
-		for (const capability of [...this.#installedCapabilities]) this.#removeDefinitions(capability);
+		const outstanding = [...this.#outstanding.entries()];
+		const installedCapabilities = [...this.#installedCapabilities];
+		this.#outstanding.clear();
+		this.#installedCapabilities.clear();
 		this.#leases.clear();
 		this.#idempotency.clear();
+		for (const [id, request] of outstanding) {
+			request.reject(new Error("request_cancelled"));
+			try {
+				this.#onCancel?.(id, "lease_released");
+			} catch {}
+		}
+		for (const capability of installedCapabilities) {
+			try {
+				this.#onDefinitionsRemoved?.(capability);
+			} catch {}
+		}
 	}
 
 	#owner(connectionId: string, leaseId: string): ProviderLease {

@@ -545,6 +545,8 @@ interface SessionRuntime {
 	/** Stops optional broker presence heartbeats. */
 	stopBrokerHeartbeat: () => void;
 }
+type SessionStartStatus = "started" | "already" | "disabled" | "failed";
+type SessionStartResult = { status: SessionStartStatus; runtime?: SessionRuntime };
 
 function pushSessionFrame(
 	runtime: Pick<SessionRuntime, "server" | "host">,
@@ -1530,7 +1532,7 @@ export function createNotificationsExtension(
 ): void {
 	const runtimes = new Map<string, SessionRuntime>();
 	const disabledSessions = new Set<string>();
-	const sessionStartPromises = new Map<string, Promise<"started" | "already" | "disabled" | "failed">>();
+	const sessionStartPromises = new Map<string, Promise<SessionStartResult>>();
 	let activeRuntimeId: string | undefined;
 	let identityControlInFlight = false;
 	let deferredIdentityRotation: { event: { previousSessionFile?: string }; ctx: ExtensionContext } | undefined;
@@ -1640,19 +1642,20 @@ export function createNotificationsExtension(
 		return ctx.sessionMetadata?.kind !== "sub";
 	}
 
-	async function startSession(ctx: ExtensionContext): Promise<"started" | "already" | "disabled" | "failed"> {
+	async function startSession(ctx: ExtensionContext): Promise<SessionStartResult> {
 		const id = sessionId(ctx);
 		const lifecycleRequestId = safeLifecycleRequestId(process.env.GJC_LIFECYCLE_REQUEST_ID);
 		const { settings, cfg, settingsAvailable } = resolveSettings(options.settings);
 		const notificationsEnabledForSession = isEnabledForSession(id, cfg);
 		const sdkEnabledForSession = shouldHostSdk(settings, isNotificationEligibleContext(ctx));
 		if (!isNotificationEligibleContext(ctx) || (!notificationsEnabledForSession && !sdkEnabledForSession))
-			return "disabled";
+			return { status: "disabled" };
 		const pendingStart = sessionStartPromises.get(id);
 		if (pendingStart) return pendingStart;
-		if (runtimes.has(id)) {
+		const existingRuntime = runtimes.get(id);
+		if (existingRuntime) {
 			activeRuntimeId = id;
-			return "already";
+			return { status: "already", runtime: existingRuntime };
 		}
 
 		const stateRoot = path.join(ctx.cwd, ".gjc", "state");
@@ -1990,9 +1993,9 @@ export function createNotificationsExtension(
 		};
 		runtimes.set(id, runtime);
 		activeRuntimeId = id;
-		const startSettled = Promise.withResolvers<"started" | "already" | "disabled" | "failed">();
+		const startSettled = Promise.withResolvers<SessionStartResult>();
 		sessionStartPromises.set(id, startSettled.promise);
-		const finishStartup = (result: "started" | "already" | "disabled" | "failed"): void => {
+		const finishStartup = (result: SessionStartResult): void => {
 			if (sessionStartPromises.get(id) === startSettled.promise) sessionStartPromises.delete(id);
 			startSettled.resolve(result);
 		};
@@ -2276,15 +2279,15 @@ export function createNotificationsExtension(
 		try {
 			await host.start();
 			if (runtimes.get(id) !== runtime) {
-				finishStartup("failed");
+				finishStartup({ status: "failed" });
 				await cleanupAbandonedStartup();
-				return "failed";
+				return { status: "failed" };
 			}
 			// Startup contract: identity is committed to the replayable SDK event log
 			// immediately after the host starts, before awaiting notification transport
-			// startup. The native transport receives the same frame only after it is
-			// serving, so it is never an invalid pre-start broadcast; late SDK consumers
-			// recover identity from event_replay rather than ephemeral delivery.
+			// startup. Native frames are ephemeral, so ensure configured daemon owners
+			// before broadcasting identity; late SDK consumers still recover it from
+			// event_replay.
 			const identityHeader = {
 				type: "identity_header",
 				sessionId: id,
@@ -2293,9 +2296,19 @@ export function createNotificationsExtension(
 			host.emitEvent({ kind: identityHeader.type, payload: identityHeader });
 			const endpoint = await server.start();
 			if (runtimes.get(id) !== runtime) {
-				finishStartup("failed");
+				finishStartup({ status: "failed" });
 				await cleanupAbandonedStartup();
-				return "failed";
+				return { status: "failed" };
+			}
+			if (notificationsEnabledForSession && settingsAvailable && settings) {
+				try {
+					if (isTelegramConfigured(cfg))
+						await ensureTelegramDaemonRunning({ settings, cwd: ctx.cwd, sessionId: id });
+					if (isDiscordConfigured(cfg)) await ensureDiscordDaemon(settings);
+					if (isSlackConfigured(cfg)) await ensureSlackDaemon(settings);
+				} catch (e) {
+					logger.warn(`notifications: failed to ensure notification daemon: ${String(e)}`);
+				}
 			}
 			server.pushFrame(JSON.stringify(identityHeader));
 			const agentDir = settings?.getAgentDir?.();
@@ -2381,18 +2394,6 @@ export function createNotificationsExtension(
 				await stopSession(runtime!.id);
 			});
 			logger.info(`notifications: serving session ${id} at ${endpoint.url}`);
-
-			if (notificationsEnabledForSession && settingsAvailable && settings) {
-				try {
-					if (isTelegramConfigured(cfg))
-						await ensureTelegramDaemonRunning({ settings, cwd: ctx.cwd, sessionId: id });
-					if (isDiscordConfigured(cfg)) await ensureDiscordDaemon(settings);
-					if (isSlackConfigured(cfg)) await ensureSlackDaemon(settings);
-				} catch (e) {
-					logger.warn(`notifications: failed to ensure notification daemon: ${String(e)}`);
-				}
-			}
-
 			// A workflow-gate emitter can be installed after session startup.
 			// Attach dynamically so the SDK bus presents every durable gate.
 			const attachWorkflowGate = (gate: WorkflowGateEmitter | undefined): void => {
@@ -2466,13 +2467,13 @@ export function createNotificationsExtension(
 			};
 			activeRuntime.disposeGateEmitterListener = registerWorkflowGateEmitterListener(id, attachWorkflowGate);
 			if (ctx.workflowGate) attachWorkflowGate(ctx.workflowGate);
-			finishStartup("started");
-			return "started";
+			finishStartup({ status: "started", runtime });
+			return { status: "started", runtime };
 		} catch (e) {
 			logger.warn(`notifications: failed to start server: ${String(e)}`);
-			finishStartup("failed");
+			finishStartup({ status: "failed" });
 			if (!(await stopSession(id, "session", runtime))) await cleanupAbandonedStartup();
-			return "failed";
+			return { status: "failed" };
 		}
 	}
 
@@ -2521,18 +2522,25 @@ export function createNotificationsExtension(
 				}
 				disabledSessions.delete(id);
 				const result = await startSession(ctx);
-				const liveRuntime = sessionId(ctx) === id && activeRuntimeId === id ? runtimes.get(id) : undefined;
-				const enabled = (result === "started" || result === "already") && liveRuntime?.host.started === true;
-				if (enabled) liveRuntime.enableNotifications();
+				const expectedRuntime = result.runtime;
+				const expectedGeneration = expectedRuntime?.host.generation;
+				const enabled =
+					(result.status === "started" || result.status === "already") &&
+					sessionId(ctx) === id &&
+					activeRuntimeId === id &&
+					runtimes.get(id) === expectedRuntime &&
+					expectedRuntime?.host.started === true &&
+					expectedRuntime.host.generation === expectedGeneration;
+				if (enabled) expectedRuntime.enableNotifications();
 				ctx.ui.notify(
 					enabled
-						? result === "started"
+						? result.status === "started"
 							? "Notifications enabled for this session."
 							: "Notifications already enabled for this session."
-						: result === "failed"
+						: result.status === "failed"
 							? "Notifications failed to start for this session."
 							: "Notifications were not enabled because the active session changed during startup.",
-					enabled ? "info" : result === "failed" ? "error" : "warning",
+					enabled ? "info" : result.status === "failed" ? "error" : "warning",
 				);
 				return;
 			}

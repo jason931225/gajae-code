@@ -11,13 +11,15 @@ const PACKAGE_SCOPES = ["dependencies", "devDependencies", "peerDependencies", "
 // validation below the shard timeout by splitting package-wide/full-workspace
 // TypeScript suites across the matrix instead of one root-test runner.
 const CODING_AGENT_TEST_SHARDS = 8;
-// SDK and coordinator lifecycle changes need the stable first package shard in
-// addition to their targeted coverage. That shard owns broader integration
-// coverage which is not discoverable by the basename mapper.
+// SDK host lifecycle and coordinator prompt-control changes need the stable first
+// package shard in addition to targeted coverage. Keep this list limited to the
+// stateful surfaces whose regressions depend on broader package ordering.
 const CODING_AGENT_SHARD_ONE_COVERAGE_PATHS = [
-	"packages/coding-agent/src/sdk/",
-	"packages/coding-agent/src/coordinator/",
+	"packages/coding-agent/src/sdk/bus/",
+	"packages/coding-agent/src/sdk/host/",
+	"packages/coding-agent/src/coordinator-mcp/",
 	"packages/coding-agent/test/sdk-host-wiring.test.ts",
+	"packages/coding-agent/test/coordinator-mcp/send-prompt-concurrency.test.ts",
 ] as const;
 
 

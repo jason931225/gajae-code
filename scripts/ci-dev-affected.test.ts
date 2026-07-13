@@ -289,12 +289,14 @@ describe("planTargetedTasks PR-mode targeting", () => {
 		expect(testTask?.command).toEqual(["bun", "test", "packages/coding-agent/test/edit/foo.test.ts"]);
 	});
 
-	test("SDK, coordinator, and SDK host wiring changes include only coding-agent shard 1", () => {
+	test("SDK host and coordinator prompt-control changes include only coding-agent shard 1", () => {
 		const shardOne = "test:@gajae-code/coding-agent:shard-1-of-8";
 		for (const changedPath of [
 			"packages/coding-agent/src/sdk/bus/index.ts",
-			"packages/coding-agent/src/coordinator/contract.ts",
+			"packages/coding-agent/src/sdk/host/reverse-leases.ts",
+			"packages/coding-agent/src/coordinator-mcp/server.ts",
 			"packages/coding-agent/test/sdk-host-wiring.test.ts",
+			"packages/coding-agent/test/coordinator-mcp/send-prompt-concurrency.test.ts",
 		]) {
 			const tasks = targeted([changedPath]);
 			const keys = tasks.map(task => task.key);

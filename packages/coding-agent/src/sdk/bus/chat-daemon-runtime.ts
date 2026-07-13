@@ -75,6 +75,13 @@ type AttachedSession = Readonly<{
 	dispose: () => void;
 }>;
 
+function notificationFrame(frame: Record<string, unknown>): Record<string, unknown> {
+	const payload = frame.type === "event" ? frame.payload : undefined;
+	return payload && typeof payload === "object" && !Array.isArray(payload)
+		? (payload as Record<string, unknown>)
+		: frame;
+}
+
 function eventName(frame: Record<string, unknown>): string | undefined {
 	return frame.type === "event" && typeof frame.name === "string" ? frame.name : undefined;
 }
@@ -353,7 +360,8 @@ export class ChatDaemonRuntime {
 	}
 	private async handleFrame(attached: AttachedSession, frame: Record<string, unknown>): Promise<void> {
 		if (this.#sessions.get(attached.sessionId) !== attached) return;
-		const frameSessionId = sessionIdFrom(frame);
+		const normalizedFrame = notificationFrame(frame);
+		const frameSessionId = sessionIdFrom(normalizedFrame) ?? sessionIdFrom(frame);
 		if (frameSessionId !== undefined && frameSessionId !== attached.sessionId) return;
 		const sessionId = attached.sessionId;
 		const name = eventName(frame);
@@ -366,7 +374,7 @@ export class ChatDaemonRuntime {
 			await this.resume(sessionId, attached.generation, "GJC session ready.");
 			return;
 		}
-		const notification = this.#notificationEvent(sessionId, frame);
+		const notification = this.#notificationEvent(sessionId, normalizedFrame);
 		if (notification?.type === "action_resolved") {
 			await Promise.all([
 				this.#discord?.resolveAction(sessionId, notification.id),

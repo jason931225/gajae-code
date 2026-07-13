@@ -109,6 +109,44 @@ describe("directed reverse RPC leases", () => {
 		runtime.dispose();
 	});
 
+	test("dispose remains atomic when external cleanup hooks throw", async () => {
+		let requestId = "";
+		const runtime = new ReverseLeaseRuntime({
+			sendFrame: (_connectionId, frame) => {
+				requestId = String(frame.id);
+			},
+			onDefinitionsRemoved: () => {
+				throw new Error("definition cleanup failed");
+			},
+			onCancel: () => {
+				throw new Error("cancel hook failed");
+			},
+		});
+		runtime.registerProvider("owner", "permission", [{ name: "request" }], undefined, "key");
+		const pending = runtime.request("permission", "request", {});
+		expect(() => runtime.dispose()).not.toThrow();
+		await expect(pending).rejects.toThrow("request_cancelled");
+		expect(runtime.getLease("permission")).toBeUndefined();
+		expect(runtime.getInstalledDefinitions("permission")).toBeUndefined();
+		expect(() => runtime.respond("owner", requestId, "missing", {})).toThrow("unknown_request");
+		expect(runtime.registerProvider("next", "permission", [], undefined, "key").connectionId).toBe("next");
+		runtime.dispose();
+	});
+
+	test("synchronous reverse send failures remove the pending request", async () => {
+		let requestId = "";
+		const runtime = new ReverseLeaseRuntime({
+			sendFrame: (_connectionId, frame) => {
+				requestId = String(frame.id);
+				throw new Error("send failed");
+			},
+		});
+		const lease = runtime.registerProvider("owner", "ui", {});
+		await expect(runtime.request("ui", "select", {})).rejects.toThrow("send failed");
+		expect(() => runtime.respond("owner", requestId, lease.leaseId, {})).toThrow("unknown_request");
+		runtime.dispose();
+	});
+
 	test("accepts structured error responses without a result payload", async () => {
 		const sent: Array<Record<string, unknown>> = [];
 		const runtime = new ReverseLeaseRuntime({

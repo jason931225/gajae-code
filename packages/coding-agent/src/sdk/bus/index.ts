@@ -550,8 +550,8 @@ function pushSessionFrame(
 	runtime: Pick<SessionRuntime, "server" | "host">,
 	frame: { type: string; [key: string]: unknown },
 ): void {
-	runtime.server.pushFrame(JSON.stringify(frame));
 	runtime.host.emitEvent({ kind: frame.type, payload: frame });
+	runtime.server.pushFrame(JSON.stringify(frame));
 }
 
 /** Agent lifecycle is SDK session truth, independent of optional chat delivery. */
@@ -1530,6 +1530,7 @@ export function createNotificationsExtension(
 ): void {
 	const runtimes = new Map<string, SessionRuntime>();
 	const disabledSessions = new Set<string>();
+	const sessionStartPromises = new Map<string, Promise<void>>();
 	let activeRuntimeId: string | undefined;
 	let identityControlInFlight = false;
 	let deferredIdentityRotation: { event: { previousSessionFile?: string }; ctx: ExtensionContext } | undefined;
@@ -1543,8 +1544,15 @@ export function createNotificationsExtension(
 	const sessionId = (ctx: ExtensionContext): string => ctx.sessionManager.getSessionId();
 	const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-	async function stopSession(id: string, reason: "session" | "notifications" = "session"): Promise<boolean> {
+	async function stopSession(
+		id: string,
+		reason: "session" | "notifications" = "session",
+		expectedRuntime?: SessionRuntime,
+	): Promise<boolean> {
+		const pendingStart = sessionStartPromises.get(id);
+		if (pendingStart) await pendingStart;
 		const rt = runtimes.get(id);
+		if (expectedRuntime && rt !== expectedRuntime) return false;
 		if (!rt) {
 			if (activeRuntimeId === id) activeRuntimeId = undefined;
 			return false;
@@ -1593,6 +1601,7 @@ export function createNotificationsExtension(
 		} catch (e) {
 			logger.warn(`sdk host: stop failed: ${String(e)}`);
 		}
+		rt.host.reverse.dispose();
 		// Resolve any still-pending interactive asks so the ask tool is not left hanging.
 		for (const pending of rt.pendingInteractive.values()) pending.resolve(undefined);
 		rt.pendingInteractive.clear();
@@ -1941,6 +1950,64 @@ export function createNotificationsExtension(
 			},
 		});
 
+		// Install the runtime before either transport can expose the host. session_start
+		// is deliberately fire-and-forget, so agent lifecycle events and direct v3
+		// seam replies can otherwise arrive between server.start() and the old
+		// registration below. Keeping this state live first makes those frames
+		// replayable rather than dropping them (or dereferencing an absent runtime).
+		runtime = {
+			server,
+			host,
+			revisions,
+			cursors,
+			id,
+			idleSeq: 0,
+			pendingInteractive,
+			disposeAnswerSource: () => {},
+			disposeFileSink: () => {},
+			disposeGateListener: () => {},
+			notificationsActive: false,
+			enableNotifications: () => {},
+			disposeGateTerminalController: () => {},
+			disposeAckRecoveryParticipant: () => {},
+			disposeGateEmitterListener: () => {},
+			workflowGate: undefined,
+			gatePresentations,
+			cancelPostmortemCleanup: () => {},
+			stopBrokerHeartbeat,
+
+			redact,
+			verbosity,
+			stream: streamingEnabled(),
+			sessionTag: tag,
+			busy: false,
+			pendingPromptCorrelations,
+			activePromptCorrelation: undefined,
+			recordPromptTerminal,
+			pendingInbound: new Set<number>(),
+		};
+		runtimes.set(id, runtime);
+		activeRuntimeId = id;
+		const startSettled = Promise.withResolvers<void>();
+		sessionStartPromises.set(id, startSettled.promise);
+		const finishStartup = (): void => {
+			if (sessionStartPromises.get(id) === startSettled.promise) sessionStartPromises.delete(id);
+			startSettled.resolve();
+		};
+		const cleanupAbandonedStartup = async (): Promise<void> => {
+			try {
+				server.stop();
+			} catch {}
+			try {
+				await host.stop();
+				host.reverse.dispose();
+			} catch {}
+			try {
+				cursors.close();
+				await revisions.close();
+			} catch {}
+		};
+
 		server.onSdkFrame((err, inbound) => {
 			if (err || !inbound) return;
 			try {
@@ -2206,7 +2273,29 @@ export function createNotificationsExtension(
 
 		try {
 			await host.start();
+			if (runtimes.get(id) !== runtime) {
+				finishStartup();
+				await cleanupAbandonedStartup();
+				return "failed";
+			}
+			// Publish the initial replayable identity before server.start() writes the
+			// endpoint. A client that discovers the endpoint must never observe a
+			// session_ready-only generation while startup continues asynchronously.
+			try {
+				pushSessionFrame(runtime, {
+					type: "identity_header",
+					sessionId: id,
+					...buildIdentity(ctx.cwd, ctx.sessionManager.getSessionName()),
+				});
+			} catch (e) {
+				logger.warn(`notifications: identity_header failed: ${String(e)}`);
+			}
 			const endpoint = await server.start();
+			if (runtimes.get(id) !== runtime) {
+				finishStartup();
+				await cleanupAbandonedStartup();
+				return "failed";
+			}
 			const agentDir = settings?.getAgentDir?.();
 			if (agentDir) {
 				try {
@@ -2248,39 +2337,7 @@ export function createNotificationsExtension(
 				}
 			}
 
-			runtime = {
-				server,
-				host,
-				revisions,
-				cursors,
-				id,
-				idleSeq: 0,
-				pendingInteractive,
-				disposeAnswerSource: () => {},
-				disposeFileSink: () => {},
-				disposeGateListener: () => {},
-				notificationsActive: false,
-				enableNotifications: () => {},
-				disposeGateTerminalController: () => {},
-				disposeAckRecoveryParticipant: () => {},
-				disposeGateEmitterListener: () => {},
-				workflowGate: undefined,
-				gatePresentations,
-				cancelPostmortemCleanup: () => {},
-				stopBrokerHeartbeat,
-
-				redact,
-				verbosity,
-				stream: streamingEnabled(),
-				sessionTag: tag,
-				busy: false,
-				pendingPromptCorrelations,
-				activePromptCorrelation: undefined,
-				recordPromptTerminal,
-				pendingInbound: new Set<number>(),
-			};
-			runtimes.set(id, runtime);
-			activeRuntimeId = id;
+			runtime.stopBrokerHeartbeat = stopBrokerHeartbeat;
 			const startedRuntime = runtime;
 			runtime.enableNotifications = () => {
 				const runtime = startedRuntime;
@@ -2332,18 +2389,6 @@ export function createNotificationsExtension(
 				} catch (e) {
 					logger.warn(`notifications: failed to ensure notification daemon: ${String(e)}`);
 				}
-			}
-
-			// One-time identity header (repo/branch/machine/session) pinned at the top
-			// of the session thread by the daemon.
-			try {
-				pushSessionFrame(runtime, {
-					type: "identity_header",
-					sessionId: id,
-					...buildIdentity(ctx.cwd, ctx.sessionManager.getSessionName()),
-				});
-			} catch (e) {
-				logger.warn(`notifications: identity_header failed: ${String(e)}`);
 			}
 
 			// A workflow-gate emitter can be installed after session startup.
@@ -2419,15 +2464,12 @@ export function createNotificationsExtension(
 			};
 			activeRuntime.disposeGateEmitterListener = registerWorkflowGateEmitterListener(id, attachWorkflowGate);
 			if (ctx.workflowGate) attachWorkflowGate(ctx.workflowGate);
+			finishStartup();
 			return "started";
 		} catch (e) {
 			logger.warn(`notifications: failed to start server: ${String(e)}`);
-			stopBrokerHeartbeat();
-			try {
-				await host.stop();
-			} catch (stopError) {
-				logger.warn(`sdk host: startup cleanup failed: ${String(stopError)}`);
-			}
+			finishStartup();
+			if (!(await stopSession(id, "session", runtime))) await cleanupAbandonedStartup();
 			return "failed";
 		}
 	}

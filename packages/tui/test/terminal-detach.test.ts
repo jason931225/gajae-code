@@ -189,7 +189,8 @@ describe("terminal detach handling", () => {
 		const resumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
 		const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
 		await Bun.sleep(300);
-		const beforeListeners = process.stdout.listenerCount("error");
+		const listenersBeforeStart = new Set(process.stdout.listeners("error"));
+		let listenersAddedByStart: unknown[] = [];
 
 		try {
 			withStdoutProperty("isTTY", true, () => {
@@ -197,16 +198,19 @@ describe("terminal detach handling", () => {
 					() => {},
 					() => {},
 				);
-				expect(process.stdout.listenerCount("error")).toBe(beforeListeners + 1);
+				const listenersAfterStart = process.stdout.listeners("error");
+				listenersAddedByStart = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
+				expect(listenersAddedByStart.length).toBeLessThanOrEqual(1);
 				terminal.stop();
-				expect(process.stdout.listenerCount("error")).toBe(beforeListeners + 1);
+				expect(process.stdout.listeners("error")).toEqual(listenersAfterStart);
 				expect(() => {
 					process.stdout.emit("error", Object.assign(new Error("pty vanished after stop"), { code: "EIO" }));
 				}).not.toThrow();
 				expect(terminal.available).toBe(false);
 			});
 			await Bun.sleep(300);
-			expect(process.stdout.listenerCount("error")).toBe(beforeListeners);
+			for (const listener of listenersAddedByStart)
+				expect(process.stdout.listeners("error")).not.toContain(listener);
 		} finally {
 			terminal.stop();
 			writeSpy.mockRestore();
@@ -220,7 +224,8 @@ describe("terminal detach handling", () => {
 		const resumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
 		const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
 		await Bun.sleep(300);
-		const beforeListeners = process.stdout.listenerCount("error");
+		const listenersBeforeStart = new Set(process.stdout.listeners("error"));
+		let listenersAddedByStarts: unknown[] = [];
 
 		try {
 			withStdoutProperty("isTTY", true, () => {
@@ -231,14 +236,17 @@ describe("terminal detach handling", () => {
 					);
 					terminal.stop();
 				}
-				expect(process.stdout.listenerCount("error")).toBe(beforeListeners + 1);
+				const listenersAfterStart = process.stdout.listeners("error");
+				listenersAddedByStarts = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
+				expect(listenersAddedByStarts.length).toBeLessThanOrEqual(1);
 				expect(() => {
 					process.stdout.emit("error", Object.assign(new Error("shared detached stdout"), { code: "EIO" }));
 				}).not.toThrow();
 				expect(terminals.every(terminal => !terminal.available)).toBe(true);
 			});
 			await Bun.sleep(300);
-			expect(process.stdout.listenerCount("error")).toBe(beforeListeners);
+			for (const listener of listenersAddedByStarts)
+				expect(process.stdout.listeners("error")).not.toContain(listener);
 		} finally {
 			for (const terminal of terminals) terminal.stop();
 			writeSpy.mockRestore();

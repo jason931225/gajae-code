@@ -5936,7 +5936,7 @@ export class AgentSession {
 			reload: async () => {
 				await this.reload();
 			},
-			getSystemPrompt: () => this.systemPrompt,
+			getSystemPrompt: () => [...this.systemPrompt],
 		};
 	}
 

@@ -86,17 +86,21 @@ describe("durable default model selection documentation", () => {
 		expect(bridgeDoc).toContain("| `set_default_model_selection` | `model` |");
 	});
 
-	test("records the limited durable default in Unreleased", async () => {
+	test("records the limited durable default in the changelog", async () => {
 		// Given the package changelog
 		const changelog = await readRepositoryFile("packages/coding-agent/CHANGELOG.md");
 
-		// When the Unreleased section is inspected
-		const unreleased = changelog.match(/## \[Unreleased\][\s\S]*?(?=\n## \[|$)/)?.[0];
+		// When the Unreleased section plus the most recent released section are
+		// inspected (a release moves Unreleased content into a version section,
+		// so this contract must survive the release commit itself)
+		const currentSections = changelog.match(
+			/## \[Unreleased\][\s\S]*?(?=\n## \[|$)(?:\n## \[\d+\.\d+\.\d+\][\s\S]*?(?=\n## \[|$))?/,
+		)?.[0];
 
 		// Then it records the durable selector without overstating precedence
-		expect(unreleased).toContain(
+		expect(currentSections).toContain(
 			"RPC clients can now durably select the machine-global default model and effective thinking level for subsequent messages",
 		);
-		expect(unreleased).toContain("while project policy and resumed session history retain precedence");
+		expect(currentSections).toContain("while project policy and resumed session history retain precedence");
 	});
 });

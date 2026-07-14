@@ -193,8 +193,22 @@ describe("terminal detach handling", () => {
 		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 		const resumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
 		const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
-		await Bun.sleep(300);
-		const beforeListeners = process.stdout.listenerCount("error");
+		// Wait for any prior test's shared stdout-error dispatcher to be torn down
+		// (STDOUT_ERROR_HANDLER_GRACE_MS = 250). Require the count to hold steady for
+		// longer than the grace window so a still-pending removal timer can't be
+		// mistaken for a stable baseline under CI load.
+		let beforeListeners = process.stdout.listenerCount("error");
+		let stableForMs = 0;
+		for (let waited = 0; waited < 8000 && stableForMs < 400; waited += 50) {
+			await Bun.sleep(50);
+			const current = process.stdout.listenerCount("error");
+			if (current === beforeListeners) {
+				stableForMs += 50;
+			} else {
+				beforeListeners = current;
+				stableForMs = 0;
+			}
+		}
 
 		try {
 			withStdoutProperty("isTTY", true, () => {
@@ -230,8 +244,18 @@ describe("terminal detach handling", () => {
 		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 		const resumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
 		const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
-		await Bun.sleep(300);
-		const beforeListeners = process.stdout.listenerCount("error");
+		let beforeListeners = process.stdout.listenerCount("error");
+		let stableForMs = 0;
+		for (let waited = 0; waited < 8000 && stableForMs < 400; waited += 50) {
+			await Bun.sleep(50);
+			const current = process.stdout.listenerCount("error");
+			if (current === beforeListeners) {
+				stableForMs += 50;
+			} else {
+				beforeListeners = current;
+				stableForMs = 0;
+			}
+		}
 
 		try {
 			withStdoutProperty("isTTY", true, () => {

@@ -172,6 +172,12 @@ function isWindowsSubsystemForLinux(): boolean {
 }
 const STDOUT_ERROR_HANDLER_GRACE_MS = 250;
 const stdoutErrorSubscribers = new Set<(err: Error) => void>();
+export function __stdoutErrorSubscriberCountForTests(): number {
+	return stdoutErrorSubscribers.size;
+}
+export function __stdoutErrorDispatcherInstalledForTests(): boolean {
+	return process.stdout.listeners("error").includes(dispatchStdoutError);
+}
 const dispatchStdoutError = (err: Error): void => {
 	for (const subscriber of stdoutErrorSubscribers) subscriber(err);
 };

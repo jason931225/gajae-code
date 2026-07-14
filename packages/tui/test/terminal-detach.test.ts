@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "bun:test";
-import { ProcessTerminal, type Terminal, type TerminalAppearance } from "@gajae-code/tui/terminal";
+import {
+	__stdoutErrorDispatcherInstalledForTests,
+	__stdoutErrorSubscriberCountForTests,
+	ProcessTerminal,
+	type Terminal,
+	type TerminalAppearance,
+} from "@gajae-code/tui/terminal";
 import { type Component, CURSOR_MARKER, TUI } from "@gajae-code/tui/tui";
 
 class StaticComponent implements Component {
@@ -188,8 +194,12 @@ describe("terminal detach handling", () => {
 		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 		const resumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
 		const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
+		const ambientListener = (): void => {};
+		process.stdout.on("error", ambientListener);
 		await Bun.sleep(300);
-		const beforeListeners = process.stdout.listenerCount("error");
+		const listenersBeforeStart = new Set(process.stdout.listeners("error"));
+		const subscribersBeforeStart = __stdoutErrorSubscriberCountForTests();
+		const dispatcherWasInstalled = __stdoutErrorDispatcherInstalledForTests();
 
 		try {
 			withStdoutProperty("isTTY", true, () => {
@@ -197,21 +207,28 @@ describe("terminal detach handling", () => {
 					() => {},
 					() => {},
 				);
-				expect(process.stdout.listenerCount("error")).toBe(beforeListeners + 1);
+				const listenersAfterStart = process.stdout.listeners("error");
+				const listenersAddedByStart = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
+				expect(listenersAddedByStart).toHaveLength(dispatcherWasInstalled ? 0 : 1);
+				expect(__stdoutErrorDispatcherInstalledForTests()).toBe(true);
+				expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart + 1);
 				terminal.stop();
-				expect(process.stdout.listenerCount("error")).toBe(beforeListeners + 1);
+				expect(process.stdout.listeners("error")).toEqual(listenersAfterStart);
 				expect(() => {
 					process.stdout.emit("error", Object.assign(new Error("pty vanished after stop"), { code: "EIO" }));
 				}).not.toThrow();
 				expect(terminal.available).toBe(false);
 			});
 			await Bun.sleep(300);
-			expect(process.stdout.listenerCount("error")).toBe(beforeListeners);
+			expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart);
+			expect(process.stdout.listeners("error")).toContain(ambientListener);
+			expect(__stdoutErrorDispatcherInstalledForTests()).toBe(dispatcherWasInstalled);
 		} finally {
 			terminal.stop();
 			writeSpy.mockRestore();
 			resumeSpy.mockRestore();
 			pauseSpy.mockRestore();
+			process.stdout.removeListener("error", ambientListener);
 		}
 	});
 	it("shares one stdout error listener across terminals during cleanup grace periods", async () => {
@@ -219,8 +236,12 @@ describe("terminal detach handling", () => {
 		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 		const resumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
 		const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
+		const ambientListener = (): void => {};
+		process.stdout.on("error", ambientListener);
 		await Bun.sleep(300);
-		const beforeListeners = process.stdout.listenerCount("error");
+		const listenersBeforeStart = new Set(process.stdout.listeners("error"));
+		const subscribersBeforeStart = __stdoutErrorSubscriberCountForTests();
+		const dispatcherWasInstalled = __stdoutErrorDispatcherInstalledForTests();
 
 		try {
 			withStdoutProperty("isTTY", true, () => {
@@ -231,19 +252,26 @@ describe("terminal detach handling", () => {
 					);
 					terminal.stop();
 				}
-				expect(process.stdout.listenerCount("error")).toBe(beforeListeners + 1);
+				const listenersAfterStart = process.stdout.listeners("error");
+				const listenersAddedByStarts = listenersAfterStart.filter(listener => !listenersBeforeStart.has(listener));
+				expect(listenersAddedByStarts).toHaveLength(dispatcherWasInstalled ? 0 : 1);
+				expect(__stdoutErrorDispatcherInstalledForTests()).toBe(true);
+				expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart + terminals.length);
 				expect(() => {
 					process.stdout.emit("error", Object.assign(new Error("shared detached stdout"), { code: "EIO" }));
 				}).not.toThrow();
 				expect(terminals.every(terminal => !terminal.available)).toBe(true);
 			});
 			await Bun.sleep(300);
-			expect(process.stdout.listenerCount("error")).toBe(beforeListeners);
+			expect(__stdoutErrorSubscriberCountForTests()).toBe(subscribersBeforeStart);
+			expect(process.stdout.listeners("error")).toContain(ambientListener);
+			expect(__stdoutErrorDispatcherInstalledForTests()).toBe(dispatcherWasInstalled);
 		} finally {
 			for (const terminal of terminals) terminal.stop();
 			writeSpy.mockRestore();
 			resumeSpy.mockRestore();
 			pauseSpy.mockRestore();
+			process.stdout.removeListener("error", ambientListener);
 		}
 	});
 

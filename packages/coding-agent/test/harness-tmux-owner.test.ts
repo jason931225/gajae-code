@@ -137,6 +137,10 @@ async function runHarness(
 				...cliEnv.env,
 				GJC_HARNESS_STATE_ROOT: root,
 				GJC_HARNESS_TEST_ASSUME_LINUX_OWNER_ISOLATION: "1",
+				// The owner process must not inherit the test runner's ambient tmux client:
+				// its startup title update would target that shared server instead of the
+				// private -L socket exercised by this fixture.
+				TMUX: "",
 				GJC_TMUX_COMMAND: tmuxCommand,
 				...env,
 			},

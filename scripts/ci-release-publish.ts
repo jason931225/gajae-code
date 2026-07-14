@@ -773,6 +773,9 @@ interface PublishRetainedPackageOperations {
 	readTarball(record: PackageEvidenceRecord, tarballPath: string): Promise<Buffer>;
 	observe(record: PackageEvidenceRecord, retainedTarball: Buffer): Promise<RegistryPackageObservation | undefined>;
 	publish(tarballPath: string): Promise<PublishAttempt>;
+	sleep?(ms: number): Promise<void>;
+	visibilityRetries?: number;
+	visibilityDelayMs?: number;
 }
 
 export async function publishRetainedPackage(
@@ -807,7 +810,19 @@ export async function publishRetainedPackage(
 		}
 		throw new Error(`npm publish failed for ${record.name}@${record.version}: ${publish.output || `exit ${publish.exitCode ?? "unknown"}`}`);
 	}
-	const observed = await operations.observe(record, retainedTarball);
+	let observed = await operations.observe(record, retainedTarball);
+	if (observed === undefined) {
+		// npm's registry is read-after-write eventually consistent: a version that just
+		// published successfully can be briefly invisible to a follow-up read. Re-observe
+		// with backoff so a propagation lag is not reported as a publish failure.
+		const retries = operations.visibilityRetries ?? 12;
+		const delayMs = operations.visibilityDelayMs ?? 5000;
+		const sleep = operations.sleep ?? ((ms: number) => Bun.sleep(ms));
+		for (let attempt = 0; attempt < retries && observed === undefined; attempt++) {
+			await sleep(delayMs);
+			observed = await operations.observe(record, retainedTarball);
+		}
+	}
 	if (observed === undefined) throw new Error(`Registry did not expose ${record.name}@${record.version} after publish`);
 	assertExactRegistryObservation(record, observed);
 	return observed;

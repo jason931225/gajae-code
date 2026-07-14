@@ -210,7 +210,13 @@ describe("terminal detach handling", () => {
 				}).not.toThrow();
 				expect(terminal.available).toBe(false);
 			});
-			await Bun.sleep(300);
+			for (
+				let waited = 0;
+				waited < 3000 && process.stdout.listenerCount("error") !== beforeListeners;
+				waited += 25
+			) {
+				await Bun.sleep(25);
+			}
 			expect(process.stdout.listenerCount("error")).toBe(beforeListeners);
 		} finally {
 			terminal.stop();
@@ -242,7 +248,13 @@ describe("terminal detach handling", () => {
 				}).not.toThrow();
 				expect(terminals.every(terminal => !terminal.available)).toBe(true);
 			});
-			await Bun.sleep(300);
+			for (
+				let waited = 0;
+				waited < 3000 && process.stdout.listenerCount("error") !== beforeListeners;
+				waited += 25
+			) {
+				await Bun.sleep(25);
+			}
 			expect(process.stdout.listenerCount("error")).toBe(beforeListeners);
 		} finally {
 			for (const terminal of terminals) terminal.stop();

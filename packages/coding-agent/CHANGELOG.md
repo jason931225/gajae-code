@@ -11,6 +11,7 @@
 ### Changed
 
 - Documented the current GPT-5.6 Codex and combo profile mappings as product judgments, including the durable `opus-codex` `anthropic/claude-sonnet-5` planner override and `fable-opus-codex` `anthropic/claude-opus-4-8:medium` planner.
+- RPC clients can now durably select the machine-global default model and effective thinking level for subsequent messages, while project policy and resumed session history retain precedence; a late live-apply failure now restores the prior runtime model and thinking level without masking the original error.
 
 ### Fixed
 

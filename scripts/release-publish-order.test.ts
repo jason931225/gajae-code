@@ -460,6 +460,10 @@ describe("native release binary coverage", () => {
 		expect(githubVerify).toContain("needs: [release_github_final_evidence, release_context, release_source_verify]");
 		expect(githubVerify).toContain("needs.release_github_final_evidence.result == 'success'");
 		expect(githubVerify).toContain("needs.release_source_verify.result == 'success'");
+		// release_github_verify runs gh without a checkout; GH_REPO is the only
+		// repository context. Removing it fails post-publish with
+		// "not a git repository" and skips stable finalization (v0.11.0).
+		expect(githubVerify.split("GH_REPO: ${{ github.repository }}").length - 1).toBe(2);
 		expect(finalize).toContain("needs: [release_npm_publish, release_github_final_evidence, release_github_verify, release_context, release_source_verify]");
 		expect(finalize).toContain("needs.release_npm_publish.result == 'success'");
 		expect(finalize).toContain("needs.release_github_final_evidence.result == 'success'");

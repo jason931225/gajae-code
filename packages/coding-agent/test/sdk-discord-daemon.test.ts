@@ -17,6 +17,7 @@ import type { DiscordConversation } from "../src/sdk/bus/discord-conversation";
 import {
 	type DiscordEndpointBinding,
 	DiscordEndpointBindingError,
+	type DiscordLeaseRecoveryScheduler,
 	DiscordNotificationDaemon,
 	type DiscordNotificationDaemonOptions,
 } from "../src/sdk/bus/discord-daemon";
@@ -29,6 +30,40 @@ import type {
 import { SdkClientError } from "../src/sdk/client/client";
 
 const actionCustomIds = new Map<string, string>();
+
+class ManualLeaseRecoveryScheduler implements DiscordLeaseRecoveryScheduler {
+	#next: { handle: unknown; callback: () => void | Promise<void>; delayMs: number } | undefined;
+
+	constructor(private readonly handle: unknown = {}) {}
+
+	setTimeout(callback: () => void | Promise<void>, delayMs: number): unknown {
+		this.#next = { handle: this.handle, callback, delayMs };
+		return this.handle;
+	}
+
+	clearTimeout(handle: unknown): void {
+		if (this.#next?.handle === handle) this.#next = undefined;
+	}
+
+	get delayMs(): number | undefined {
+		return this.#next?.delayMs;
+	}
+
+	get pending(): boolean {
+		return this.#next !== undefined;
+	}
+
+	takeNext(): () => void | Promise<void> {
+		const next = this.#next;
+		if (!next) throw new Error("Expected a scheduled Discord lease recovery.");
+		this.#next = undefined;
+		return next.callback;
+	}
+
+	async runNext(): Promise<void> {
+		await this.takeNext()();
+	}
+}
 
 class FakeDiscordProvider implements DiscordProvider {
 	readonly applicationId = "app";
@@ -2089,6 +2124,7 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 			});
 			await journal.claim(leasedEffectId, "dead-worker", 10);
 			const commands: string[] = [];
+			const recoveryScheduler = new ManualLeaseRecoveryScheduler();
 			restarted = new DiscordNotificationDaemon({
 				agentDir,
 				repo: agentDir,
@@ -2096,6 +2132,7 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 				parentChannelId: "parent",
 				provider,
 				now: () => now,
+				leaseRecoveryScheduler: recoveryScheduler,
 				resolveEndpoint: endpoint,
 				onCommand: async (_sessionId, command) => {
 					commands.push(command);
@@ -2103,12 +2140,14 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 				},
 			});
 			await restarted.start();
+			expect(recoveryScheduler.delayMs).toBe(10);
 			failScheduledDrain = true;
 			now = 11;
-			await Bun.sleep(30);
+			await recoveryScheduler.runNext();
 			expect(failedScheduledDrains).toBe(1);
+			expect(recoveryScheduler.delayMs).toBe(50);
 			failScheduledDrain = false;
-			await Bun.sleep(100);
+			await recoveryScheduler.runNext();
 			expect(commands).toEqual(["/sdk query recovered"]);
 			await restarted.stop();
 			restarted = undefined;
@@ -2135,6 +2174,7 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 			now = 20;
 			await journal.claim(stoppedEffectId, "dead-worker", 10);
 			const stoppedCommands: string[] = [];
+			const stoppedRecoveryScheduler = new ManualLeaseRecoveryScheduler(0);
 			restarted = new DiscordNotificationDaemon({
 				agentDir,
 				repo: agentDir,
@@ -2142,6 +2182,7 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 				parentChannelId: "parent",
 				provider,
 				now: () => now,
+				leaseRecoveryScheduler: stoppedRecoveryScheduler,
 				resolveEndpoint: endpoint,
 				onCommand: async (_sessionId, command) => {
 					stoppedCommands.push(command);
@@ -2149,11 +2190,20 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 				},
 			});
 			await restarted.start();
+			expect(stoppedRecoveryScheduler.pending).toBe(true);
+			await restarted.stop();
+			expect(stoppedRecoveryScheduler.pending).toBe(false);
+
+			await restarted.start();
+			const staleRecovery = stoppedRecoveryScheduler.takeNext();
+			await restarted.stop();
+			await restarted.start();
+			expect(stoppedRecoveryScheduler.pending).toBe(true);
+			now = 31;
+			await staleRecovery();
+			expect(stoppedCommands).toEqual([]);
 			await restarted.stop();
 			restarted = undefined;
-			now = 31;
-			await Bun.sleep(20);
-			expect(stoppedCommands).toEqual([]);
 		} finally {
 			await restarted?.stop();
 			await fs.rm(agentDir, { recursive: true, force: true });

@@ -2828,8 +2828,8 @@ mod tests {
 		{
 			Some(Ok(Message::Close(Some(frame)))) => {
 				assert_eq!(frame.code, CloseCode::Size);
-			}
-			Some(Err(_)) | None => {}
+			},
+			Some(Err(_)) | None => {},
 			Some(Ok(message)) => panic!("unexpected non-close message: {message:?}"),
 		}
 

@@ -573,16 +573,32 @@ async function writePlan(cwd: string, plan: UltragoalPlan, sessionId?: string | 
 
 function chooseReceiptKind(
 	plan: UltragoalPlan,
+	ledger: readonly UltragoalLedgerEvent[],
 	goal: UltragoalGoal,
 	status: UltragoalGoalStatus,
 ): UltragoalReceiptKind {
 	if (plan.gjcGoalMode === "per-story") return "per-goal";
 	if (status !== "complete") return "per-goal";
+	// A non-final validation-batch member must always carry a per-goal
+	// deferred receipt; only the batch's final goal may close the batch and
+	// (in aggregate mode) carry the final-aggregate receipt. Without this, a
+	// context-stale re-verification replay of a member could mint an invalid
+	// final-aggregate receipt with validationBatch.role "deferred-member".
+	if (goal.validationBatch && goal.validationBatch.finalGoalId !== goal.id) return "per-goal";
 	const requiredGoals = requiredUltragoalGoals(plan);
-	const existingFinalAggregateGoal = requiredGoals.find(
-		item => item.id !== goal.id && item.completionVerification?.receiptKind === "final-aggregate",
-	);
-	if (existingFinalAggregateGoal) return "per-goal";
+	// Only a still-fresh final-aggregate receipt on another goal defers this
+	// checkpoint to per-goal. A stale one (e.g. staled by `steer add_subgoal`
+	// appending goals after a terminal run) must not suppress re-minting,
+	// otherwise the run can never regain a verifiable final-aggregate receipt:
+	// the completion guard demands a fresh final-aggregate receipt while this
+	// gate would keep answering per-goal forever.
+	const existingFreshFinalAggregateGoal = requiredGoals.find(item => {
+		if (item.id === goal.id) return false;
+		const receipt = item.completionVerification;
+		if (receipt?.receiptKind !== "final-aggregate") return false;
+		return validateReceiptFreshBase({ plan, ledger, goal: item, receipt, receiptKind: "final-aggregate" }) === null;
+	});
+	if (existingFreshFinalAggregateGoal) return "per-goal";
 	const unfinishedRequiredGoals = requiredGoals.filter(
 		item => item.id !== goal.id && !TERMINAL_OR_SKIPPED_STATUSES.has(item.status),
 	);
@@ -3964,13 +3980,21 @@ export async function checkpointUltragoalGoal(input: {
 	const evidence = input.evidence.trim();
 	if (!evidence) throw new Error("checkpoint evidence is required");
 	const ledgerBefore = await readUltragoalLedger(input.cwd);
-	const matchingIdempotentEvent = ledgerBefore.find(
+	const matchingIdempotentEvents = ledgerBefore.filter(
 		event =>
 			event.event === "goal_checkpointed" &&
 			event.goalId === goal.id &&
 			event.status === input.status &&
 			event.evidence === evidence,
 	);
+	// Re-verification replays legitimately append repeated same-status,
+	// same-evidence checkpoint events for one goal. The recorded receipt must
+	// be compared against ITS OWN checkpoint event — resolved by the receipt's
+	// checkpointLedgerEventId, falling back to the latest match — never the
+	// oldest duplicate, which would wrongly report the current receipt stale.
+	const matchingIdempotentEvent =
+		matchingIdempotentEvents.find(event => event.eventId === goal.completionVerification?.checkpointLedgerEventId) ??
+		matchingIdempotentEvents.at(-1);
 	const batchMetadata = input.status === "complete" ? requireFreshValidationBatchMetadata(goal) : undefined;
 	if (batchMetadata && goal.completionVerification?.validationBatch) {
 		const receiptBatch = goal.completionVerification.validationBatch;
@@ -3987,7 +4011,35 @@ export async function checkpointUltragoalGoal(input: {
 	if (input.status === "complete" && goal.completionVerification?.validationBatch && !batchMetadata) {
 		throw new Error(`Goal ${goal.id} has stale validation batch completion receipt`);
 	}
-	if (goal.status === input.status && goal.evidence === evidence && matchingIdempotentEvent) {
+	// An identical-evidence complete replay is only a no-op while the recorded
+	// receipt still validates fresh. When the goal row itself is untouched
+	// (updatedAt still matches the receipt's verifiedAt) but later goal-tagged
+	// ledger events (e.g. blocker classifications) or plan growth staled the
+	// receipt, the replay is a genuine re-verification: it must run the full
+	// quality gate and mint a fresh receipt, otherwise a completed goal with a
+	// context-staled receipt can never be repaired (different evidence is
+	// rejected on complete goals by design). A mutated goal row keeps the
+	// fail-loud tamper handling in the idempotent branch below.
+	const staleCompleteReceiptReplay =
+		input.status === "complete" &&
+		goal.status === "complete" &&
+		goal.evidence === evidence &&
+		Boolean(matchingIdempotentEvent) &&
+		(!goal.completionVerification ||
+			(goal.completionVerification.verifiedAt === goal.updatedAt &&
+				validateReceiptFreshBase({
+					plan,
+					ledger: ledgerBefore,
+					goal,
+					receipt: goal.completionVerification,
+					receiptKind: goal.completionVerification.receiptKind,
+				}) !== null));
+	if (
+		goal.status === input.status &&
+		goal.evidence === evidence &&
+		matchingIdempotentEvent &&
+		!staleCompleteReceiptReplay
+	) {
 		if (batchMetadata) {
 			const receipt = goal.completionVerification;
 			const receiptBatch = receipt?.validationBatch;
@@ -4009,6 +4061,18 @@ export async function checkpointUltragoalGoal(input: {
 			)
 				throw new Error(`Goal ${goal.id} has stale validation batch metadata hash in close receipt`);
 		}
+		// A complete goal whose row changed after its receipt was verified is
+		// neither a clean no-op nor a repairable context-stale replay: fail loud
+		// instead of silently laundering a tampered/inconsistent durable row.
+		if (
+			input.status === "complete" &&
+			goal.completionVerification &&
+			goal.completionVerification.verifiedAt !== goal.updatedAt
+		) {
+			throw new Error(
+				`Goal ${goal.id} changed after its completion receipt was verified; refusing idempotent replay. Investigate the durable goals.json row before re-checkpointing.`,
+			);
+		}
 		// Idempotent re-checkpoint: this goal is already recorded in the target status with the same
 		// evidence, so skip the plan rewrite and ledger append to avoid duplicate goal_checkpointed
 		// events. The ledger is the dedup source of truth because it is exactly what a duplicate write
@@ -4020,7 +4084,7 @@ export async function checkpointUltragoalGoal(input: {
 	const changeSet = input.status === "complete" ? await computeCheckpointChangeSet(input.cwd) : undefined;
 	if (input.status === "complete") {
 		validatePipelineCheckpointSafety(plan, goal, changeSet);
-		validateCompleteCheckpointTargetGoal(goal);
+		if (!staleCompleteReceiptReplay) validateCompleteCheckpointTargetGoal(goal);
 	}
 	const qualityGateJson =
 		input.status === "complete"
@@ -4047,7 +4111,7 @@ export async function checkpointUltragoalGoal(input: {
 			blockedGoal.updatedAt = now;
 		}
 	}
-	const receiptKind = input.status === "complete" ? chooseReceiptKind(plan, goal, input.status) : null;
+	const receiptKind = input.status === "complete" ? chooseReceiptKind(plan, ledgerBefore, goal, input.status) : null;
 	const pendingCheckpointEventId = crypto.randomUUID();
 	if (input.status === "complete" && receiptKind && qualityGateJson && !Array.isArray(qualityGateJson)) {
 		goal.completionVerification = buildCompletionReceipt({

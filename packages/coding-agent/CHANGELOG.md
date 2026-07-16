@@ -5,12 +5,15 @@
 ## [0.11.0] - 2026-07-15
 
 ### Fixed
+- Discord inbound lease recovery now exposes a deterministic scheduler seam, preserves exponential retry wakeups after transient endpoint lookup failures, and cancels pending recovery exactly on daemon stop instead of relying on wall-clock sleeps in regression coverage.
 - Input-free interactive TTY startup now keeps the TUI reachable when configured model profiles are missing required provider credentials, skips only the blocked profiles, and preserves later `--mpreset` and explicit model/thinking precedence; redirected terminals, input-bearing, resume-continuation, image-only, print/text, and unrelated activation failures remain fail-closed (#2277).
+- Windows Bun runtimes no longer crash while committing the durable workflow-gate store when directory `fsync` reports the unsupported-operation code `EPERM`; unexpected directory-sync failures remain fail-closed.
 - Browser geo settings now propagate coherently across request `Accept-Language`, navigator languages, and `Intl` locale/timezone surfaces; configured managed browsers are isolated by geo/profile posture, concurrent acquisition is serialized, and unset geo preserves Chromium's native locale/timezone instead of injecting a fixed New York profile.
 
 - Cooperative mid-run context maintenance now waits at a cancellation-aware FIFO consumer-drain checkpoint before flushing or rewriting session history. Materialized tool results and steering messages are synchronously canonicalized first; aborted barriers and hook/signal-cancelled compactions settle without rewriting or scheduling a continuation. Promotion, pruning, and compaction each start a clean provider/prompt-cache epoch. Script-aware #2067 unsent-delta accounting remains cache-free and distinct from the lifecycle checkpoint.
 - Classified the cooperative mid-run maintenance driver and token estimator test seams as locked non-public SDK exclusions, restoring deterministic operation-inventory generation and post-merge dev CI coverage.
 - Accepted SDK prompts now deliver correlated `agent_start` and exactly one terminal lifecycle frame directly to the requesting authenticated WebSocket connection while retaining replayable host events. Harness owner observation also waits for every previously accepted frame to finish serial persistence, so message-update storms and polling gaps cannot hide sticky completion evidence (#2169).
+- `/new` now fails closed while owned subagent shutdown is unproven: it preserves the current session identity and shows an actionable cleanup notice. Successful replacement waits for cooperative child cancellation, cancels owner jobs before switching identity, and `/drop` creates the replacement before attempting old-session deletion (#2261).
 
 ### Added
 

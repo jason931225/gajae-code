@@ -30,6 +30,7 @@ import { type QueuedMessageMoveDirection, QueuedMessageSelectorComponent } from 
 
 interface Expandable {
 	setExpanded(expanded: boolean): void;
+	setManuallyExpanded?(expanded: boolean): void;
 }
 
 const INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS = 5_000;
@@ -1539,7 +1540,17 @@ export class InputController {
 		this.ctx.toolOutputExpanded = expanded;
 		for (const child of this.ctx.chatContainer.children) {
 			if (isExpandable(child)) {
-				child.setExpanded(expanded);
+				// Callable guard: setManuallyExpanded is optional on the exported
+				// contract, and hostile/legacy children may expose it as a
+				// non-function property or an unstable getter. Read once, then
+				// invoke only a real function; everything else falls back to the
+				// automatic path.
+				const setManuallyExpanded = child.setManuallyExpanded;
+				if (typeof setManuallyExpanded === "function") {
+					setManuallyExpanded.call(child, expanded);
+				} else {
+					child.setExpanded(expanded);
+				}
 			}
 		}
 		this.ctx.ui.requestRender();

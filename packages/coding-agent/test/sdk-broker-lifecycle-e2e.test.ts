@@ -9,6 +9,7 @@ import { planLaunchWorktree } from "../src/gjc-runtime/launch-worktree";
 import { AcpAgent } from "../src/modes/acp/acp-agent";
 import { Broker, type BrokerResponse } from "../src/sdk/broker/broker";
 import { brokerOwnerForTest } from "../src/sdk/broker/ensure";
+import { deriveIdempotencyIdentity } from "../src/sdk/broker/identity";
 import {
 	deriveLifecycleDeadlines,
 	hasValidLifecycleDeadlines,
@@ -1093,6 +1094,74 @@ test("broker replays one identity-bound lifecycle metadata cleanup plan after th
 	} finally {
 		await crashing?.stop();
 		await reopened?.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 30_000);
+test("broker replays a base metadata cleanup receipt after reopen without stranding its lifecycle marker", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-legacy-metadata-replay-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const sessionId = "legacy-metadata-replay";
+	const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
+	const plannedPath = path.join(stateRoot, "sdk", `.gjc-delete-base-${sessionId}.lifecycle.json`);
+	const request = { sessionId };
+	const key = "base-metadata-cleanup-replay";
+	let broker: Broker | undefined;
+	try {
+		await fs.mkdir(path.dirname(markerPath), { recursive: true });
+		await fs.writeFile(markerPath, JSON.stringify({ pid: process.pid, effectMarker: "base", incarnation: "base" }));
+		const [stat, bytes] = await Promise.all([fs.stat(markerPath, { bigint: true }), fs.readFile(markerPath)]);
+		const target = createHash("sha256").update(canonicalJson({ sessionId })).digest("hex");
+		const identity = await deriveIdempotencyIdentity(agentDir, "session.delete", key, target);
+		const requestHash = createHash("sha256")
+			.update(canonicalJson({ operation: "session.delete", input: request }))
+			.digest("hex");
+		const ledger = await new LifecycleLedger(agentDir).open();
+		await ledger.begin(identity, requestHash);
+		await ledger.transition(identity, "effect_started", {
+			response: {
+				ok: false,
+				error: {
+					code: "cleanup_pending",
+					message: "Base metadata cleanup is pending.",
+					cleanup: {
+						phase: "metadata",
+						sessionId,
+						metadataRoot: stateRoot,
+						metadataPath: markerPath,
+						metadataIdentity: {
+							dev: stat.dev.toString(),
+							ino: stat.ino.toString(),
+							size: Number(stat.size),
+							mtimeNs: stat.mtimeNs.toString(),
+							sha256: createHash("sha256").update(bytes).digest("hex"),
+						},
+						metadataAttempt: 1,
+						plannedMetadataPath: plannedPath,
+					},
+				},
+			},
+		});
+
+		broker = new Broker({ agentDir });
+		await broker.start();
+		await expect(broker.handleRequest("session.delete", request, key)).resolves.toEqual({
+			ok: true,
+			result: { sessionId },
+		});
+		await expect(fs.stat(markerPath)).rejects.toThrow();
+		const rows = (await fs.readFile(path.join(agentDir, "sdk", "lifecycle-ledger.jsonl"), "utf8"))
+			.split("\n")
+			.filter(Boolean)
+			.map(line => JSON.parse(line) as Record<string, unknown>);
+		const migrated = rows.findLast(row => row.state === "effect_started" && row.response);
+		expect((migrated?.response as { error?: { cleanup?: unknown } } | undefined)?.error?.cleanup).toMatchObject({
+			phase: "lifecycle",
+			sessionId,
+			lifecycleFiles: [expect.objectContaining({ path: markerPath, plannedPath })],
+		});
+	} finally {
+		await broker?.stop();
 		await fs.rm(root, { recursive: true, force: true });
 	}
 }, 30_000);

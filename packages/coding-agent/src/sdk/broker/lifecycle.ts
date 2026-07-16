@@ -1024,6 +1024,61 @@ function validateLifecycleCleanupFile(root: string, id: string, file: LifecycleC
 	return cleanupIdentity(file.identity) !== undefined;
 }
 
+/**
+ * Base dev persisted metadata cleanup one file at a time. Accept only its
+ * identity-bound marker receipt and translate it into the current replay plan.
+ */
+function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | undefined {
+	if (
+		cleanup.phase !== "metadata" ||
+		typeof cleanup.sessionId !== "string" ||
+		!isCanonicalSessionId(cleanup.sessionId) ||
+		typeof cleanup.metadataRoot !== "string" ||
+		cleanup.metadataRoot.length === 0 ||
+		typeof cleanup.metadataPath !== "string" ||
+		cleanup.metadataPath.length === 0 ||
+		!cleanup.metadataIdentity ||
+		typeof cleanup.plannedMetadataPath !== "string" ||
+		cleanup.plannedMetadataPath.length === 0 ||
+		(cleanup.detachedMetadataPath !== undefined &&
+			(typeof cleanup.detachedMetadataPath !== "string" || cleanup.detachedMetadataPath.length === 0)) ||
+		(cleanup.metadataCompleted !== undefined && cleanup.metadataCompleted !== true)
+	)
+		return undefined;
+	const root = path.resolve(cleanup.metadataRoot);
+	const directory = path.join(root, "sdk");
+	const allowedPaths = [lifecycleMarkerPath(root, cleanup.sessionId), lifecycleReadyPath(root, cleanup.sessionId)];
+	const metadataPath = path.resolve(cleanup.metadataPath);
+	const plannedPath = path.resolve(cleanup.plannedMetadataPath);
+	const detachedPath = cleanup.detachedMetadataPath && path.resolve(cleanup.detachedMetadataPath);
+	if (
+		!allowedPaths.includes(metadataPath) ||
+		path.dirname(plannedPath) !== directory ||
+		!path.basename(plannedPath).startsWith(".gjc-delete-") ||
+		(detachedPath !== undefined && path.dirname(detachedPath) !== directory) ||
+		(cleanup.metadataAttempt !== undefined &&
+			(!Number.isSafeInteger(cleanup.metadataAttempt) || cleanup.metadataAttempt < 1))
+	)
+		return undefined;
+	const identity = cleanupIdentity(cleanup.metadataIdentity);
+	if (!identity) return undefined;
+	return {
+		phase: "lifecycle",
+		sessionId: cleanup.sessionId,
+		metadataRoot: root,
+		lifecycleFiles: [
+			{
+				path: metadataPath,
+				identity: serializeCleanupIdentity(identity),
+				attempt: cleanup.metadataAttempt ?? 1,
+				plannedPath,
+				...(detachedPath ? { detachedPath } : {}),
+				...(cleanup.metadataCompleted === true ? { completed: true as const } : {}),
+			},
+		],
+	};
+}
+
 function lifecycleDeleteMetadataCleanupPlan(
 	metadataRoot: string,
 	id: string,
@@ -2738,6 +2793,36 @@ export async function executeLifecycle(
 	identity: string,
 	cleanup?: CleanupEvidence,
 ): Promise<LifecycleExecutionOutcome> {
+	if (cleanup?.phase === "metadata") {
+		if (operation !== "session.delete")
+			return {
+				response: fail(
+					"terminal_uncertain",
+					"Legacy metadata cleanup is not authorized for this lifecycle operation.",
+				),
+			};
+		const migrated = legacyMetadataCleanupPlan(cleanup);
+		if (!migrated)
+			return {
+				response: fail(
+					"terminal_uncertain",
+					"Legacy metadata cleanup replay lacks immutable identity-bound intent.",
+				),
+			};
+		await broker.ledger.transition(identity, "effect_started", {
+			response: fail(
+				"cleanup_pending",
+				"Legacy lifecycle metadata cleanup is preauthorized for durable reconciliation.",
+				migrated,
+			),
+		});
+		return {
+			response: await reconcileLifecycleCleanup(broker, identity, migrated, {
+				ok: true,
+				result: { sessionId: migrated.sessionId },
+			}),
+		};
+	}
 	if (cleanup?.phase === "lifecycle")
 		return {
 			response: await reconcileLifecycleCleanup(

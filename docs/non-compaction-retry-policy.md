@@ -42,7 +42,7 @@ Current retryable inputs are regex/string-classified:
 - provider-suggested retry wording, including OpenAI `retry your request` failures
 - network/connection/socket failures, refused/closed connections, upstream connect/reset-before-headers, socket hang up, timeout/timed out, fetch failed, terminated, retry delay wording, and unexpected socket close messages
 
-Managed fallback uses structured transport facts and typed provider error codes when available; regex classification is retained only as a legacy fallback.
+Managed fallback uses structured transport facts and typed provider error codes when available. A structured classification of `other` becomes the bounded `unknown` fallback class; error prose cannot promote it to quota or transient. Regex classification is retained only as a legacy fallback.
 
 ## Retry lifecycle and state transitions
 

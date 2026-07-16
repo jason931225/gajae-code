@@ -756,6 +756,7 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
+	sessionId?: string,
 ): { model?: Model<Api>; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
@@ -765,6 +766,7 @@ export function resolveModelOverride(
 			settings,
 			matchPreferences,
 			modelRegistry,
+			sessionId,
 		});
 		if (model) {
 			return { model, thinkingLevel, explicitThinkingLevel };
@@ -874,7 +876,12 @@ export async function resolveModelOverrideWithAuthFallback(
 	const skips: Array<{ selector: string; reason: string }> = [];
 	let activeIndex = 0;
 	for (const pattern of modelPatterns) {
-		const candidate = resolveModelRoleValue(pattern, availableModels, { settings, matchPreferences, modelRegistry });
+		const candidate = resolveModelRoleValue(pattern, availableModels, {
+			settings,
+			matchPreferences,
+			modelRegistry,
+			sessionId,
+		});
 		if (!requestedModel && candidate.model) {
 			requestedModel = candidate.model;
 			requestedResolution = candidate;
@@ -900,7 +907,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		activeIndex += 1;
 	}
 	const fallback = parentActiveModelPattern
-		? resolveModelOverride([parentActiveModelPattern], modelRegistry, settings)
+		? resolveModelOverride([parentActiveModelPattern], modelRegistry, settings, sessionId)
 		: { explicitThinkingLevel: false };
 	if (fallback.model) {
 		const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);

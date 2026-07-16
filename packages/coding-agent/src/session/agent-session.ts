@@ -3153,7 +3153,9 @@ export class AgentSession {
 
 			// Check for retryable errors first (overloaded, rate limit, server errors)
 			if (this.#isRetryableError(msg)) {
-				const didRetry = await this.#handleRetryableError(msg);
+				const transportFailure = (msg as AssistantMessage & { transportFailure?: TransportFailureFacts })
+					.transportFailure;
+				const didRetry = await this.#handleRetryableError(msg, false, transportFailure);
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
 			if (this.#retryAttempt > 0) {
@@ -11258,7 +11260,10 @@ export class AgentSession {
 				classification === "first_event_timeout"
 			);
 		}
-		const trigger = classifyFallbackTrigger({ message: message.errorMessage, status: message.errorStatus });
+		const transportFailure = (message as AssistantMessage & { transportFailure?: TransportFailureFacts })
+			.transportFailure;
+		const trigger = classifyFallbackTrigger(transportFailure ?? { status: message.errorStatus });
+		if (transportFailure) return true;
 		if (
 			trigger.class === "rate_limit" ||
 			trigger.class === "quota" ||
@@ -11586,6 +11591,10 @@ export class AgentSession {
 	): { class: FallbackTriggerClass; retryAfterMs?: number } | undefined {
 		const transport = classifyFallbackTrigger(transportFailure ?? { status: message.errorStatus });
 		if (transport.class !== "other") return transport;
+		// Managed fallback receives authoritative transport facts from the request
+		// boundary. Once those facts classify as other, error prose must not upgrade
+		// the failure into an unbounded transient or quota retry.
+		if (transportFailure) return { class: "unknown" };
 		const classification = this.#classifyErrorForRetry(message);
 		if (allowLegacyUsageLimit && classification === "usage_limit") {
 			return { class: "quota" };

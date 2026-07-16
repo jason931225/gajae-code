@@ -1418,6 +1418,7 @@ export class AgentSession {
 	// Todo completion reminder state
 	#todoReminderCount = 0;
 	#lastGoalReminderAssistantTimestamp: number | undefined = undefined;
+	#suppressNextGoalReminderAfterAbortGoalId: string | undefined = undefined;
 	#todoPhases: TodoPhase[] = [];
 	#toolChoiceQueue = new ToolChoiceQueue();
 
@@ -1975,9 +1976,7 @@ export class AgentSession {
 		this.#syncTodoPhasesFromBranch();
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
-			setState: state => {
-				this.#goalModeState = state;
-			},
+			setState: state => this.#applyGoalModeState(state),
 			getCurrentUsage: () => {
 				const usage = this.getSessionStats().tokens;
 				return {
@@ -5878,8 +5877,20 @@ export class AgentSession {
 		return this.#goalModeState;
 	}
 
-	setGoalModeState(state: GoalModeState | undefined): void {
+	#applyGoalModeState(state: GoalModeState | undefined): void {
+		if (
+			!state?.enabled ||
+			state.goal.status !== "active" ||
+			(this.#suppressNextGoalReminderAfterAbortGoalId !== undefined &&
+				this.#suppressNextGoalReminderAfterAbortGoalId !== state.goal.id)
+		) {
+			this.#suppressNextGoalReminderAfterAbortGoalId = undefined;
+		}
 		this.#goalModeState = state;
+	}
+
+	setGoalModeState(state: GoalModeState | undefined): void {
+		this.#applyGoalModeState(state);
 	}
 
 	getWorkflowGateEmitter(): WorkflowGateEmitter | undefined {
@@ -7573,6 +7584,11 @@ export class AgentSession {
 		 *  hand-off rather than a failure. */
 		silent?: boolean;
 	}): Promise<void> {
+		const abortGoalState = this.getGoalModeState();
+		this.#suppressNextGoalReminderAfterAbortGoalId =
+			abortGoalState?.enabled === true && abortGoalState.goal.status === "active"
+				? abortGoalState.goal.id
+				: undefined;
 		this.#abortActiveMidRunBarriers();
 		if (options?.silent) {
 			this.#silentAbortPending = true;
@@ -9828,6 +9844,7 @@ export class AgentSession {
 		const state = this.getGoalModeState();
 		if (!state?.enabled || state.goal.status !== "active") {
 			this.#lastGoalReminderAssistantTimestamp = undefined;
+			this.#suppressNextGoalReminderAfterAbortGoalId = undefined;
 			return false;
 		}
 		if (this.#lastGoalReminderAssistantTimestamp === assistantMessage.timestamp) {
@@ -9845,6 +9862,11 @@ export class AgentSession {
 			continuationPrompt,
 			"</system-reminder>",
 		].join("\n");
+		if (this.#suppressNextGoalReminderAfterAbortGoalId !== undefined) {
+			const suppressReminder = this.#suppressNextGoalReminderAfterAbortGoalId === state.goal.id;
+			this.#suppressNextGoalReminderAfterAbortGoalId = undefined;
+			if (suppressReminder) return false;
+		}
 
 		logger.debug("Goal completion: sending active-goal reminder", { goalId: state.goal.id });
 		this.agent.appendMessage({

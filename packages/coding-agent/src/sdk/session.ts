@@ -623,9 +623,6 @@ function isCustomTool(tool: CustomTool | ToolDefinition): tool is CustomTool {
 
 const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 
-/** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
-const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
-
 let sshCleanupRegistered = false;
 
 async function cleanupSshResources(): Promise<void> {
@@ -2044,25 +2041,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				session,
 			);
 
-			// Build combined append prompt: memory instructions + MCP server instructions
-			const serverInstructions =
-				explicitMcpConfigPath === undefined ? mcpManager?.getServerInstructions() : undefined;
-			let appendPrompt: string | undefined = memoryInstructions ?? undefined;
-			if (serverInstructions && serverInstructions.size > 0) {
-				const parts: string[] = [];
-				if (appendPrompt) parts.push(appendPrompt);
-				parts.push(
-					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
-				);
-				for (const [srvName, srvInstructions] of serverInstructions) {
-					const truncated =
-						srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
-							? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
-							: srvInstructions;
-					parts.push(`### ${srvName}\n${truncated}`);
-				}
-				appendPrompt = parts.join("\n\n");
-			}
+			const appendPrompt: string | undefined = memoryInstructions ?? undefined;
 			let pluginSystemAppendices = "";
 			try {
 				pluginSystemAppendices = await renderAlwaysOnSystemAppendices({ cwd });
@@ -2490,27 +2469,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			onResponse,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			getMcpServerInstructions:
+				explicitMcpConfigPath === undefined && mcpManager ? () => mcpManager.getServerInstructions() : undefined,
 			workspaceTree: resolvedWorkspaceTree,
 			reloadSshTool,
 			requestedToolNames: requestedToolNameSet,
 			discoverableToolAllowedNames: options.discoverableToolAllowedNames,
-			getMcpServerInstructions:
-				mcpManager && explicitMcpConfigPath === undefined
-					? () => {
-							const raw = mcpManager.getServerInstructions();
-							if (!raw || raw.size === 0) return raw;
-							const out = new Map<string, string>();
-							for (const [name, text] of raw) {
-								out.set(
-									name,
-									text.length > MAX_MCP_INSTRUCTIONS_LENGTH
-										? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)
-										: text,
-								);
-							}
-							return out;
-						}
-					: undefined,
 			mcpDiscoveryEnabled,
 			discoveryMode: effectiveDiscoveryMode,
 			initialSelectedMCPToolNames,

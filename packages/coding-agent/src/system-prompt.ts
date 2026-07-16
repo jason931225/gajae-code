@@ -15,6 +15,7 @@ import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import volatileProjectContextTemplate from "./prompts/system/volatile-project-context.md" with { type: "text" };
+import { escapePromptMetadata } from "./session/messages";
 import { DEFAULT_ESSENTIAL_TOOL_NAMES } from "./tools";
 import { shortenPath } from "./tools/render-utils";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
@@ -397,13 +398,16 @@ export function buildVolatileProjectContext(options: BuildVolatileProjectContext
 	return prompt
 		.render(volatileProjectContextTemplate, {
 			date,
-			cwd: shortenPath(resolvedCwd.replace(/\\/g, "/")),
-			workspaceTree: options.workspaceTree ?? {
-				rootPath: resolvedCwd,
-				rendered: "",
-				truncated: false,
-				totalLines: 0,
-				agentsMdFiles: [],
+			cwd: escapePromptMetadata(shortenPath(resolvedCwd.replace(/\\/g, "/"))),
+			workspaceTree: {
+				...(options.workspaceTree ?? {
+					rootPath: resolvedCwd,
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				}),
+				rendered: escapePromptMetadata(options.workspaceTree?.rendered ?? "", { preserveNewlines: true }),
 			},
 		})
 		.trim();

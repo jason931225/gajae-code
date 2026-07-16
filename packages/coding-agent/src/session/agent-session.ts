@@ -2572,10 +2572,14 @@ export class AgentSession {
 	// Event Subscription
 	// =========================================================================
 
-	/** Emit an event to all listeners */
+	/** Emit an event to all listeners without letting one subscriber poison lifecycle settlement. */
 	#emit(event: AgentSessionEvent): void {
-		for (const l of this.#eventListenerSnapshot) {
-			l(event);
+		for (const listener of this.#eventListenerSnapshot) {
+			try {
+				listener(event);
+			} catch (error) {
+				logger.warn("Agent session event subscriber failed", { event: event.type, error: String(error) });
+			}
 		}
 	}
 

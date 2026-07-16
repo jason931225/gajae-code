@@ -913,6 +913,34 @@ describe("AgentSession message pipeline", () => {
 		expect(agentEnds[0]).not.toMatchObject({ stopReason: "cancelled" });
 		expect(events.at(-1)?.type).toBe("agent_end");
 	});
+	it("isolates throwing subscribers from terminal settlement and later events", async () => {
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+		});
+		sessions.push(session);
+		const agentEnds: AgentSessionEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") throw new Error("subscriber failed");
+		});
+		session.subscribe(event => {
+			if (event.type === "agent_end") agentEnds.push(event);
+		});
+
+		const first = createAssistantMessage("first");
+		session.agent.emitExternalEvent({ type: "message_end", message: first });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [first] });
+		await session.waitForIdle();
+
+		const second = createAssistantMessage("second");
+		session.agent.emitExternalEvent({ type: "message_end", message: second });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [second] });
+		await session.waitForIdle();
+
+		expect(agentEnds).toHaveLength(2);
+	});
 	it("holds prompt settlement until worker integration is durable", async () => {
 		const integrationStarted = Promise.withResolvers<void>();
 		const releaseIntegration = Promise.withResolvers<void>();

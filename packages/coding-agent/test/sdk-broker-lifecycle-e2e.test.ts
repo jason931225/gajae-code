@@ -3136,3 +3136,172 @@ test("lifecycle cleanup rejects transplanted and ambiguous receipts before mutat
 		await fs.rm(root, { recursive: true, force: true });
 	}
 });
+
+test("lifecycle cleanup receipt parser rejects hostile bounded inputs without touching user data", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-hostile-lifecycle-receipt-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const sessionId = "hostile-lifecycle-receipt";
+	const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
+	const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
+	const transcriptPath = path.join(root, "user.jsonl");
+	const artifactsPath = transcriptPath.slice(0, -6);
+	const request = { cwd: root, stateRoot, sessionId };
+	const broker = new Broker({ agentDir });
+	const outsidePlannedPath = path.join(root, "outside-planned");
+	const outsideDetachedPath = path.join(root, "outside-detached");
+	const outsideMarkerPath = path.join(root, "outside-marker");
+	const outsideReadyPath = path.join(root, "outside-ready");
+	const marker = canonicalJson({ pid: process.pid, effectMarker: "hostile-replay", incarnation: "hostile-replay" });
+	const capture = async (file: string) => {
+		const [stat, bytes] = await Promise.all([fs.stat(file, { bigint: true }), fs.readFile(file)]);
+		return {
+			dev: stat.dev.toString(),
+			ino: stat.ino.toString(),
+			size: Number(stat.size),
+			mtimeNs: stat.mtimeNs.toString(),
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+		};
+	};
+	const cleanup = async (): Promise<BrokerCleanupEvidence> => ({
+		phase: "lifecycle",
+		sessionId,
+		metadataRoot: stateRoot,
+		lifecycleDeleteMetadata: true,
+		lifecycleFiles: [
+			{
+				path: markerPath,
+				identity: await capture(markerPath),
+				attempt: 1,
+				plannedPath: path.join(stateRoot, "sdk", ".gjc-delete-hostile-marker"),
+			},
+			{
+				path: readyPath,
+				identity: await capture(readyPath),
+				attempt: 1,
+				plannedPath: path.join(stateRoot, "sdk", ".gjc-delete-hostile-ready"),
+			},
+		],
+	});
+	const restoreBoundSiblings = async (value = marker) => {
+		await Promise.all([fs.rm(markerPath, { force: true }), fs.rm(readyPath, { force: true })]);
+		await Promise.all([fs.writeFile(markerPath, value), fs.writeFile(readyPath, value)]);
+	};
+	let preserved: { transcript: Buffer; artifacts: string | undefined };
+	const assertPreserved = async () => expect(await snapshotDeleteSurface(transcriptPath)).toEqual(preserved);
+	const reject = async (name: string, evidence: BrokerCleanupEvidence) => {
+		const siblingBytes = await Promise.all([fs.readFile(markerPath), fs.readFile(readyPath)]);
+		const started = Date.now();
+		const outcome = await executeLifecycle(broker, "session.delete", request, `hostile-lifecycle-${name}`, evidence);
+		expect(outcome.response).toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
+		expect(Date.now() - started).toBeLessThan(1_000);
+		expect(await Promise.all([fs.readFile(markerPath), fs.readFile(readyPath)])).toEqual(siblingBytes);
+		await assertPreserved();
+	};
+	try {
+		await fs.mkdir(path.dirname(markerPath), { recursive: true });
+		await fs.writeFile(transcriptPath, "preserve user transcript\n");
+		await fs.mkdir(artifactsPath);
+		await fs.writeFile(path.join(artifactsPath, "artifact.txt"), "preserve user artifact\n");
+		await Promise.all([
+			fs.writeFile(outsidePlannedPath, "preserve planned target\n"),
+			fs.writeFile(outsideDetachedPath, "preserve detached target\n"),
+			fs.writeFile(outsideMarkerPath, "preserve marker target\n"),
+			fs.writeFile(outsideReadyPath, "preserve ready target\n"),
+		]);
+		await restoreBoundSiblings();
+		preserved = await snapshotDeleteSurface(transcriptPath);
+		await broker.start();
+
+		const valid = await cleanup();
+		const nested = { value: 0 } as { value: number | { value: unknown } };
+		for (let depth = 0; depth < 16; depth++) nested.value = { value: nested.value };
+		const excessiveCardinality: BrokerCleanupEvidence = {
+			...valid,
+			lifecycleFiles: [...valid.lifecycleFiles!, ...valid.lifecycleFiles!, valid.lifecycleFiles![0]],
+		};
+		const deepExtraEntry = {
+			...valid,
+			lifecycleFiles: [{ ...valid.lifecycleFiles![0], unexpected: nested }, valid.lifecycleFiles![1]],
+		} as unknown as BrokerCleanupEvidence;
+		const mixedLegacyEntry = {
+			...valid,
+			metadataPath: markerPath,
+			metadataIdentity: valid.lifecycleFiles![0].identity,
+		} as unknown as BrokerCleanupEvidence;
+		const duplicateAuthority: BrokerCleanupEvidence = {
+			...valid,
+			lifecycleFiles: [
+				valid.lifecycleFiles![0],
+				{ ...valid.lifecycleFiles![0], plannedPath: valid.lifecycleFiles![1].plannedPath },
+			],
+		};
+		for (const [name, evidence] of [
+			["excessive-array", excessiveCardinality],
+			["deep-extra-entry", deepExtraEntry],
+			["mixed-legacy-entry", mixedLegacyEntry],
+			["duplicate-authority", duplicateAuthority],
+		] as const)
+			await reject(name, evidence);
+
+		for (const [name, corruptPath] of [
+			["corrupt-marker", markerPath],
+			["corrupt-ready", readyPath],
+		] as const) {
+			await restoreBoundSiblings();
+			await fs.writeFile(corruptPath, Buffer.from([0xc3, 0x28]));
+			await reject(name, await cleanup());
+			await expect(fs.readFile(corruptPath)).resolves.toEqual(Buffer.from([0xc3, 0x28]));
+		}
+
+		for (const [name, siblingPath, outsidePath] of [
+			["marker-symlink", markerPath, outsideMarkerPath],
+			["ready-symlink", readyPath, outsideReadyPath],
+		] as const) {
+			await restoreBoundSiblings();
+			await fs.rm(siblingPath);
+			await fs.symlink(outsidePath, siblingPath);
+			await reject(name, await cleanup());
+			expect((await fs.lstat(siblingPath)).isSymbolicLink()).toBe(true);
+			await expect(fs.readFile(outsidePath, "utf8")).resolves.toContain("preserve");
+		}
+
+		await restoreBoundSiblings();
+		const traversal = await cleanup();
+		traversal.lifecycleFiles![0].plannedPath = path.join(stateRoot, "sdk", "..", "outside-planned");
+		await reject("planned-traversal", traversal);
+		const detachedOutside = await cleanup();
+		detachedOutside.lifecycleFiles![1].detachedPath = outsideDetachedPath;
+		await reject("detached-outside", detachedOutside);
+		await expect(fs.readFile(outsidePlannedPath, "utf8")).resolves.toBe("preserve planned target\n");
+		await expect(fs.readFile(outsideDetachedPath, "utf8")).resolves.toBe("preserve detached target\n");
+
+		const oversizedField = canonicalJson({
+			pid: process.pid,
+			effectMarker: "x".repeat(3_500),
+			incarnation: "hostile-replay",
+		});
+		expect(Buffer.byteLength(oversizedField)).toBeLessThanOrEqual(4096);
+		await restoreBoundSiblings(oversizedField);
+		await reject("oversized-field", await cleanup());
+		await expect(fs.readFile(markerPath, "utf8")).resolves.toBe(oversizedField);
+		await expect(fs.readFile(readyPath, "utf8")).resolves.toBe(oversizedField);
+
+		await restoreBoundSiblings();
+		await broker.ledger.begin("hostile-lifecycle-control", "hostile-lifecycle-control-request");
+		const control = await executeLifecycle(
+			broker,
+			"session.delete",
+			request,
+			"hostile-lifecycle-control",
+			await cleanup(),
+		);
+		expect(control.response).toEqual({ ok: true, result: { sessionId } });
+		await expect(fs.lstat(markerPath)).rejects.toThrow();
+		await expect(fs.lstat(readyPath)).rejects.toThrow();
+		await assertPreserved();
+	} finally {
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});

@@ -59,6 +59,9 @@ const MAX_READY_TIMEOUT_MS = 60_000;
 const POLL_MS = 50;
 const CLOSE_TIMEOUT_MS = 2_000;
 const MAX_RECEIVED_AT_SKEW_MS = 5_000;
+const MAX_LIFECYCLE_METADATA_BYTES = 4096;
+const MAX_EFFECT_MARKER_LENGTH = 128;
+const MAX_PROCESS_INCARNATION_LENGTH = 256;
 
 export interface LifecycleDeadlines {
 	receivedAt: number;
@@ -671,15 +674,25 @@ function hasObservedProcessExit(pid: number): boolean {
 
 function isEffectMarker(value: unknown): value is EffectMarker {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const marker = value as Partial<EffectMarker>;
+	const marker = value as Record<string, unknown>;
 	return (
 		typeof marker.pid === "number" &&
 		Number.isSafeInteger(marker.pid) &&
 		marker.pid > 0 &&
 		typeof marker.effectMarker === "string" &&
-		marker.effectMarker.length > 0 &&
+		/^[A-Za-z0-9._-]+$/.test(marker.effectMarker) &&
+		marker.effectMarker.length <= MAX_EFFECT_MARKER_LENGTH &&
 		typeof marker.incarnation === "string" &&
-		marker.incarnation.length > 0
+		marker.incarnation.length > 0 &&
+		marker.incarnation.length <= MAX_PROCESS_INCARNATION_LENGTH
+	);
+}
+
+function isExactEffectMarker(value: unknown): value is EffectMarker {
+	return (
+		isEffectMarker(value) &&
+		Object.keys(value).length === 3 &&
+		Object.keys(value).every(key => key === "pid" || key === "effectMarker" || key === "incarnation")
 	);
 }
 
@@ -689,8 +702,10 @@ function sameEffectMarker(left: EffectMarker, right: EffectMarker): boolean {
 
 async function readEffectMarker(file: string): Promise<EffectMarker | undefined> {
 	try {
-		const marker: unknown = JSON.parse(await fs.readFile(file, "utf8"));
-		return isEffectMarker(marker) ? marker : undefined;
+		const captured = captureLifecycleFile(file, true, true);
+		if (!captured) return undefined;
+		const marker: unknown = JSON.parse(captured.bytes.toString("utf8"));
+		return isExactEffectMarker(marker) ? marker : undefined;
 	} catch {
 		return undefined;
 	}
@@ -962,7 +977,12 @@ function lifecycleCleanupPlan(
 		lifecycleMarkerPath(root, id),
 	];
 	const files: LifecycleCleanupFile[] = candidates.flatMap(file => {
-		const captured = captureLifecycleFile(file, true);
+		const captured = captureLifecycleFile(
+			file,
+			true,
+			file === lifecycleMarkerPath(root, id) || file === lifecycleReadyPath(root, id),
+		);
+
 		if (!captured) return [];
 		if (file === lifecycleMarkerPath(root, id) || file === lifecycleReadyPath(root, id)) {
 			let marker: unknown;
@@ -971,7 +991,7 @@ function lifecycleCleanupPlan(
 			} catch {
 				throw new Error("Lifecycle marker changed before cleanup intent persistence.");
 			}
-			if (!isEffectMarker(marker) || !sameEffectMarker(marker, expected))
+			if (!isExactEffectMarker(marker) || !sameEffectMarker(marker, expected))
 				throw new Error("Lifecycle marker changed before cleanup intent persistence.");
 		}
 		if (file.endsWith(`${id}.json`)) {
@@ -1034,23 +1054,77 @@ function lifecycleCleanupHasMixedMetadataSchema(cleanup: CleanupEvidence): boole
 	].some(value => value !== undefined);
 }
 
+function isCleanupIdentity(value: unknown): value is BrokerCleanupIdentity {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const identity = value as Record<string, unknown>;
+	return (
+		Object.keys(identity).length === 5 &&
+		Object.keys(identity).every(
+			key => key === "dev" || key === "ino" || key === "size" || key === "mtimeNs" || key === "sha256",
+		) &&
+		typeof identity.dev === "string" &&
+		/^\d+$/.test(identity.dev) &&
+		typeof identity.ino === "string" &&
+		/^\d+$/.test(identity.ino) &&
+		typeof identity.size === "number" &&
+		Number.isSafeInteger(identity.size) &&
+		identity.size >= 0 &&
+		typeof identity.mtimeNs === "string" &&
+		/^\d+$/.test(identity.mtimeNs) &&
+		typeof identity.sha256 === "string" &&
+		/^[a-f0-9]{64}$/.test(identity.sha256)
+	);
+}
+
+function isLifecycleCleanupFile(value: unknown): value is LifecycleCleanupFile {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const file = value as Record<string, unknown>;
+	const allowed = new Set(["path", "identity", "attempt", "plannedPath", "detachedPath", "completed"]);
+	return (
+		Object.keys(file).every(key => allowed.has(key)) &&
+		typeof file.path === "string" &&
+		file.path.length > 0 &&
+		typeof file.plannedPath === "string" &&
+		file.plannedPath.length > 0 &&
+		isCleanupIdentity(file.identity) &&
+		typeof file.attempt === "number" &&
+		Number.isSafeInteger(file.attempt) &&
+		file.attempt > 0 &&
+		(file.detachedPath === undefined || (typeof file.detachedPath === "string" && file.detachedPath.length > 0)) &&
+		(file.completed === undefined || file.completed === true)
+	);
+}
+
+function isLifecycleCleanupEvidence(cleanup: CleanupEvidence): boolean {
+	if (typeof cleanup !== "object" || cleanup === null || Array.isArray(cleanup)) return false;
+	const record = cleanup as Record<string, unknown>;
+	const allowed = new Set(["phase", "sessionId", "metadataRoot", "lifecycleDeleteMetadata", "lifecycleFiles"]);
+	return (
+		Object.keys(record).every(key => allowed.has(key)) &&
+		record.phase === "lifecycle" &&
+		typeof record.sessionId === "string" &&
+		isCanonicalSessionId(record.sessionId) &&
+		typeof record.metadataRoot === "string" &&
+		record.metadataRoot.length > 0 &&
+		Array.isArray(record.lifecycleFiles) &&
+		record.lifecycleFiles.length > 0 &&
+		record.lifecycleFiles.length <= 4 &&
+		(record.lifecycleDeleteMetadata === undefined || record.lifecycleDeleteMetadata === true) &&
+		record.lifecycleFiles.every(isLifecycleCleanupFile)
+	);
+}
+
 function validateLifecycleCleanupShape(cleanup: CleanupEvidence): BrokerResponse | undefined {
-	const files = cleanup.lifecycleFiles;
 	if (
-		cleanup.phase !== "lifecycle" ||
-		!cleanup.sessionId ||
-		!isCanonicalSessionId(cleanup.sessionId) ||
-		!cleanup.metadataRoot ||
-		!Array.isArray(files) ||
-		files.length === 0 ||
-		files.length > 4 ||
+		!isLifecycleCleanupEvidence(cleanup) ||
 		lifecycleCleanupHasMixedMetadataSchema(cleanup) ||
-		(cleanup.lifecycleDeleteMetadata === true && files.length > 2)
+		(cleanup.lifecycleDeleteMetadata === true && cleanup.lifecycleFiles!.length > 2)
 	)
 		return fail("terminal_uncertain", "Lifecycle cleanup replay lacks a complete unambiguous schema.");
+	const files = cleanup.lifecycleFiles!;
 	const paths = new Set<string>();
 	for (const file of files) {
-		if (!validateLifecycleCleanupFile(cleanup.metadataRoot, cleanup.sessionId, file))
+		if (!validateLifecycleCleanupFile(cleanup.metadataRoot!, cleanup.sessionId!, file))
 			return fail("terminal_uncertain", "Lifecycle cleanup replay contains an invalid path authority.");
 		const entryPaths = new Map<string, "path" | "plannedPath" | "detachedPath">();
 		for (const [field, candidate] of [
@@ -1086,11 +1160,10 @@ function validateLifecycleCleanupFile(root: string, id: string, file: LifecycleC
 		!isCanonicalLifecycleCleanupOriginal(root, id, original) ||
 		path.dirname(planned) !== directory ||
 		!path.basename(planned).startsWith(".gjc-delete-") ||
-		(file.attempt !== undefined && (!Number.isSafeInteger(file.attempt) || file.attempt < 1)) ||
 		(file.detachedPath !== undefined && path.dirname(path.resolve(file.detachedPath)) !== directory)
 	)
 		return false;
-	return cleanupIdentity(file.identity) !== undefined;
+	return isCleanupIdentity(file.identity);
 }
 
 function lifecycleCleanupCandidates(file: LifecycleCleanupFile): string[] {
@@ -1142,7 +1215,7 @@ function validateLifecycleMetadataReplay(cleanup: CleanupEvidence): BrokerRespon
 	const readyEntry = files.find(file => path.resolve(file.path) === readyPath);
 	const capture = (file: string): LifecycleFileCapture | undefined | BrokerResponse => {
 		try {
-			return captureLifecycleFile(file, true);
+			return captureLifecycleFile(file, true, true);
 		} catch {
 			return fail("terminal_uncertain", "Lifecycle metadata sibling could not be safely inspected.");
 		}
@@ -1160,7 +1233,7 @@ function validateLifecycleMetadataReplay(cleanup: CleanupEvidence): BrokerRespon
 		for (const candidate of lifecycleCleanupCandidates(file)) {
 			let current: LifecycleFileCapture | undefined;
 			try {
-				current = captureLifecycleFile(candidate, true);
+				current = captureLifecycleFile(candidate, true, true);
 			} catch {
 				return fail("terminal_uncertain", "Lifecycle metadata candidate could not be safely inspected.");
 			}
@@ -1183,7 +1256,8 @@ function validateLifecycleMetadataReplay(cleanup: CleanupEvidence): BrokerRespon
 	let readyMarker: EffectMarker;
 	try {
 		const value: unknown = JSON.parse(ready.bytes.toString("utf8"));
-		if (!isEffectMarker(value)) throw new Error("invalid ready marker");
+		if (!isExactEffectMarker(value)) throw new Error("invalid ready marker");
+
 		readyMarker = value;
 	} catch {
 		return fail("terminal_uncertain", "Lifecycle readiness metadata ownership could not be verified.");
@@ -1200,7 +1274,7 @@ function validateLifecycleMetadataReplay(cleanup: CleanupEvidence): BrokerRespon
 	}
 	try {
 		const value: unknown = JSON.parse(marker.bytes.toString("utf8"));
-		if (!isEffectMarker(value) || !sameEffectMarker(value, readyMarker)) throw new Error("mismatched marker");
+		if (!isExactEffectMarker(value) || !sameEffectMarker(value, readyMarker)) throw new Error("mismatched marker");
 	} catch {
 		return fail("terminal_uncertain", "Lifecycle metadata siblings do not share one owner marker.");
 	}
@@ -1263,7 +1337,8 @@ function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | 
 		try {
 			const stat = fsSync.lstatSync(file);
 			if (stat.isSymbolicLink() || !stat.isFile()) return undefined;
-			const capture = captureLifecycleFile(file, true);
+			const capture = captureLifecycleFile(file, true, true);
+
 			return capture ? { kind: "present", capture } : undefined;
 		} catch (error) {
 			return (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "absent" } : undefined;
@@ -1291,7 +1366,8 @@ function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | 
 	if (activeMarker) {
 		try {
 			const value: unknown = JSON.parse(activeMarker.bytes.toString("utf8"));
-			if (!isEffectMarker(value)) return undefined;
+			if (!isExactEffectMarker(value)) return undefined;
+
 			marker = value;
 		} catch {
 			return undefined;
@@ -1304,7 +1380,8 @@ function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | 
 	if (ready.kind === "present") {
 		try {
 			const value: unknown = JSON.parse(ready.capture.bytes.toString("utf8"));
-			if (!isEffectMarker(value)) return undefined;
+			if (!isExactEffectMarker(value)) return undefined;
+
 			readyMarker = value;
 		} catch {
 			return undefined;
@@ -1396,7 +1473,7 @@ function preflightLifecycleDeleteMetadata(
 	for (const metadataPath of metadataPaths) {
 		let metadata: LifecycleFileCapture | undefined;
 		try {
-			metadata = captureLifecycleFile(metadataPath, true);
+			metadata = captureLifecycleFile(metadataPath, true, true);
 		} catch {
 			return fail("terminal_uncertain", "Lifecycle metadata path is occupied by an unsafe object.");
 		}
@@ -1407,7 +1484,7 @@ function preflightLifecycleDeleteMetadata(
 		} catch {
 			return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
 		}
-		if (!isEffectMarker(marker) || (record && marker.pid !== record.pid) || !hasObservedProcessExit(marker.pid))
+		if (!isExactEffectMarker(marker) || (record && marker.pid !== record.pid) || !hasObservedProcessExit(marker.pid))
 			return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
 		lifecycleMetadata.push({ metadataPath, metadata, marker });
 	}
@@ -1480,7 +1557,8 @@ async function reconcileLifecycleCleanup(
 				foundUnauthorized = true;
 				continue;
 			}
-			const current = captureLifecycleFile(candidate);
+			const current = captureLifecycleFile(candidate, true, true);
+
 			if (!current) {
 				foundUnauthorized = true;
 				continue;
@@ -1604,13 +1682,29 @@ type LifecycleFileCapture = {
 	digest: string;
 };
 
-function captureLifecycleFile(file: string, requireRegular = false): LifecycleFileCapture | undefined {
+function captureLifecycleFile(file: string, requireRegular = false, bounded = false): LifecycleFileCapture | undefined {
 	let descriptor: number | undefined;
 	try {
+		const preflight = bounded ? fsSync.lstatSync(file, { bigint: true }) : undefined;
+		if (
+			preflight &&
+			(!preflight.isFile() || preflight.size === 0n || preflight.size > BigInt(MAX_LIFECYCLE_METADATA_BYTES))
+		) {
+			if (requireRegular) throw new Error("Lifecycle metadata is not a bounded regular file.");
+			return undefined;
+		}
 		descriptor = fsSync.openSync(file, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW);
 		const stat = fsSync.fstatSync(descriptor, { bigint: true });
-		if (!stat.isFile()) {
-			if (requireRegular) throw new Error("Lifecycle cleanup candidate is not an exact regular file.");
+		if (
+			!stat.isFile() ||
+			(bounded &&
+				(stat.size === 0n ||
+					stat.size > BigInt(MAX_LIFECYCLE_METADATA_BYTES) ||
+					!preflight ||
+					stat.dev !== preflight.dev ||
+					stat.ino !== preflight.ino))
+		) {
+			if (requireRegular) throw new Error("Lifecycle cleanup candidate is not an exact bounded regular file.");
 			return undefined;
 		}
 		const bytes = fsSync.readFileSync(descriptor);
@@ -1689,7 +1783,7 @@ async function removeOwnedLifecycleArtifacts(root: string, id: string, expected:
 	const currentMarker = await readEffectMarker(lifecycleMarkerPath(root, id));
 	if (!currentMarker || !sameEffectMarker(currentMarker, expected)) return false;
 	const readyPath = lifecycleReadyPath(root, id);
-	const ready = captureLifecycleFile(readyPath);
+	const ready = captureLifecycleFile(readyPath, true, true);
 	if (ready && createHash("sha256").update(ready.bytes).digest("hex") !== ready.digest) return false;
 	// Readiness mutation is deferred to the same ledger-backed cleanup transaction.
 	return true;
@@ -3163,6 +3257,8 @@ export async function executeLifecycle(
 		};
 	}
 	if (cleanup?.phase === "lifecycle") {
+		const shapeValidation = validateLifecycleCleanupShape(cleanup);
+		if (shapeValidation) return { response: shapeValidation };
 		if (cleanup.lifecycleDeleteMetadata === true || operation === "session.delete") {
 			const binding = validateLifecycleDeleteMetadataBinding(broker, operation, input, identity, cleanup);
 			if (binding) return { response: binding };

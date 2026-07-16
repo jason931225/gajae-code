@@ -1515,6 +1515,131 @@ test("broker rejects a corrupt completed lifecycle cleanup receipt when its read
 	}
 }, 30_000);
 
+test("broker rejects malformed lifecycle cleanup receipts without mutating metadata", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-malformed-lifecycle-replay-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const sessionId = "malformed-lifecycle-replay";
+	const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
+	const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
+	const request = { cwd: root, stateRoot, sessionId };
+	const marker = canonicalJson({
+		pid: process.pid,
+		effectMarker: "malformed-replay",
+		incarnation: "malformed-replay",
+	});
+	const broker = new Broker({ agentDir });
+	try {
+		await fs.mkdir(path.dirname(markerPath), { recursive: true });
+		await fs.writeFile(markerPath, marker);
+		await fs.writeFile(readyPath, marker);
+		await broker.start();
+		const identity = {
+			dev: "1",
+			ino: "1",
+			size: 1,
+			mtimeNs: "1",
+			sha256: "a".repeat(64),
+		};
+		const validFile = {
+			path: markerPath,
+			identity,
+			attempt: 1,
+			plannedPath: path.join(stateRoot, "sdk", ".gjc-delete-malformed-marker"),
+		};
+		const malformed = [
+			{ lifecycleFiles: [null] },
+			{ lifecycleFiles: [{}] },
+			{ lifecycleFiles: [validFile], lifecycleDeleteMetadata: false },
+			{ lifecycleFiles: [{ ...validFile, completed: "true" }] },
+			{ lifecycleFiles: [{ ...validFile, metadataPath: markerPath }] },
+		] as const;
+		for (const [index, fragment] of malformed.entries()) {
+			const response = await executeLifecycle(
+				broker,
+				"session.delete",
+				request,
+				`malformed-lifecycle-replay-${index}`,
+				{
+					phase: "lifecycle",
+					sessionId,
+					metadataRoot: stateRoot,
+					...fragment,
+				} as unknown as BrokerCleanupEvidence,
+			);
+			expect(response.response).toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
+		}
+		expect(await fs.readFile(markerPath, "utf8")).toBe(marker);
+		expect(await fs.readFile(readyPath, "utf8")).toBe(marker);
+	} finally {
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+
+test("broker rejects oversized lifecycle marker and readiness receipts before hashing or unlinking", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-oversized-lifecycle-replay-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const sessionId = "oversized-lifecycle-replay";
+	const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
+	const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
+	const request = { cwd: root, stateRoot, sessionId };
+	const broker = new Broker({ agentDir });
+	const capture = async (file: string) => {
+		const [stat, bytes] = await Promise.all([fs.stat(file, { bigint: true }), fs.readFile(file)]);
+		return {
+			dev: stat.dev.toString(),
+			ino: stat.ino.toString(),
+			size: Number(stat.size),
+			mtimeNs: stat.mtimeNs.toString(),
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+		};
+	};
+	const cleanup = async (): Promise<BrokerCleanupEvidence> => ({
+		phase: "lifecycle",
+		sessionId,
+		metadataRoot: stateRoot,
+		lifecycleDeleteMetadata: true,
+		lifecycleFiles: [
+			{
+				path: markerPath,
+				identity: await capture(markerPath),
+				attempt: 1,
+				plannedPath: path.join(stateRoot, "sdk", ".gjc-delete-oversized-marker"),
+			},
+			{
+				path: readyPath,
+				identity: await capture(readyPath),
+				attempt: 1,
+				plannedPath: path.join(stateRoot, "sdk", ".gjc-delete-oversized-ready"),
+			},
+		],
+	});
+	try {
+		await fs.mkdir(path.dirname(markerPath), { recursive: true });
+		const valid = canonicalJson({
+			pid: process.pid,
+			effectMarker: "oversized-replay",
+			incarnation: "oversized-replay",
+		});
+		await fs.writeFile(markerPath, `${valid}${" ".repeat(4096)}`);
+		await fs.writeFile(readyPath, valid);
+		await broker.start();
+		let response = await executeLifecycle(broker, "session.delete", request, "oversized-marker", await cleanup());
+		expect(response.response).toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
+		expect((await fs.stat(markerPath)).size).toBeGreaterThan(4096);
+		await fs.writeFile(markerPath, valid);
+		await fs.writeFile(readyPath, `${valid}${" ".repeat(4096)}`);
+		response = await executeLifecycle(broker, "session.delete", request, "oversized-ready", await cleanup());
+		expect(response.response).toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
+		expect((await fs.stat(readyPath)).size).toBeGreaterThan(4096);
+	} finally {
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+
 test("broker rejects duplicate lifecycle marker replay authorities without unlinking siblings", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-duplicate-lifecycle-replay-"));
 	const agentDir = path.join(root, "agent");

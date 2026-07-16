@@ -6,7 +6,7 @@ import { visibleWidth } from "@gajae-code/tui";
 import { getProjectDir, setProjectDir } from "@gajae-code/utils";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
 import type { StatusLineSegmentId } from "../src/config/settings-schema";
-import { StatusLineComponent } from "../src/modes/components/status-line";
+import { StatusLineComponent } from "../src/modes/components/tool-status-header";
 import type { SegmentContext } from "../src/modes/components/status-line/segments";
 import { renderSegment } from "../src/modes/components/status-line/segments";
 import { EMPTY_JOBS_SNAPSHOT } from "../src/modes/jobs-observer";

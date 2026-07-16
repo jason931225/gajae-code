@@ -547,8 +547,9 @@ const [resolvedCustomPrompt, resolvedAppendPrompt, systemPromptCustomization, co
 			// Tools map provided
 			toolNames = Array.from(tools.keys());
 		} else {
-// Use the same essential-tool baseline as a default session.
-toolNames = [...DEFAULT_ESSENTIAL_TOOL_NAMES];
+			// Use the same essential-tool baseline as a default session.
+			toolNames = [...DEFAULT_ESSENTIAL_TOOL_NAMES];
+		}
 	}
 
 	// Build tool descriptions for system prompt rendering.

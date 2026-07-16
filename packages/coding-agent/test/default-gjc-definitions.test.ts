@@ -401,7 +401,7 @@ expect(routing).toContain("Clear, low-risk implementation requests use direct to
 		expect(routing).toContain("`/skill:ultragoal`");
 		expect(routing).toContain("`/skill:team`");
 		expect(routing).toContain("Delegate large implementation slices to `executor`");
-		expect(routing.split("\n").filter(line => line.startsWith("-")).toHaveLength(6);
+		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(6);
 		expect(decomposition).toMatch(/skip it for one-step or obvious two-step fixes/i);
 	});
 

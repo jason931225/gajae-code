@@ -626,6 +626,74 @@ describe("ModelRegistry", () => {
 			expect(resolved?.id).toBe("anthropic/claude-sonnet-4.5");
 		});
 
+		test("keeps available canonical variants sticky across refreshes and releases unavailable variants", async () => {
+			const alpha = providerConfig("https://alpha.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]);
+			const beta = providerConfig("https://beta.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]);
+			writeRawModelsJson({ alpha, beta });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const initial = registry.resolveCanonicalModel("claude-sonnet-4-5", {
+				availableOnly: true,
+				candidates: registry.getAvailable(),
+				sessionId: "session-a",
+			});
+			expect(initial).toBeDefined();
+
+			await Bun.sleep(10);
+			writeRawModelsJson({ beta, alpha });
+			await registry.refresh("offline");
+			expect(
+				registry.resolveCanonicalModel("claude-sonnet-4-5", {
+					availableOnly: true,
+					candidates: registry.getAvailable(),
+					sessionId: "session-a",
+				}),
+			).toMatchObject({ provider: initial!.provider, id: initial!.id });
+
+			const { apiKey: _apiKey, ...unavailableInitialProvider } = initial!.provider === "alpha" ? alpha : beta;
+			await Bun.sleep(10);
+			writeRawModelsJson(
+				initial!.provider === "alpha"
+					? { beta, alpha: unavailableInitialProvider }
+					: { beta: unavailableInitialProvider, alpha },
+			);
+			await registry.refresh("offline");
+			expect(
+				registry.resolveCanonicalModel("claude-sonnet-4-5", {
+					availableOnly: true,
+					candidates: registry.getAvailable(),
+					sessionId: "session-a",
+				})?.provider,
+			).not.toBe(initial!.provider);
+		});
+
+		test("bounds session canonical variants to 64 entries", () => {
+			writeRawModelsJson({
+				alpha: providerConfig("https://alpha.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]),
+				beta: providerConfig("https://beta.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]),
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const initial = registry.resolveCanonicalModel("claude-sonnet-4-5", {
+				availableOnly: true,
+				candidates: registry.getAvailable(),
+				sessionId: "session-0",
+			});
+			for (let index = 1; index < 65; index += 1) {
+				registry.resolveCanonicalModel("claude-sonnet-4-5", {
+					availableOnly: true,
+					candidates: registry.getAvailable(),
+					sessionId: `session-${index}`,
+				});
+			}
+			const reversedCandidates = [...registry.getAvailable()].reverse();
+			expect(
+				registry.resolveCanonicalModel("claude-sonnet-4-5", {
+					availableOnly: true,
+					candidates: reversedCandidates,
+					sessionId: "session-0",
+				}),
+			).not.toBe(initial);
+		});
+
 		test("prefers vision-capable variant over configured provider order", async () => {
 			await Settings.init({
 				inMemory: true,

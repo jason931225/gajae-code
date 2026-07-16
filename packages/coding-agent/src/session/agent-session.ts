@@ -8410,6 +8410,7 @@ export class AgentSession {
 				settings: this.settings,
 				matchPreferences,
 				modelRegistry: this.#modelRegistry,
+				sessionId: this.sessionId,
 			});
 			if (!resolved.model) continue;
 
@@ -10366,6 +10367,7 @@ export class AgentSession {
 			settings: this.settings,
 			matchPreferences: { usageOrder: this.settings.getStorage()?.getModelUsageOrder() },
 			modelRegistry: this.#modelRegistry,
+			sessionId: this.sessionId,
 		});
 	}
 
@@ -11374,6 +11376,7 @@ export class AgentSession {
 				settings: this.settings,
 				matchPreferences: { usageOrder: this.settings.getStorage()?.getModelUsageOrder() },
 				modelRegistry: this.#modelRegistry,
+				sessionId: this.sessionId,
 			});
 			if (!resolved.model) {
 				controller.onResolutionSkip("unknown_model");

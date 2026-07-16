@@ -539,6 +539,7 @@ export interface ProviderDiscoveryState {
 export interface CanonicalModelQueryOptions {
 	availableOnly?: boolean;
 	candidates?: readonly Model<Api>[];
+	/** Stable session identity used to keep a canonical variant sticky within a session. */
 	sessionId?: string;
 }
 
@@ -2447,7 +2448,6 @@ export class ModelRegistry {
 		this.#availableModelsCache = undefined;
 		this.#availableModelsDisabledProviders = undefined;
 		this.#availableModelsEnvFingerprint = undefined;
-		this.#sessionCanonicalVariants.clear();
 	}
 
 	#suspendRebuild(): void {

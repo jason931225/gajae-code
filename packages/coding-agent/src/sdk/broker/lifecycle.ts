@@ -1044,6 +1044,14 @@ function metadataCleanupPlan(
 	};
 }
 
+function isLifecycleMetadataPath(root: string, id: string, value: string): boolean {
+	const resolved = path.resolve(value);
+	return (
+		resolved === path.resolve(lifecycleMarkerPath(root, id)) ||
+		resolved === path.resolve(lifecycleReadyPath(root, id))
+	);
+}
+
 function validateMetadataCleanupPlan(cleanup: CleanupEvidence, id: string): boolean {
 	return (
 		cleanup.phase === "metadata" &&
@@ -1052,7 +1060,7 @@ function validateMetadataCleanupPlan(cleanup: CleanupEvidence, id: string): bool
 		(cleanup.metadataAttempt === undefined ||
 			(Number.isSafeInteger(cleanup.metadataAttempt) && cleanup.metadataAttempt >= 1)) &&
 		typeof cleanup.plannedMetadataPath === "string" &&
-		path.resolve(cleanup.metadataPath) === path.resolve(lifecycleMarkerPath(cleanup.metadataRoot, id)) &&
+		isLifecycleMetadataPath(cleanup.metadataRoot, id, cleanup.metadataPath) &&
 		path.dirname(path.resolve(cleanup.plannedMetadataPath)) === path.dirname(path.resolve(cleanup.metadataPath)) &&
 		path.basename(cleanup.plannedMetadataPath).startsWith(".gjc-delete-") &&
 		(cleanup.detachedMetadataPath === undefined ||
@@ -1216,16 +1224,13 @@ async function hasOwnedReadinessEvidence(
 	);
 }
 
-function captureLifecycleFile(
-	file: string,
-	requireRegular = false,
-):
-	| {
-			bytes: Buffer;
-			identity: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; sha256: string };
-			digest: string;
-	  }
-	| undefined {
+type LifecycleFileCapture = {
+	bytes: Buffer;
+	identity: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; sha256: string };
+	digest: string;
+};
+
+function captureLifecycleFile(file: string, requireRegular = false): LifecycleFileCapture | undefined {
 	let descriptor: number | undefined;
 	try {
 		descriptor = fsSync.openSync(file, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW);
@@ -2443,7 +2448,7 @@ async function executeLifecycleResponse(
 		if (cleanup?.phase === "metadata") {
 			const metadataIdentity = cleanupIdentity(cleanup.metadataIdentity);
 			if (!metadataIdentity || !validateMetadataCleanupPlan(cleanup, id))
-				return fail("terminal_uncertain", "Metadata cleanup replay lacks an exact lifecycle marker authority.");
+				return fail("terminal_uncertain", "Metadata cleanup replay lacks exact lifecycle metadata authority.");
 			const metadataCandidates = [
 				cleanup.metadataPath!,
 				cleanup.detachedMetadataPath,
@@ -2452,7 +2457,7 @@ async function executeLifecycleResponse(
 				(value, index, values): value is string => typeof value === "string" && values.indexOf(value) === index,
 			);
 			let activePath: string | undefined;
-			let marker: ReturnType<typeof captureLifecycleFile>;
+			let marker: LifecycleFileCapture | undefined;
 			let foundUnauthorized = false;
 			for (const candidate of metadataCandidates) {
 				try {
@@ -2710,14 +2715,27 @@ async function executeLifecycleResponse(
 				endpointGeneration: record.endpointGeneration,
 				pid: record.pid,
 			});
-		const metadataPath = lifecycleMarkerPath(validated.metadataRoot, id);
-		if (fsSync.existsSync(metadataPath)) {
-			const stat = fsSync.lstatSync(metadataPath);
-			if (stat.isSymbolicLink() || !stat.isFile())
-				return fail("terminal_uncertain", "Lifecycle metadata path is occupied by an unsafe object.");
-		}
-		const metadata = captureLifecycleFile(metadataPath);
-		if (metadata) {
+		const metadataPaths = [
+			lifecycleMarkerPath(validated.metadataRoot, id),
+			lifecycleReadyPath(validated.metadataRoot, id),
+		];
+		const lifecycleMetadata: Array<{
+			metadataPath: string;
+			metadata: LifecycleFileCapture;
+		}> = [];
+		for (const metadataPath of metadataPaths) {
+			if (fsSync.existsSync(metadataPath)) {
+				const stat = fsSync.lstatSync(metadataPath);
+				if (stat.isSymbolicLink() || !stat.isFile())
+					return fail("terminal_uncertain", "Lifecycle metadata path is occupied by an unsafe object.");
+			}
+			let metadata: LifecycleFileCapture | undefined;
+			try {
+				metadata = captureLifecycleFile(metadataPath);
+			} catch {
+				return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
+			}
+			if (!metadata) continue;
 			let marker: unknown;
 			try {
 				marker = JSON.parse(metadata.bytes.toString("utf8"));
@@ -2726,6 +2744,9 @@ async function executeLifecycleResponse(
 			}
 			if (!isEffectMarker(marker) || (record && marker.pid !== record.pid) || !hasObservedProcessExit(marker.pid))
 				return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
+			lifecycleMetadata.push({ metadataPath, metadata });
+		}
+		for (const { metadataPath, metadata } of lifecycleMetadata) {
 			const metadataCleanup = metadataCleanupPlan(
 				validated.metadataRoot,
 				id,

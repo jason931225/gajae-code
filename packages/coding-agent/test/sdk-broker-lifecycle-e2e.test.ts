@@ -25,6 +25,7 @@ import { runSdkSessionCli } from "../src/sdk/cli";
 import { SdkClient } from "../src/sdk/client";
 import { readSdkBrokerDiscovery } from "../src/sdk/client/discovery";
 import { createSdkMcpServer } from "../src/sdk/mcp";
+import { listManagedSessionCandidates, resolveManagedSessionScope } from "../src/sdk/session-directory";
 import { sanitizeSdkStartupMessage } from "../src/sdk/startup-capability";
 import { SessionManager } from "../src/session/session-manager";
 
@@ -730,6 +731,283 @@ test("broker rejects a cross-workspace cold fork source before spawning", async 
 		await fs.rm(root, { recursive: true, force: true });
 	}
 });
+
+test("broker rejects duplicate owned source candidates before spawning", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-duplicate-owned-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const spawnedPath = path.join(root, "spawned");
+	const command = path.join(root, "spawned.js");
+	const broker = new Broker({ agentDir });
+	const previousCommand = process.env.GJC_SDK_SESSION_COMMAND;
+	const previousRequestId = process.env.GJC_LIFECYCLE_REQUEST_ID;
+	const previousSessionId = process.env.GJC_SESSION_ID;
+	try {
+		const scopeResult = await resolveManagedSessionScope({ cwd: root, agentDir });
+		expect(scopeResult.kind).toBe("resolved");
+		if (scopeResult.kind !== "resolved") throw new Error(scopeResult.message);
+		const createDuplicate = async (suffix: string) => {
+			process.env.GJC_LIFECYCLE_REQUEST_ID = `duplicate-prepare-${suffix}`;
+			process.env.GJC_SESSION_ID = "duplicate-owned-source";
+			const session = SessionManager.create(root, SessionManager.getDefaultSessionDir(root, agentDir));
+			await session.ensureOnDisk();
+			const sourcePath = session.getSessionFile();
+			if (!sourcePath) throw new Error("Expected duplicate owned source path.");
+			const duplicatePath = path.join(scopeResult.scope.directoryPath, `duplicate-${suffix}.jsonl`);
+			await fs.rename(sourcePath, duplicatePath);
+			return { path: duplicatePath, bytes: await fs.readFile(duplicatePath) };
+		};
+		const first = await createDuplicate("a");
+		const second = await createDuplicate("b");
+		delete process.env.GJC_LIFECYCLE_REQUEST_ID;
+		delete process.env.GJC_SESSION_ID;
+		const inventory = await listManagedSessionCandidates({ scope: scopeResult.scope });
+		expect(inventory.kind).toBe("complete");
+		if (inventory.kind !== "complete") throw new Error(inventory.message);
+		expect(inventory.owned.filter(candidate => candidate.sessionId === "duplicate-owned-source")).toHaveLength(2);
+		const candidatePathsBefore = inventory.owned.map(candidate => candidate.path).sort();
+		const ledgerRowsBefore = (
+			await fs.readFile(path.join(agentDir, "sdk", "lifecycle-ledger.jsonl"), "utf8").catch(() => "")
+		)
+			.split("\n")
+			.filter(Boolean);
+		await fs.writeFile(
+			command,
+			`require("fs").writeFileSync(${JSON.stringify(spawnedPath)}, "spawned"); setInterval(() => {}, 1000);`,
+		);
+		process.env.GJC_SDK_SESSION_COMMAND = `${process.execPath} ${command}`;
+		await broker.start();
+		expect(
+			await broker.handleRequest(
+				"session.fork",
+				{ cwd: root, stateRoot, sourceSessionId: "duplicate-owned-source" },
+				"duplicate-owned-source-request",
+			),
+		).toEqual({
+			ok: false,
+			error: {
+				code: "invalid_input",
+				message: "Source saved session does not match the requested workspace and session id.",
+			},
+		});
+		await expect(fs.access(spawnedPath)).rejects.toThrow();
+		expect(await fs.readFile(first.path)).toEqual(first.bytes);
+		expect(await fs.readFile(second.path)).toEqual(second.bytes);
+		await expect(fs.access(path.join(stateRoot, "sdk", "duplicate-owned-source.json"))).rejects.toThrow();
+		await expect(fs.access(path.join(stateRoot, "sdk", "duplicate-owned-source.lifecycle.json"))).rejects.toThrow();
+		const afterInventory = await listManagedSessionCandidates({ scope: scopeResult.scope });
+		expect(afterInventory.kind).toBe("complete");
+		if (afterInventory.kind !== "complete") throw new Error(afterInventory.message);
+		expect(afterInventory.owned.map(candidate => candidate.path).sort()).toEqual(candidatePathsBefore);
+		const ledgerRowsAfter = (
+			await fs.readFile(path.join(agentDir, "sdk", "lifecycle-ledger.jsonl"), "utf8").catch(() => "")
+		)
+			.split("\n")
+			.filter(Boolean)
+			.slice(ledgerRowsBefore.length)
+			.map(line => JSON.parse(line) as { state?: string });
+		expect(ledgerRowsAfter.some(row => row.state === "effect_started")).toBe(false);
+		const registrations = (await new SessionIndex(agentDir).open())
+			.listSessions()
+			.sessions.filter(session => session.sessionId === "duplicate-owned-source");
+		expect(registrations).toHaveLength(0);
+	} finally {
+		if (previousCommand === undefined) delete process.env.GJC_SDK_SESSION_COMMAND;
+		else process.env.GJC_SDK_SESSION_COMMAND = previousCommand;
+		if (previousRequestId === undefined) delete process.env.GJC_LIFECYCLE_REQUEST_ID;
+		else process.env.GJC_LIFECYCLE_REQUEST_ID = previousRequestId;
+		if (previousSessionId === undefined) delete process.env.GJC_SESSION_ID;
+		else process.env.GJC_SESSION_ID = previousSessionId;
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+
+test("broker directly resumes and forks a canonical cold saved session with scoped cleanup", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-canonical-cold-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const broker = new Broker({ agentDir });
+	try {
+		const scopeResult = await resolveManagedSessionScope({ cwd: root, agentDir });
+		expect(scopeResult.kind).toBe("resolved");
+		if (scopeResult.kind !== "resolved") throw new Error(scopeResult.message);
+		const sourceDir = SessionManager.getDefaultSessionDir(root, agentDir);
+		expect(sourceDir).toBe(scopeResult.scope.directoryPath);
+		const source = SessionManager.create(root, sourceDir);
+		await source.ensureOnDisk();
+		const sourceId = source.getSessionId();
+		const sourcePath = source.getSessionFile();
+		if (!sourcePath) throw new Error("Expected canonical saved source path.");
+		const assertCanonicalSource = async () => {
+			const inventory = await listManagedSessionCandidates({ scope: scopeResult.scope });
+			expect(inventory.kind).toBe("complete");
+			if (inventory.kind !== "complete") throw new Error(inventory.message);
+			const candidates = inventory.owned.filter(
+				candidate => candidate.sessionId === sourceId && candidate.path === sourcePath,
+			);
+			expect(candidates).toHaveLength(1);
+			expect(path.dirname(candidates[0]!.path)).toBe(scopeResult.scope.directoryPath);
+			return candidates[0]!;
+		};
+		const sourceCandidate = await assertCanonicalSource();
+		await broker.start();
+		const resumed = await broker.handleRequest(
+			"session.resume",
+			{ cwd: root, stateRoot, sessionId: sourceId, sessionPath: sourcePath },
+			"canonical-cold-resume",
+		);
+		expect(resumed).toMatchObject({ ok: true, result: { sessionId: sourceId } });
+		const resumedSourceCandidate = await assertCanonicalSource();
+		expect(resumedSourceCandidate.identity).toMatchObject({ canonicalPath: sourcePath, sessionId: sourceId });
+		expect(resumedSourceCandidate.identity).not.toEqual(sourceCandidate.identity);
+		expect(
+			await broker.handleRequest("session.close", { sessionId: sourceId }, "canonical-cold-resume-close"),
+		).toMatchObject({
+			ok: true,
+			result: { sessionId: sourceId },
+		});
+		await waitFor(
+			async () =>
+				(await fs.access(path.join(stateRoot, "sdk", `${sourceId}.json`)).then(
+					() => false,
+					() => true,
+				))
+					? true
+					: undefined,
+			"canonical resume endpoint cleanup",
+		);
+		expect(
+			await fs.access(path.join(stateRoot, "sdk", `${sourceId}.lifecycle.json`)).then(
+				() => true,
+				() => false,
+			),
+		).toBe(true);
+		expect(
+			await fs.access(path.join(stateRoot, "sdk", `${sourceId}.lifecycle.ready.json`)).then(
+				() => true,
+				() => false,
+			),
+		).toBe(true);
+		expect(await broker.handleRequest("session.get_endpoint", { sessionId: sourceId })).toMatchObject({
+			ok: false,
+			error: { code: "resource_gone" },
+		});
+		const resumedSourceBytes = await fs.readFile(sourcePath);
+
+		const forkSourceCandidate = await assertCanonicalSource();
+
+		const forked = await broker.handleRequest(
+			"session.fork",
+			{ cwd: root, stateRoot, sourceSessionId: sourceId, sourceSessionPath: sourcePath },
+			"canonical-cold-fork",
+		);
+		expect(forked).toMatchObject({ ok: true });
+		if (!forked.ok) throw new Error(forked.error.message);
+		const forkResult = forked.result as { sessionId?: unknown };
+		const forkId = String(forkResult.sessionId);
+		expect(forkId).not.toBe(sourceId);
+		const inventory = await listManagedSessionCandidates({ scope: scopeResult.scope });
+		expect(inventory.kind).toBe("complete");
+		if (inventory.kind !== "complete") throw new Error(inventory.message);
+		const forkCandidates = inventory.owned.filter(candidate => candidate.sessionId === forkId);
+		expect(forkCandidates).toHaveLength(1);
+		const forkCandidate = forkCandidates[0]!;
+		expect(path.dirname(forkCandidate.path)).toBe(scopeResult.scope.directoryPath);
+		expect(forkCandidate.identity.sessionId).toBe(forkId);
+		expect(
+			await broker.handleRequest("session.close", { sessionId: forkId }, "canonical-cold-fork-close"),
+		).toMatchObject({
+			ok: true,
+			result: { sessionId: forkId },
+		});
+		await waitFor(
+			async () =>
+				(await fs.access(path.join(stateRoot, "sdk", `${forkId}.json`)).then(
+					() => false,
+					() => true,
+				))
+					? true
+					: undefined,
+			"canonical fork endpoint cleanup",
+		);
+		expect(
+			await fs.access(path.join(stateRoot, "sdk", `${forkId}.lifecycle.json`)).then(
+				() => true,
+				() => false,
+			),
+		).toBe(true);
+		expect(
+			await fs.access(path.join(stateRoot, "sdk", `${forkId}.lifecycle.ready.json`)).then(
+				() => true,
+				() => false,
+			),
+		).toBe(true);
+		expect(await broker.handleRequest("session.get_endpoint", { sessionId: forkId })).toMatchObject({
+			ok: false,
+			error: { code: "resource_gone" },
+		});
+		expect(
+			await broker.handleRequest(
+				"session.delete",
+				{ cwd: root, stateRoot, sessionId: forkId, sessionPath: forkCandidate.path },
+				"canonical-cold-fork-delete",
+			),
+		).toMatchObject({ ok: true, result: { sessionId: forkId } });
+		expect(
+			await fs.access(forkCandidate.path).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(
+			await fs.access(path.join(stateRoot, "sdk", `${forkId}.lifecycle.json`)).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(
+			await fs.access(path.join(stateRoot, "sdk", `${forkId}.lifecycle.ready.json`)).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		const afterDelete = await listManagedSessionCandidates({ scope: scopeResult.scope });
+		expect(afterDelete.kind).toBe("complete");
+		if (afterDelete.kind !== "complete") throw new Error(afterDelete.message);
+		expect(afterDelete.owned.some(candidate => candidate.sessionId === forkId)).toBe(false);
+		expect(await fs.readFile(sourcePath)).toEqual(resumedSourceBytes);
+		expect((await assertCanonicalSource()).identity).toEqual(forkSourceCandidate.identity);
+		expect(
+			await broker.handleRequest(
+				"session.delete",
+				{ cwd: root, stateRoot, sessionId: sourceId, sessionPath: sourcePath },
+				"canonical-cold-resume-delete",
+			),
+		).toMatchObject({ ok: true, result: { sessionId: sourceId } });
+		expect(
+			await fs.access(sourcePath).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(
+			await fs.access(path.join(stateRoot, "sdk", `${sourceId}.lifecycle.json`)).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(
+			await fs.access(path.join(stateRoot, "sdk", `${sourceId}.lifecycle.ready.json`)).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+	} finally {
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 30_000);
 
 test("broker terminalizes default command resolver failures", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-resolver-failure-"));

@@ -1092,7 +1092,7 @@ function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | 
 		activeMarker = current.capture;
 	}
 	if (!activeMarker && cleanup.metadataCompleted !== true) return undefined;
-	// A completed legacy marker can be absent; its exact ready sibling is then the remaining owner proof.
+	// A completed legacy marker can be absent; bind its ready sibling to the persisted canonical marker digest.
 	let marker: EffectMarker | undefined;
 	if (activeMarker) {
 		try {
@@ -1116,6 +1116,12 @@ function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | 
 			return undefined;
 		}
 		if (marker && !sameEffectMarker(marker, readyMarker)) return undefined;
+		if (
+			!marker &&
+			cleanup.metadataCompleted === true &&
+			createHash("sha256").update(canonicalJson(readyMarker)).digest("hex") !== persistedIdentity.sha256
+		)
+			return undefined;
 	}
 	if (!marker && !readyMarker && cleanup.metadataCompleted !== true) return undefined;
 

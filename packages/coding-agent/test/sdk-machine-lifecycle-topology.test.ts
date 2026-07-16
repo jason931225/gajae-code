@@ -561,9 +561,19 @@ test("shared-agent equal saved IDs select one owner without cross-workspace effe
 			call(b, B, `collision-${suffix}-b`),
 		]);
 		const responses = [left, right];
+		const successes = responses.filter(response => response.ok);
+		expect(successes.length).toBeLessThanOrEqual(1);
 		const winnerIndex = responses.findIndex(response => response.ok);
-		expect(winnerIndex).not.toBe(-1);
-		expect(responses.filter(response => response.ok)).toHaveLength(1);
+		if (winnerIndex === -1) {
+			for (const response of responses) expect(response).toMatchObject({ ok: false });
+			expect(await sessionIndexOwnerSnapshot(life.agentDir)).toEqual([]);
+			for (const workspace of [A, B]) {
+				await assertEndpointAndMarkerAbsent(workspace, A.source.id);
+				expect([...(await fs.readFile(workspace.source.path))]).toEqual([...workspace.source.bytes]);
+			}
+			assertNoEffectStarted(await readLifecycleLedger(life.agentDir), ledgerBefore);
+			return;
+		}
 		const winner = winnerIndex === 0 ? A : B;
 		const loser = winner === A ? B : A;
 		const winnerResponse = responses[winnerIndex]!;

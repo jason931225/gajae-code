@@ -1168,7 +1168,7 @@ test("broker refuses fresh lifecycle cleanup when ready sibling has a different 
 	}
 }, 30_000);
 
-test("broker replays a base metadata cleanup receipt after reopen without stranding its lifecycle siblings", async () => {
+test("broker replays a completed base metadata cleanup receipt and rejects a replaced ready sibling after marker loss", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-legacy-metadata-replay-"));
 	const agentDir = path.join(root, "agent");
 	const stateRoot = path.join(root, ".gjc", "state");
@@ -1182,8 +1182,8 @@ test("broker replays a base metadata cleanup receipt after reopen without strand
 	try {
 		await fs.mkdir(path.dirname(markerPath), { recursive: true });
 		const marker = { pid: process.pid, effectMarker: "base", incarnation: "base" };
-		await fs.writeFile(markerPath, JSON.stringify(marker));
-		await fs.writeFile(readyPath, JSON.stringify(marker));
+		await fs.writeFile(markerPath, canonicalJson(marker));
+		await fs.writeFile(readyPath, canonicalJson(marker));
 		const [stat, bytes] = await Promise.all([fs.stat(markerPath, { bigint: true }), fs.readFile(markerPath)]);
 		const target = createHash("sha256").update(canonicalJson({ sessionId })).digest("hex");
 		const identity = await deriveIdempotencyIdentity(agentDir, "session.delete", key, target);
@@ -1277,8 +1277,13 @@ test("broker replays a base metadata cleanup receipt after reopen without strand
 			"sdk",
 			`.gjc-delete-base-${mismatchedSessionId}.lifecycle.json`,
 		);
-		await fs.writeFile(mismatchedMarkerPath, JSON.stringify(marker));
-		await fs.writeFile(mismatchedReadyPath, JSON.stringify({ ...marker, effectMarker: "mismatched-ready" }));
+		const replacedReady = {
+			pid: process.pid + 1,
+			effectMarker: "replaced-ready-owner",
+			incarnation: "replaced-ready-incarnation",
+		};
+		await fs.writeFile(mismatchedMarkerPath, canonicalJson(marker));
+		await fs.writeFile(mismatchedReadyPath, canonicalJson(replacedReady));
 		const [mismatchedStat, mismatchedBytes] = await Promise.all([
 			fs.stat(mismatchedMarkerPath, { bigint: true }),
 			fs.readFile(mismatchedMarkerPath),
@@ -1317,18 +1322,20 @@ test("broker replays a base metadata cleanup receipt after reopen without strand
 							sha256: createHash("sha256").update(mismatchedBytes).digest("hex"),
 						},
 						plannedMetadataPath: mismatchedPlannedPath,
+						metadataCompleted: true,
 					},
 				},
 			},
 		});
+		await fs.unlink(mismatchedMarkerPath);
 		broker = new Broker({ agentDir });
 		await broker.start();
 		await expect(broker.handleRequest("session.delete", mismatchedRequest, mismatchedKey)).resolves.toMatchObject({
 			ok: false,
 			error: { code: "terminal_uncertain" },
 		});
-		await expect(fs.stat(mismatchedMarkerPath)).resolves.toBeDefined();
-		await expect(fs.stat(mismatchedReadyPath)).resolves.toBeDefined();
+		await expect(fs.stat(mismatchedMarkerPath)).rejects.toThrow();
+		await expect(fs.readFile(mismatchedReadyPath, "utf8")).resolves.toBe(canonicalJson(replacedReady));
 	} finally {
 		await broker?.stop();
 		await fs.rm(root, { recursive: true, force: true });

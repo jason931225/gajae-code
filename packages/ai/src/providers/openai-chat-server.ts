@@ -417,8 +417,12 @@ function buildUsage(message: AssistantMessage): Record<string, unknown> {
 	return usage;
 }
 
+function isResponsesFamilyApi(api: AssistantMessage["api"]): boolean {
+	return api === "openai-responses" || api === "openai-codex-responses";
+}
+
 function safeThinkingText(content: ThinkingContent, api: AssistantMessage["api"]): string | undefined {
-	if (api === "openai-responses" && content.provenance === undefined) return undefined;
+	if (isResponsesFamilyApi(api) && content.provenance === undefined) return undefined;
 	if (content.provenance === "raw") return undefined;
 	if (content.provenance === "mixed") return content.summaryText;
 	if (content.provenance === "summary") return content.summaryText ?? content.thinking;
@@ -430,10 +434,10 @@ function hasRawOrMixedThinking(partial: AssistantMessage, contentIndex: number):
 	return content?.type === "thinking" && (content.provenance === "raw" || content.provenance === "mixed");
 }
 
-/** Responses reasoning is untrusted until output_item.done assigns provenance. */
+/** Responses-family reasoning is untrusted until output_item.done assigns provenance. */
 function hasUnfinalizedResponsesThinking(partial: AssistantMessage, contentIndex: number): boolean {
 	const content = partial.content[contentIndex];
-	return content?.type !== "thinking" || (partial.api === "openai-responses" && content.provenance === undefined);
+	return content?.type !== "thinking" || (isResponsesFamilyApi(partial.api) && content.provenance === undefined);
 }
 
 function flattenAssistant(message: AssistantMessage): {

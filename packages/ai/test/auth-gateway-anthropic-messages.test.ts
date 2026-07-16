@@ -311,12 +311,12 @@ describe("anthropic-messages encodeResponse", () => {
 		expect(JSON.stringify(encoded)).not.toContain("RAW_DO_NOT_SURFACE");
 	});
 
-	it("omits raw-only Responses reasoning from non-streaming egress", () => {
+	it("omits raw-only Codex Responses reasoning from non-streaming egress", () => {
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "thinking", thinking: RAW_SENTINEL, provenance: "raw", rawText: RAW_SENTINEL }],
-			api: "openai-responses",
-			provider: "openai",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
 			model: "gpt-5",
 			usage: emptyUsage(),
 			stopReason: "stop",
@@ -419,6 +419,34 @@ describe("anthropic-messages serialized Responses signature privacy", () => {
 			},
 		]);
 		expect(message.content[0]).toMatchObject({ thinkingSignature: RESPONSES_REASONING_SIGNATURE });
+	});
+});
+
+it("drops unprovenanced Codex thinking when the stream is interrupted", async () => {
+	const partial: AssistantMessage = {
+		role: "assistant",
+		content: [{ type: "thinking", thinking: RAW_SENTINEL }],
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		model: "gpt-5",
+		usage: emptyUsage(),
+		stopReason: "error",
+		timestamp: 0,
+	};
+	const error: AssistantMessage = { ...partial, errorMessage: "upstream went away" };
+	const events: AssistantMessageEvent[] = [
+		{ type: "thinking_start", contentIndex: 0, partial },
+		{ type: "thinking_delta", contentIndex: 0, delta: RAW_SENTINEL, partial },
+		{ type: "error", reason: "error", error },
+	];
+
+	const sse = await collectSse(encodeStream(makeStream(events), "claude-opus-4-7"));
+	const bytes = JSON.stringify(sse);
+
+	expect(bytes).not.toContain(RAW_SENTINEL);
+	expect(sse.at(-1)).toEqual({
+		event: "error",
+		data: { type: "error", error: { type: "api_error", message: "upstream went away" } },
 	});
 });
 

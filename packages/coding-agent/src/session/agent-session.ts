@@ -2531,13 +2531,21 @@ export class AgentSession {
 	#queuedExtensionEvents: Promise<void> = Promise.resolve();
 
 	#queueExtensionEvent(event: AgentSessionEvent, turnGeneration?: number): Promise<void> {
+		// Streaming events observed after turn_end belong to no live extension turn.
+		// Events already queued before that boundary must drain in FIFO order, unless
+		// a successor turn replaces their generation while a handler is still running.
+		if (
+			turnGeneration !== undefined &&
+			(turnGeneration !== this.#extensionTurnGeneration || this.#closedExtensionTurnGeneration === turnGeneration)
+		) {
+			return Promise.resolve();
+		}
 		this.#queuedExtensionEventCount++;
-		const isCurrent = () =>
-			turnGeneration === undefined ||
-			(turnGeneration === this.#extensionTurnGeneration && this.#closedExtensionTurnGeneration !== turnGeneration);
+		const belongsToCurrentTurn = () =>
+			turnGeneration === undefined || turnGeneration === this.#extensionTurnGeneration;
 		const emit = async () => {
-			if (!isCurrent()) return;
-			await this.#emitExtensionEvent(event, isCurrent);
+			if (!belongsToCurrentTurn()) return;
+			await this.#emitExtensionEvent(event, belongsToCurrentTurn);
 		};
 		const queued = this.#queuedExtensionEvents.then(emit, emit);
 		this.#queuedExtensionEvents = queued.catch(() => {});

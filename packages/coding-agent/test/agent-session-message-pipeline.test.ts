@@ -234,6 +234,68 @@ describe("AgentSession message pipeline", () => {
 		);
 	});
 
+	it("drains pre-terminal reasoning summaries through slow extension handlers and drops post-terminal updates", async () => {
+		const firstStarted = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const secondDelivered = Promise.withResolvers<void>();
+		const delivered: string[] = [];
+		const extensionEmit = vi.fn(async (event: { type: string; content?: string }) => {
+			if (event.type !== "reasoning_summary_end") return;
+			delivered.push(event.content ?? "");
+			if (event.content === "first") {
+				firstStarted.resolve();
+				await releaseFirst.promise;
+			} else if (event.content === "second") {
+				secondDelivered.resolve();
+			}
+		});
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			extensionRunner: {
+				emit: extensionEmit,
+				hasHandlers: (eventType: string) => eventType === "reasoning_summary_end",
+			} as never,
+		});
+		sessions.push(session);
+		const terminalObserved = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "turn_end") terminalObserved.resolve();
+		});
+
+		const emitSummaryEnd = (content: string) =>
+			session.agent.emitExternalEvent({
+				type: "message_update",
+				message: createAssistantMessage(content) as never,
+				assistantMessageEvent: {
+					type: "reasoning_summary_end",
+					contentIndex: 0,
+					content,
+					partial: createAssistantMessage(content),
+				},
+			} as never);
+
+		session.agent.emitExternalEvent({ type: "turn_start" });
+		emitSummaryEnd("first");
+		await firstStarted.promise;
+		emitSummaryEnd("second");
+		session.agent.emitExternalEvent({
+			type: "turn_end",
+			message: createAssistantMessage("final"),
+			toolResults: [],
+		} as never);
+		await terminalObserved.promise;
+		releaseFirst.resolve();
+		await secondDelivered.promise;
+
+		emitSummaryEnd("after-terminal");
+		await Promise.resolve();
+
+		expect(delivered).toEqual(["first", "second"]);
+	});
+
 	it("caches listener snapshots and preserves mutation-during-emit safety", async () => {
 		const session = new AgentSession({
 			agent: createAgent(),

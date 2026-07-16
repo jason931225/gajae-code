@@ -401,6 +401,26 @@ describe("pi-native encodeStream", () => {
 		expect(JSON.stringify(errorEvents)).toBe(errorSource);
 	});
 
+	it("withholds interrupted unprovenanced Codex Responses thinking", async () => {
+		const partial = baseAssistant({
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			content: [{ type: "thinking", thinking: RAW_SENTINEL }],
+		});
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: baseAssistant() },
+			{ type: "thinking_start", contentIndex: 0, partial },
+			{ type: "thinking_delta", contentIndex: 0, delta: RAW_SENTINEL, partial },
+			{ type: "error", reason: "error", error: partial },
+		];
+		const lines = await collectSse(encodeStream(makeEventStream(events, partial)));
+		const frames = lines.slice(0, -1).map(parseSseLine) as Array<Record<string, unknown>>;
+
+		expect(lines.join("\n")).not.toContain(RAW_SENTINEL);
+		expect(frames.map(frame => frame.type)).toEqual(["start", "error"]);
+		expect((frames[1]!.error as AssistantMessage).content).toEqual([]);
+	});
+
 	it.each([
 		"raw",
 		"mixed",

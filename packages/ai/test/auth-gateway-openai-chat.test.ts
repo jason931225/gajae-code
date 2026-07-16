@@ -219,12 +219,12 @@ describe("auth-gateway openai-chat: encodeResponse", () => {
 		expect(JSON.stringify(encoded)).not.toContain("RAW_DO_NOT_SURFACE");
 	});
 
-	it("omits raw-only Responses reasoning from non-streaming egress", () => {
+	it("omits raw-only Codex Responses reasoning from non-streaming egress", () => {
 		const message: AssistantMessage = {
 			...emptyAssistant(),
 			content: [{ type: "thinking", thinking: RAW_SENTINEL, provenance: "raw", rawText: RAW_SENTINEL }],
-			api: "openai-responses",
-			provider: "openai",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
 		};
 
 		const encoded = encodeResponse(message, "gpt-test");
@@ -462,6 +462,28 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(reasoningDeltas).toEqual(["X"]);
 	});
 
+	it("drops unprovenanced Codex thinking when the stream is interrupted", async () => {
+		const partial: AssistantMessage = {
+			...emptyAssistant(),
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			content: [{ type: "thinking", thinking: RAW_SENTINEL }],
+		};
+		const error: AssistantMessage = { ...partial, errorMessage: "upstream went away" };
+		const events: AssistantMessageEvent[] = [
+			{ type: "thinking_start", contentIndex: 0, partial },
+			{ type: "thinking_delta", contentIndex: 0, delta: RAW_SENTINEL, partial },
+			{ type: "error", reason: "error", error },
+		];
+
+		const payloads = (await collectStream(encodeStream(makeEventStream(events, partial), "gpt-test"))).map(
+			parseSseLine,
+		);
+		const bytes = JSON.stringify(payloads);
+
+		expect(bytes).not.toContain(RAW_SENTINEL);
+		expect(payloads).toContainEqual({ error: { message: "upstream went away", type: "upstream_error" } });
+	});
 	it("emits an error envelope when the stream errors", async () => {
 		const partial = emptyAssistant();
 		const errorMessage: AssistantMessage = { ...partial, errorMessage: "upstream went away" };

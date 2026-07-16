@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type Model, type OpenAICompat, type ThinkingConfig, writeModelCache } from "@gajae-code/ai";
 import { kNoAuth, MODEL_ROLE_IDS, ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@gajae-code/coding-agent/config/settings";
 import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
 import { addApiCompatibleProvider } from "@gajae-code/coding-agent/setup/provider-onboarding";
 import { $credentialEnv, hookFetch, Snowflake } from "@gajae-code/utils";
@@ -648,6 +648,29 @@ describe("ModelRegistry", () => {
 
 			expect(resolved?.input.includes("image")).toBe(true);
 			expect(resolved?.provider).toBe("anthropic");
+		});
+		test("caches available models until disabled providers change", () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const initial = registry.getAvailable();
+			expect(registry.getAvailable()).toBe(initial);
+
+			settings.setDisabledProviders(["anthropic"]);
+			expect(registry.getAvailable()).not.toBe(initial);
+		});
+
+		test("keeps a session canonical variant while it remains available", () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const initial = registry.resolveCanonicalModel("claude-sonnet-4-5", {
+				availableOnly: false,
+				candidates: registry.getAll(),
+				sessionId: "sticky-session",
+			});
+			const resolved = registry.resolveCanonicalModel("claude-sonnet-4-5", {
+				availableOnly: false,
+				candidates: registry.getAll().reverse(),
+				sessionId: "sticky-session",
+			});
+			expect(resolved).toBe(initial);
 		});
 	});
 

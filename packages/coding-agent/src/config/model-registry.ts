@@ -74,6 +74,16 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 	return Boolean(apiKey) && apiKey !== kNoAuth;
 }
 
+const MAX_SESSION_CANONICAL_VARIANTS = 64;
+
+function envAvailabilityFingerprint(): string {
+	return Object.entries(process.env)
+		.filter(([name]) => /(?:_API_KEY|_OAUTH_TOKEN|_ACCESS_TOKEN)$/.test(name) || /^(?:GH_TOKEN|GITHUB_TOKEN|HF_TOKEN|COPILOT_GITHUB_TOKEN)$/.test(name))
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([name, value]) => `${name}=${value ?? ""}`)
+		.join("\u0000");
+}
+
 export type ModelRole = "default";
 
 export interface ModelRoleInfo {
@@ -1007,6 +1017,7 @@ export class ModelRegistry {
 	#availableModelsCache: Model<Api>[] | undefined;
 	#availableModelsDisabledProviders: string | undefined;
 	#sessionCanonicalVariants = new Map<string, string>();
+	#availableModelsEnvFingerprint: string | undefined;
 	#customProviderApiKeys: Map<string, string> = new Map();
 	#providerWebSearchModes: Map<string, WebSearchMode> = new Map();
 	#keylessProviders: Set<string> = new Set();
@@ -2431,6 +2442,8 @@ export class ModelRegistry {
 	#invalidateAvailableModels(): void {
 		this.#availableModelsCache = undefined;
 		this.#availableModelsDisabledProviders = undefined;
+		this.#availableModelsEnvFingerprint = undefined;
+		this.#sessionCanonicalVariants.clear();
 	}
 
 	#suspendRebuild(): void {
@@ -2540,6 +2553,13 @@ export class ModelRegistry {
 		return result;
 	}
 
+	#rememberCanonicalVariant(sessionId: string, selector: string): void {
+		this.#sessionCanonicalVariants.delete(sessionId);
+		this.#sessionCanonicalVariants.set(sessionId, selector);
+		if (this.#sessionCanonicalVariants.size > MAX_SESSION_CANONICAL_VARIANTS) {
+			this.#sessionCanonicalVariants.delete(this.#sessionCanonicalVariants.keys().next().value!);
+		}
+	}
 	#resolveCanonicalVariant(
 		variants: readonly CanonicalModelVariant[],
 		allCandidates: readonly Model<Api>[],
@@ -2548,7 +2568,11 @@ export class ModelRegistry {
 		if (variants.length === 0) return undefined;
 		const stickySelector = sessionId ? this.#sessionCanonicalVariants.get(sessionId) : undefined;
 		const stickyVariant = stickySelector ? variants.find(variant => variant.selector === stickySelector) : undefined;
-		if (stickyVariant) return stickyVariant;
+		if (stickyVariant) {
+			this.#rememberCanonicalVariant(sessionId!, stickyVariant.selector);
+			return stickyVariant;
+		}
+		if (sessionId && stickySelector) this.#sessionCanonicalVariants.delete(sessionId);
 		const providerRank = this.#providerRank(allCandidates);
 		const modelOrder = new Map<string, number>();
 		for (let index = 0; index < allCandidates.length; index += 1) {
@@ -2607,7 +2631,7 @@ export class ModelRegistry {
 		if (variants.length === 0) return undefined;
 		const candidates = options?.candidates ?? (options?.availableOnly ? this.getAvailable() : this.getAll());
 		const resolved = this.#resolveCanonicalVariant(variants, candidates, options?.sessionId);
-		if (resolved && options?.sessionId) this.#sessionCanonicalVariants.set(options.sessionId, resolved.selector);
+		if (resolved && options?.sessionId) this.#rememberCanonicalVariant(options.sessionId, resolved.selector);
 		return resolved?.model;
 	}
 
@@ -2622,11 +2646,17 @@ export class ModelRegistry {
 	getAvailable(): Model<Api>[] {
 		const disabledProviders = getDisabledProviderIdsFromSettings();
 		const disabledProviderKey = [...disabledProviders].sort().join("\u0000");
-		if (this.#availableModelsCache && this.#availableModelsDisabledProviders === disabledProviderKey) {
+		const envFingerprint = envAvailabilityFingerprint();
+		if (
+			this.#availableModelsCache &&
+			this.#availableModelsDisabledProviders === disabledProviderKey &&
+			this.#availableModelsEnvFingerprint === envFingerprint
+		) {
 			return this.#availableModelsCache;
 		}
 		this.#availableModelsCache = this.#models.filter(model => this.#isModelAvailable(model, disabledProviders));
 		this.#availableModelsDisabledProviders = disabledProviderKey;
+		this.#availableModelsEnvFingerprint = envFingerprint;
 		return this.#availableModelsCache;
 	}
 
@@ -2961,6 +2991,18 @@ export class ModelRegistry {
 			return false;
 		}
 		return true;
+	}
+
+	/** Return whether a selector has an active, expired, or no rate-limit suppression. */
+	getSelectorSuppressionStatus(selector: string): "active" | "expired" | "none" {
+		const normalizedSelector = normalizeSuppressedSelector(selector);
+		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
+		if (!suppressedUntil) return "none";
+		if (suppressedUntil <= Date.now()) {
+			this.#suppressedSelectors.delete(normalizedSelector);
+			return "expired";
+		}
+		return "active";
 	}
 }
 

@@ -854,6 +854,7 @@ export class AuthStorage {
 	 */
 	setRuntimeApiKey(provider: string, apiKey: string): void {
 		this.#runtimeOverrides.set(provider, apiKey);
+		this.#bumpGeneration("set-runtime-api-key");
 	}
 
 	/**
@@ -877,7 +878,12 @@ export class AuthStorage {
 	 * Remove a runtime API key override.
 	 */
 	removeRuntimeApiKey(provider: string): void {
-		this.#runtimeOverrides.delete(provider);
+		if (this.#runtimeOverrides.delete(provider)) this.#bumpGeneration("remove-runtime-api-key");
+	}
+
+	/** Whether a provider is currently authenticated by a runtime API-key override. */
+	hasRuntimeApiKey(provider: string): boolean {
+		return Boolean(this.#runtimeOverrides.get(provider));
 	}
 
 	/**
@@ -892,13 +898,14 @@ export class AuthStorage {
 	 */
 	setConfigApiKey(provider: string, apiKey: string): void {
 		this.#configOverrides.set(provider, apiKey);
+		this.#bumpGeneration("set-config-api-key");
 	}
 
 	/**
 	 * Remove a single config-sourced API key override.
 	 */
 	removeConfigApiKey(provider: string): void {
-		this.#configOverrides.delete(provider);
+		if (this.#configOverrides.delete(provider)) this.#bumpGeneration("remove-config-api-key");
 	}
 
 	/**
@@ -906,7 +913,9 @@ export class AuthStorage {
 	 * re-parsing `models.yml` so removed entries actually disappear.
 	 */
 	clearConfigApiKeys(): void {
+		if (this.#configOverrides.size === 0) return;
 		this.#configOverrides.clear();
+		this.#bumpGeneration("clear-config-api-keys");
 	}
 
 	/**

@@ -103,6 +103,9 @@ describe("fallback transport facts", () => {
 			kind: "transport",
 			providerCode: "invalid_api_key",
 		});
+		const topLevelAnthropic = transportFailureFacts({ status: 429, type: "rate_limit_error" });
+		expect(topLevelAnthropic).toMatchObject({ anthropicErrorType: "rate_limit_error" });
+		expect(classifyFallbackTrigger(topLevelAnthropic)).toEqual({ class: "rate_limit" });
 	});
 
 	it("preserves first-party typed error codes and classifies bare 5xx without prose", () => {

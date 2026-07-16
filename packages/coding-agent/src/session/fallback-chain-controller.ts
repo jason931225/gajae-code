@@ -1,4 +1,4 @@
-export type FallbackTriggerClass = "rate_limit" | "quota" | "auth" | "server" | "other";
+import type { FallbackTriggerClass } from "@gajae-code/ai/utils/fallback-transport";
 
 /** Immutable configured fallback intent. Transient attempt state never belongs here. */
 export interface ConfiguredFallbackChain {

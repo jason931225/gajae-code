@@ -1,4 +1,4 @@
-export type FallbackTriggerClass = "rate_limit" | "quota" | "auth" | "server" | "other";
+export type FallbackTriggerClass = "rate_limit" | "quota" | "auth" | "server" | "unknown" | "other";
 
 export interface FallbackTrigger {
 	class: FallbackTriggerClass;
@@ -87,11 +87,7 @@ export function transportFailureFacts(
 				? value.response.status
 				: capturedResponse?.status;
 	const anthropicErrorType =
-		typeof value.error?.type === "string"
-			? value.error.type
-			: typeof value.type === "string" && value.providerCode === "anthropic"
-				? value.type
-				: undefined;
+		typeof value.error?.type === "string" ? value.error.type : typeof value.type === "string" ? value.type : undefined;
 	const openaiErrorCode = typeof value.error?.code === "string" ? value.error.code : undefined;
 	const providerCode =
 		typeof value.providerCode === "string"

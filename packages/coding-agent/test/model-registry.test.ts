@@ -659,6 +659,40 @@ describe("ModelRegistry", () => {
 			expect(registry.getAvailable()).not.toBe(initial);
 		});
 
+		test("invalidates available models when a runtime API-key override is set", async () => {
+			await Settings.init({ inMemory: true });
+			const previous = process.env.XAI_API_KEY;
+			delete process.env.XAI_API_KEY;
+			try {
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				const initial = registry.getAvailable();
+				expect(initial.some(model => model.provider === "xai")).toBe(false);
+				authStorage.setRuntimeApiKey("xai", "runtime-test-key");
+				expect(registry.getAvailable()).not.toBe(initial);
+				expect(registry.getAvailable().some(model => model.provider === "xai")).toBe(true);
+			} finally {
+				if (previous === undefined) delete process.env.XAI_API_KEY;
+				else process.env.XAI_API_KEY = previous;
+			}
+		});
+
+		test("refreshes available models when an API-key environment variable changes", async () => {
+			await Settings.init({ inMemory: true });
+			const previous = process.env.XAI_API_KEY;
+			delete process.env.XAI_API_KEY;
+			try {
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				const initial = registry.getAvailable();
+				expect(initial.some(model => model.provider === "xai")).toBe(false);
+				process.env.XAI_API_KEY = "environment-test-key";
+				expect(registry.getAvailable()).not.toBe(initial);
+				expect(registry.getAvailable().some(model => model.provider === "xai")).toBe(true);
+			} finally {
+				if (previous === undefined) delete process.env.XAI_API_KEY;
+				else process.env.XAI_API_KEY = previous;
+			}
+		});
+
 		test("keeps a session canonical variant while it remains available", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			const initial = registry.resolveCanonicalModel("claude-sonnet-4-5", {

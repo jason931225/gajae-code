@@ -133,7 +133,9 @@ fn validate_directed_frame(json: String) -> Option<(String, bool)> {
 	let object = frame.as_object()?;
 	let frame_type = object.get("type").and_then(serde_json::Value::as_str);
 	if frame_type != Some("event_replay_result") {
-		return Some((json, false));
+		let requires_tool_activity =
+			frame_type.is_some_and(|kind| matches!(kind, "tool_activity" | "reasoning_summary"));
+		return Some((json, requires_tool_activity));
 	}
 	if !object.get("id").is_some_and(serde_json::Value::is_string)
 		|| !object.get("ok").is_some_and(serde_json::Value::is_boolean)
@@ -3159,6 +3161,40 @@ mod tests {
 				.await
 				.is_err()
 		);
+		handle.stop();
+	}
+	#[tokio::test]
+	async fn directed_tool_frames_require_negotiated_capability() {
+		let handle = start(ServerConfig::new("s", "secret")).await.unwrap();
+		let mut legacy = connect(&handle, "secret").await;
+		let legacy_id = next_server_hello(&mut legacy)
+			.await
+			.connection_id
+			.expect("connection id");
+		send_hello(&mut legacy, vec![]).await;
+		let mut capable = connect(&handle, "secret").await;
+		let capable_id = next_server_hello(&mut capable)
+			.await
+			.connection_id
+			.expect("connection id");
+		send_hello(&mut capable, vec![capabilities::TOOL_ACTIVITY_V1.into()]).await;
+		wait_for_clients(&handle, 2).await;
+
+		let frame =
+			r#"{"type":"tool_activity","toolCallId":"c1","toolName":"read","phase":"started"}"#;
+		assert!(handle.send_to(&legacy_id, frame.into()));
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(300), legacy.next())
+				.await
+				.is_err()
+		);
+		assert!(handle.send_to(&capable_id, frame.into()));
+		let delivered = tokio::time::timeout(std::time::Duration::from_secs(2), capable.next())
+			.await
+			.expect("directed send timeout")
+			.expect("socket open")
+			.expect("ws message");
+		assert!(matches!(delivered, Message::Text(text) if text.contains("tool_activity")));
 		handle.stop();
 	}
 	#[tokio::test]

@@ -269,10 +269,8 @@ describe("Responses raw reasoning / summary boundary", () => {
 			.map(event => event.item as Record<string, unknown>)
 			.filter(item => item.type === "reasoning");
 
-		expect(rawWire.length).toBeGreaterThan(0);
-		expect(rawWire.some(event => event.delta === RAW_SENTINEL)).toBe(true);
-		expect(encoded.filter(event => event.delta === RAW_SENTINEL)).toEqual(rawWire);
-		expect(summaryWire.some(event => JSON.stringify(event).includes(RAW_SENTINEL))).toBe(false);
+		expect(rawWire).toEqual([]);
+		expect(JSON.stringify(encoded)).not.toContain(RAW_SENTINEL);
 		expect(summaryWire.some(event => JSON.stringify(event).includes(SUMMARY_SENTINEL))).toBe(true);
 		expect(reasoningSummary(completedResponse)).toEqual([{ type: "summary_text", text: SUMMARY_SENTINEL }]);
 		expect(completedReasoning.content).toBeUndefined();
@@ -286,11 +284,8 @@ describe("Responses raw reasoning / summary boundary", () => {
 		const decoded = message();
 		await processResponsesStream(wire(encoded), decoded, { push() {}, end() {} } as never, model);
 		const block = decoded.content[0] as ThinkingContent;
-		expect(block.provenance).toBe("mixed");
-		expect(block.rawText).toBe(RAW_SENTINEL);
-		// Finalized display string is summary-only for a mixed block: raw CoT must not
-		// remain in `thinking` (it is preserved separately in rawText for explicit use).
-		expect(block.thinking).not.toContain(RAW_SENTINEL);
+		expect(block.provenance).toBe("summary");
+		expect(block.rawText).toBeUndefined();
 		expect(block.thinking).toContain(SUMMARY_SENTINEL);
 		expect(block.summaryText).toContain(SUMMARY_SENTINEL);
 		expect(block.summaryText).not.toContain(RAW_SENTINEL);
@@ -358,7 +353,9 @@ describe("Responses raw reasoning / summary boundary", () => {
 		const decoded = message();
 		await processResponsesStream(wire(encoded), decoded, { push() {}, end() {} } as never, model);
 		const block = decoded.content[0] as ThinkingContent;
-		expect(block).toMatchObject({ provenance: "raw", rawText: RAW_SENTINEL });
+		expect(block.provenance).toBeUndefined();
+		expect(block.thinking).toBe("");
+		expect(block.rawText).toBeUndefined();
 		expect(block.summaryText).toBeUndefined();
 	});
 	test("uses final summary content when a separator-only delta arrives first", async () => {

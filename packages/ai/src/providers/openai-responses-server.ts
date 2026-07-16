@@ -749,7 +749,6 @@ interface OpenReasoning {
 	kind: "reasoning";
 	itemId: string;
 	outputIndex: number;
-	rawText: string;
 	summaryText: string;
 	summaryPartText: string;
 }
@@ -835,7 +834,6 @@ export function encodeStream(
 					kind: "reasoning",
 					itemId,
 					outputIndex,
-					rawText: "",
 					summaryText: "",
 					summaryPartText: "",
 				};
@@ -1057,22 +1055,14 @@ export function encodeStream(
 							break;
 						}
 						case "thinking_delta": {
-							if (state.open?.kind !== "reasoning") break;
-							const cur: OpenReasoning = state.open;
-							cur.rawText += ev.delta;
-							emit("response.reasoning_text.delta", {
-								item_id: cur.itemId,
-								output_index: cur.outputIndex,
-								delta: ev.delta,
-							});
+							// Raw reasoning is private. The public Responses gateway emits only
+							// provider-displayable reasoning_summary_* events.
 							break;
 						}
 						case "thinking_end": {
 							if (state.open?.kind !== "reasoning") break;
-							// `ev.content` combines displayable summaries and raw deltas. Only
-							// `thinking_delta` contributes to the raw Responses channel.
-							// Raw reasoning finalizes through output_item.done, whose reasoning
-							// content is decoded as rawText. It must never use summary events.
+							// Raw reasoning is intentionally omitted from every public gateway
+							// frame. Only reasoning_summary_* events populate the terminal item.
 							closeOpen();
 							break;
 						}

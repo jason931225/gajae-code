@@ -1168,6 +1168,56 @@ test("broker refuses fresh lifecycle cleanup when ready sibling has a different 
 	}
 }, 30_000);
 
+test("broker preserves ready-only lifecycle metadata without canonical marker authority during fresh delete", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-ready-only-cleanup-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const saved = SessionManager.create(root, SessionManager.getDefaultSessionDir(root, agentDir));
+	const broker = new Broker({ agentDir });
+	try {
+		await saved.ensureOnDisk();
+		const sessionId = saved.getSessionId();
+		const sessionPath = saved.getSessionFile();
+		if (!sessionPath) throw new Error("Expected persisted delete transcript.");
+		await saved.close();
+		const deadOwner = Bun.spawn([process.execPath, "-e", ""]);
+		await deadOwner.exited;
+		const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
+		const readyMarker = {
+			pid: deadOwner.pid,
+			effectMarker: "ready-only-dead-owner",
+			incarnation: "ready-only-dead-incarnation",
+		};
+		await fs.mkdir(path.dirname(readyPath), { recursive: true });
+		await fs.writeFile(readyPath, canonicalJson(readyMarker));
+
+		await broker.start();
+		await expect(
+			broker.handleRequest(
+				"session.delete",
+				{ cwd: root, stateRoot, sessionId, sessionPath },
+				"ready-only-fresh-delete",
+			),
+		).resolves.toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
+		await expect(fs.readFile(readyPath, "utf8")).resolves.toBe(canonicalJson(readyMarker));
+		const rows = (await fs.readFile(path.join(agentDir, "sdk", "lifecycle-ledger.jsonl"), "utf8"))
+			.split("\n")
+			.filter(Boolean)
+			.map(line => JSON.parse(line) as Record<string, unknown>);
+		expect(
+			rows.some(
+				row =>
+					((row.response as { error?: { cleanup?: { phase?: unknown } } } | undefined)?.error?.cleanup?.phase ??
+						null) === "lifecycle",
+			),
+		).toBe(false);
+		expect(rows.some(row => (row.response as { ok?: unknown } | undefined)?.ok === true)).toBe(false);
+	} finally {
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 30_000);
+
 test("broker replays a completed base metadata cleanup receipt and rejects a replaced ready sibling after marker loss", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-legacy-metadata-replay-"));
 	const agentDir = path.join(root, "agent");

@@ -2781,6 +2781,17 @@ async function executeLifecycleResponse(
 				return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
 			lifecycleMetadata.push({ metadataPath, metadata, marker });
 		}
+		const canonicalLifecycleMarker = lifecycleMetadata.find(
+			metadata => metadata.metadataPath === lifecycleMarkerPath(validated.metadataRoot, id),
+		);
+		const lifecycleReadyMarker = lifecycleMetadata.find(
+			metadata => metadata.metadataPath === lifecycleReadyPath(validated.metadataRoot, id),
+		);
+		if (lifecycleReadyMarker && !canonicalLifecycleMarker)
+			return fail(
+				"terminal_uncertain",
+				"Lifecycle readiness metadata lacks canonical marker authority for fresh cleanup.",
+			);
 		if (
 			lifecycleMetadata.length === metadataPaths.length &&
 			!sameEffectMarker(lifecycleMetadata[0].marker, lifecycleMetadata[1].marker)

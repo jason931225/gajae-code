@@ -3,6 +3,7 @@
 ## [Unreleased]
 ### Fixed
 - Palette slash commands now run only from an empty composer; drafts are never touched.
+- Aborting a session without an enabled active goal no longer suppresses the first reminder when a goal is activated later; active-goal abort suppression is one-shot, goal-owned, and clears across inactive or replacement-goal transitions (#2436).
 
 ### Added
 - Double-Esc now clears an idle draft after a confirmation hint, saving it to prompt history; from an empty editor it follows the configured tree, branch, or disabled action.

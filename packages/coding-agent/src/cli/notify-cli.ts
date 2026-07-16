@@ -255,7 +255,7 @@ async function promptSetupValue(
 ): Promise<string> {
 	if (value?.trim()) return requiredSetupValue(value, flag);
 	if (!resolveSetupInteractive(deps)) return requiredSetupValue(value, flag);
-	return (await (deps.valuePrompt ?? promptForValue)(`${flag.slice(2)}: `, masked)).trim();
+	return requiredSetupValue(await (deps.valuePrompt ?? promptForValue)(`${flag.slice(2)}: `, masked), flag);
 }
 
 async function runDiscordSetup(cmd: NotifyCommandArgs, deps: NotifyCommandDeps): Promise<void> {

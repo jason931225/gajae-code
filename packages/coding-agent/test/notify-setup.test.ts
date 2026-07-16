@@ -1129,6 +1129,23 @@ test("Discord setup prompts missing values and commits them atomically", async (
 	});
 });
 
+test("interactive Discord setup validates prompted required values before persistence", async () => {
+	for (const prompted of ["   ", "--redact"]) {
+		const settings = setupSettings();
+		await expect(
+			runNotifyCommand(
+				{ action: "setup", provider: "discord", rawArgs: [] },
+				{
+					settings,
+					setupInteractive: true,
+					valuePrompt: async () => prompted,
+				},
+			),
+		).rejects.toThrow(prompted.trim() ? "must not start with --" : "is required");
+		expect(getNotificationConfig(settings).discord?.botToken).toBeUndefined();
+	}
+});
+
 test("notify parser rejects flag values that look like flags and unknown subcommands", () => {
 	expect(parseNotifyArgs(["notify", "setup", "discord", "--discord-bot-token", "--redact"])).toBeUndefined();
 	expect(parseNotifyArgs(["notify", "bogus"])).toBeUndefined();

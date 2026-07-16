@@ -4,7 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@gajae-code/ai";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
-import { CustomProviderWizardComponent } from "@gajae-code/coding-agent/modes/components/custom-provider-wizard";
+import {
+	CustomProviderWizardComponent,
+	type CustomProviderWizardSubmit,
+} from "@gajae-code/coding-agent/modes/components/custom-provider-wizard";
 import {
 	type ProviderOnboardingAction,
 	ProviderOnboardingSelectorComponent,
@@ -92,6 +95,34 @@ describe("provider onboarding wizard", () => {
 		]);
 	});
 
+	it("masks literal credentials and clears them after submission", () => {
+		const submissions: CustomProviderWizardSubmit[] = [];
+		const wizard = new CustomProviderWizardComponent(
+			input => submissions.push(input),
+			() => undefined,
+		);
+
+		wizard.handleInput("\n");
+		typeText(wizard, "literal-provider");
+		wizard.handleInput("\n");
+		typeText(wizard, "https://api.example.com/v1");
+		wizard.handleInput("\n");
+		wizard.handleInput("\x1b[B");
+		wizard.handleInput("\n");
+		typeText(wizard, "literal-secret");
+		expect(visibleText(wizard)).not.toContain("literal-secret");
+		wizard.handleInput("\n");
+		typeText(wizard, "literal-model");
+		wizard.handleInput("\n");
+		wizard.handleInput("\n");
+		wizard.handleInput("\n");
+
+		expect(submissions).toEqual([
+			expect.objectContaining({ apiKey: "literal-secret", apiKeyEnv: undefined }),
+			expect.objectContaining({ apiKey: "", apiKeyEnv: undefined }),
+		]);
+	});
+
 	it("requires explicit force confirmation before overwrite", () => {
 		const submissions: unknown[] = [];
 		const wizard = new CustomProviderWizardComponent(
@@ -136,7 +167,7 @@ describe("provider onboarding wizard", () => {
 			const wizard = ctx.ui.focused as CustomProviderWizardComponent;
 			driveEnvWizard(wizard, { providerId: "live-provider", model: "live-model" });
 			wizard.handleInput("\n");
-			await Bun.sleep(20);
+			await Bun.sleep(1_000);
 
 			expect(refreshedMode).toBe("offline");
 			expect(configChanged).toBe(true);

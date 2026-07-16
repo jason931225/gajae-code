@@ -274,3 +274,13 @@ describe("config doctor", () => {
 		expect(report.unknownKeys).toContain("compaction.enabld");
 	});
 });
+
+	it("redacts invalid secret settings in doctor output", async () => {
+		const configPath = path.join(testAgentDir, "config.yml");
+		const secret = "doctor-secret-token";
+		await fs.writeFile(configPath, `notifications:\n  telegram:\n    botToken: [${secret}]\n`);
+
+		const report = await inspectConfigFile(configPath);
+		expect(report.invalidValues).toContainEqual({ path: "notifications.telegram.botToken", value: "<redacted>" });
+		expect(JSON.stringify(report)).not.toContain(secret);
+	});

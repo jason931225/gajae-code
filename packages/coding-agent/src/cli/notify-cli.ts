@@ -288,7 +288,9 @@ async function runSlackSetup(cmd: NotifyCommandArgs, deps: NotifyCommandDeps): P
 		{ path: "notifications.slack.appToken", op: "set", value: appToken },
 		{ path: "notifications.slack.workspaceId", op: "set", value: workspaceId },
 		{ path: "notifications.slack.channelId", op: "set", value: channelId },
-		{ path: "notifications.slack.authorizedUserId", op: "set", value: authorizedUserId },
+		authorizedUserId === undefined
+			? { path: "notifications.slack.authorizedUserId", op: "unset" }
+			: { path: "notifications.slack.authorizedUserId", op: "set", value: authorizedUserId },
 		{ path: "notifications.enabled", op: "set", value: true },
 	];
 	if (cmd.redact) patches.push({ path: "notifications.redact", op: "set", value: true });

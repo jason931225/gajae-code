@@ -468,9 +468,8 @@ export async function inspectConfigFile(configPath = path.join(getAgentDir(), "c
 		for (const [settingPath, value] of flattenConfig(raw)) {
 			if (!ALL_SETTING_PATHS.includes(settingPath as SettingPath)) report.unknownKeys.push(settingPath);
 			else if ((SETTINGS_SCHEMA[settingPath as SettingPath] as { validate?: (value: unknown) => boolean }).validate?.(value) === false)
-				report.invalidValues.push({ path: settingPath, value });
+				report.invalidValues.push({ path: settingPath, value: redactConfigValue(settingPath, value) });
 		}
-		if ((raw as Record<string, unknown>).theme === "dark" || (raw as Record<string, unknown>).theme === "light") report.legacyShapes.push("legacy theme name");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") report.legacyShapes.push(`unable to parse config: ${String(error)}`);
 	}

@@ -1,4 +1,4 @@
-import { Container, Input, matchesKey, Spacer, Text, TruncatedText } from "@gajae-code/tui";
+import { Container, Input, matchesKey, SecretInput, Spacer, Text, TruncatedText } from "@gajae-code/tui";
 import type { ProviderCompatibility, ProviderSetupInput } from "../../setup/provider-onboarding";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../utils/keybinding-matchers";
@@ -29,7 +29,7 @@ export type CustomProviderWizardSubmit = ProviderSetupInput;
 
 export class CustomProviderWizardComponent extends Container {
 	#contentContainer: Container;
-	#input: Input | null = null;
+	#input: Input | SecretInput | null = null;
 	#step: WizardStep = "compatibility";
 	#selectedIndex = 0;
 	#lastSubmitError: string | null = null;
@@ -90,6 +90,10 @@ export class CustomProviderWizardComponent extends Container {
 		}
 
 		if (this.#input) {
+			if (this.#input instanceof SecretInput) {
+				this.#input.handleInput(keyData);
+				return;
+			}
 			if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 				this.#saveInputAndProceed();
 				return;
@@ -138,16 +142,16 @@ export class CustomProviderWizardComponent extends Container {
 				this.#renderCredentialSourceStep();
 				break;
 			case "credential":
-				this.#renderInputStep(
-					"Step 5: Credential",
-					this.#state.credentialSource === "env"
-						? "Enter the API key environment variable name:"
-						: "Paste the API key:",
-					this.#state.credential,
-					this.#state.credentialSource === "env"
-						? "e.g. OPENAI_API_KEY"
-						: "The key will be stored in models.yml and redacted in output.",
-				);
+				if (this.#state.credentialSource === "env") {
+					this.#renderInputStep(
+						"Step 5: Credential",
+						"Enter the API key environment variable name:",
+						this.#state.credential,
+						"e.g. OPENAI_API_KEY",
+					);
+				} else {
+					this.#renderSecretInputStep();
+				}
 				break;
 			case "models":
 				this.#renderInputStep(
@@ -195,6 +199,27 @@ export class CustomProviderWizardComponent extends Container {
 		this.#contentContainer.addChild(this.#input);
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#addHelp(hint);
+		this.#addHelp("[Enter to continue, Esc to go back]");
+	}
+
+	#renderSecretInputStep(): void {
+		this.#contentContainer.addChild(new Text(theme.fg("accent", "Step 5: Credential")));
+		this.#contentContainer.addChild(new Spacer(1));
+		this.#contentContainer.addChild(new Text("Paste the API key:", 0, 0));
+		this.#contentContainer.addChild(new Spacer(1));
+		const input = new SecretInput();
+		input.onSubmit = secret => {
+			const credential = secret.consume().trim();
+			if (!credential) return;
+			this.#state.credential = credential;
+			this.#step = "models";
+			this.#renderStep();
+			this.#onRender();
+		};
+		this.#input = input;
+		this.#contentContainer.addChild(input);
+		this.#contentContainer.addChild(new Spacer(1));
+		this.#addHelp("The key will be stored securely and redacted in output.");
 		this.#addHelp("[Enter to continue, Esc to go back]");
 	}
 
@@ -277,7 +302,7 @@ export class CustomProviderWizardComponent extends Container {
 	}
 
 	#buildInput(force: boolean): CustomProviderWizardSubmit {
-		return {
+		const input = {
 			compatibility: this.#state.compatibility,
 			providerId: this.#state.providerId,
 			baseUrl: this.#state.baseUrl,
@@ -289,6 +314,8 @@ export class CustomProviderWizardComponent extends Container {
 				.filter(Boolean),
 			force,
 		};
+		if (this.#state.credentialSource === "literal") this.#state.credential = "";
+		return input;
 	}
 
 	#moveSelection(delta: number): void {

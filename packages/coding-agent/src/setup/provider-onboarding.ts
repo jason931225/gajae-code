@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDbPath, getAgentDir, logger } from "@gajae-code/utils";
+import { getAgentDbPath, getAgentDir } from "@gajae-code/utils";
 import { YAML } from "bun";
 import { type ModelsConfig, ModelsConfigSchema } from "../config/models-config-schema";
 import { AuthStorage } from "../session/auth-storage";
@@ -236,13 +237,30 @@ async function writeModelsConfig(modelsPath: string, config: ModelsConfig): Prom
 		const where = first?.path.length ? `/${first.path.map(String).join("/")}` : "root";
 		throw new Error(`Generated models config is invalid at ${where}: ${first?.message ?? "unknown schema error"}`);
 	}
-	await fs.mkdir(path.dirname(modelsPath), { recursive: true });
+	const directory = path.dirname(modelsPath);
+	await fs.mkdir(directory, { recursive: true });
+	const tempPath = path.join(directory, `.${path.basename(modelsPath)}.${process.pid}.${randomUUID()}.tmp`);
 	try {
-		await fs.writeFile(modelsPath, YAML.stringify(checked.data, null, 2), { mode: 0o600 });
-		await fs.chmod(modelsPath, 0o600);
-	} catch (error) {
-		logger.warn("Failed to restrict models config permissions", { path: modelsPath, error: String(error) });
-		throw error;
+		const tempHandle = await fs.open(tempPath, "wx", 0o600);
+		try {
+			await tempHandle.writeFile(YAML.stringify(checked.data, null, 2), "utf8");
+			await tempHandle.sync();
+		} finally {
+			await tempHandle.close();
+		}
+		await fs.rename(tempPath, modelsPath);
+		try {
+			const directoryHandle = await fs.open(directory, "r");
+			try {
+				await directoryHandle.sync();
+			} finally {
+				await directoryHandle.close();
+			}
+		} catch {
+			// Directory fsync is unavailable on some filesystems; the replacement succeeded.
+		}
+	} finally {
+		await fs.rm(tempPath, { force: true }).catch(() => undefined);
 	}
 }
 
@@ -263,7 +281,7 @@ export async function addApiCompatibleProvider(input: ProviderSetupInput): Promi
 	if (validated.credentialSource === "env") {
 		provider.apiKeyEnv = validated.apiKey;
 	} else {
-		const authStorage = await AuthStorage.create(getAgentDbPath(path.dirname(modelsPath)));
+		const authStorage = await AuthStorage.create(getAgentDbPath());
 		try {
 			await authStorage.set(validated.providerId, { type: "api_key", key: validated.apiKey });
 		} finally {

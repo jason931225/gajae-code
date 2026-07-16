@@ -332,7 +332,7 @@ const { session } = await createAgentSession({
   modelRegistry,
   settings,
   sessionManager: SessionManager.inMemory(),
-  toolNames: ["read", "grep", "find", "edit", "write"],
+  toolNames: ["read", "search", "find", "edit", "write"],
   enableLsp: true,
 });
 

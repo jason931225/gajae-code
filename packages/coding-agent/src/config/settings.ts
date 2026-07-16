@@ -660,7 +660,23 @@ export class Settings implements NotificationSettingsReader {
 	 */
 	async commitAtomicBatch(patches: readonly SettingsAtomicPatch[]): Promise<CasReceipt> {
 		if (!this.#persist || !this.#configPath) {
-			throw new Error("commitAtomicBatch requires persistent Settings with a config.yml path.");
+			for (const patch of patches) {
+				if (!Object.hasOwn(SETTINGS_SCHEMA, patch.path)) {
+					throw new Error(`Unknown setting path for atomic batch: ${patch.path}`);
+				}
+				if (patch.op === "set" && patch.value === undefined) {
+					throw new TypeError(`Settings set patch for ${patch.path} cannot carry undefined; use unset instead.`);
+				}
+			}
+			for (const patch of patches) {
+				if (patch.op === "set") this.set(patch.path, patch.value as never);
+				else this.unset(patch.path);
+			}
+			return {
+				revisions: [],
+				restore: async () => ({ status: "discarded" }),
+				discard: () => {},
+			};
 		}
 
 		const durablePatches: AtomicYamlPatch[] = patches.map(patch => {

@@ -388,8 +388,17 @@ export class Settings implements NotificationSettingsReader {
 	 * Call once at startup before accessing `settings`.
 	 */
 	static init(options: SettingsOptions = {}): Promise<Settings> {
-		if (globalInstancePromise) return globalInstancePromise;
+		if (globalInstancePromise) {
+			if (JSON.stringify(options) !== JSON.stringify(globalInitOptions)) {
+				logger.warn("Settings.init called again with different options; reusing existing settings instance", {
+					initialOptions: globalInitOptions,
+					requestedOptions: options,
+				});
+			}
+			return globalInstancePromise;
+		}
 
+		globalInitOptions = structuredClone(options);
 		const instance = new Settings(options);
 		const promise = instance.#load();
 		globalInstancePromise = promise;
@@ -1994,6 +2003,7 @@ export function onAppendOnlyModeChanged(cb: (value: string) => void): () => void
 
 let globalInstance: Settings | null = null;
 let globalInstancePromise: Promise<Settings> | null = null;
+let globalInitOptions: SettingsOptions | null = null;
 
 export function isSettingsInitialized(): boolean {
 	return globalInstance !== null;
@@ -2006,6 +2016,7 @@ export function isSettingsInitialized(): boolean {
 export function resetSettingsForTest(): void {
 	globalInstance = null;
 	globalInstancePromise = null;
+	globalInitOptions = null;
 }
 
 /**

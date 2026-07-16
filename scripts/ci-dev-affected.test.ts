@@ -1,8 +1,12 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describeTasks, packageScriptCommand, planTargetedTasks, planTasks, resolvePackageCwd, runCommand, type WorkspacePackage } from "./ci-dev-affected";
+import { describeTasks, expandWithDependents, loadBuildInventory, normalizeChangedPaths, packageScriptCommand, planTargetedTasks, planTasks, requiresCargoWorkspaceEmergency, resolvePackageCwd, runCommand, type CargoInventoryUnit, type WorkspacePackage } from "./ci-dev-affected";
+
+// Matrix planning validates live workspace and Cargo manifests in subprocesses.
+// Hosted runners can need more than Bun's 5s default during their first cold scan.
+setDefaultTimeout(30_000);
 
 const packages: WorkspacePackage[] = [
 	{
@@ -39,6 +43,43 @@ describe("planTasks command shape (issue #622)", () => {
 		expect(runTest?.cwd).toBe(resolvePackageCwd("packages/example"));
 	});
 
+});
+
+describe("dev-ci canonical-plan workflow contract", () => {
+	test("transports and validates the planner artifact before conditional setup", async () => {
+		const workflow = await Bun.file(path.join(import.meta.dir, "..", ".github", "workflows", "dev-ci.yml")).text();
+		expect(workflow).toContain("ref: ${{ github.event.pull_request.head.sha || github.sha }}");
+		expect(workflow.match(/ref: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/g)).toHaveLength(6);
+		expect(workflow.match(/Verify checked-out source head/g)).toHaveLength(2);
+		expect(workflow).toContain("name: dev-affected-plan-${{ github.run_id }}-${{ github.run_attempt }}");
+		expect(workflow.match(/\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/g)).toHaveLength(8);
+		expect(workflow).toContain("include-hidden-files: true");
+		expect(workflow.match(/include-hidden-files: true/g)).toHaveLength(2);
+		expect(workflow).toContain("CI_DEV_PLAN_DIGEST: ${{ needs.affected-plan.outputs.plan_digest }}");
+		expect(workflow).toContain("CI_DEV_PLAN_SOURCE_SHA: ${{ needs.affected-plan.outputs.plan_source_sha }}");
+		expect(workflow).toContain("CI_DEV_MATRIX_NEXTEST: ${{ matrix.nextest }}");
+		expect(workflow).toContain("run: bun scripts/ci-dev-affected.ts --validate-plan");
+		expect(workflow.indexOf("run: bun scripts/ci-dev-affected.ts --validate-plan")).toBeLessThan(workflow.indexOf("if: ${{ matrix.rust }}"));
+		expect(workflow).toContain("if: ${{ matrix.nextest }}");
+		expect(workflow).toContain("affected-native.result != 'failure'");
+		expect(workflow).toContain("name: Affected path validation");
+		expect(workflow).toContain("has_native='${{ needs.affected-plan.outputs.has_native }}'");
+		expect(workflow).toContain("has_tasks='${{ needs.affected-plan.outputs.has_tasks }}'");
+		expect(workflow).toContain('test "$native" = success');
+		expect(workflow).toContain('test "$shards" = success');
+		expect(workflow).toContain('test "$native" = skipped');
+		expect(workflow).toContain('test "$shards" = skipped');
+		expect(workflow).toContain('case "$has_native" in true|false)');
+		expect(workflow).toContain('case "$has_tasks" in true|false)');
+		expect(workflow).toContain("max-parallel: 8");
+		expect(workflow).toContain("CI_DEV_MATRIX_IDENTITY: ${{ matrix.identity }}");
+		expect(workflow).toContain("Upload shard completion receipt");
+		expect(workflow).toContain("Validate canonical shard completion");
+		expect(workflow).toContain("--validate-shard-receipts");
+		expect(workflow).toContain("pi_natives.linux-x64-baseline.node");
+		expect(workflow).toContain("pi_natives.linux-x64-modern.node");
+		expect(workflow).toContain("dev-affected-native-v2-baseline-modern-");
+	});
 });
 
 	describe("deep-interview selector narrowing", () => {
@@ -165,6 +206,16 @@ describe("describeTasks matrix emission", () => {
 		expect(entries.every(entry => !entry.nativeBuild)).toBe(true);
 	});
 
+	test("selector self-check shards provision Rust without nextest in PR and push plans", () => {
+		const entries = [
+			...describeTasks(planTargetedTasks(["scripts/ci-dev-affected.ts"], packages, [])),
+			...describeTasks(planTasks(["scripts/ci-dev-affected.ts"], packages)),
+		];
+		for (const key of ["ci-selftest", "ci-dry-run", "affected-selftest", "affected-dry-run"]) {
+			expect(entries.find(entry => entry.key === key)).toMatchObject({ rust: true, nextest: false });
+		}
+	});
+
 	test("cwd is emitted repo-relative for package-scoped tasks", () => {
 		const entries = describeTasks(planForPaths(["packages/example/src/index.ts"]));
 		const pkgCheck = entries.find(entry => entry.key === "check:@gajae-code/example");
@@ -179,12 +230,13 @@ describe("--matrix-json and --task CLI fan-out", () => {
 
 	afterAll(async () => {
 		await Promise.all(tempDirs.map(dir => fs.rm(dir, { recursive: true, force: true })));
+		await fs.rm(path.join(repoRoot, ".ci-dev-affected-plan.json"), { force: true });
 	});
 
 	async function runScript(
 		args: readonly string[],
 		changedPaths: string,
-		extraEnv: Record<string, string> = {},
+		extraEnv: Record<string, string | undefined> = {},
 	): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 		const proc = Bun.spawn(["bun", scriptPath, ...args], {
 			cwd: repoRoot,
@@ -194,6 +246,18 @@ describe("--matrix-json and --task CLI fan-out", () => {
 			// tests and explicit shard-mode cases.
 			env: {
 				...process.env,
+				CI_DEV_AFFECTED_PLAN: undefined,
+				CI_DEV_PLAN_DIGEST: undefined,
+				CI_DEV_PLAN_SOURCE_SHA: undefined,
+				CI_DEV_SOURCE_SHA: undefined,
+				CI_DEV_MATRIX_IDENTITY: undefined,
+				CI_DEV_MATRIX_KEY: undefined,
+				CI_DEV_MATRIX_NATIVE: undefined,
+				CI_DEV_MATRIX_NEXTEST: undefined,
+				CI_DEV_MATRIX_RUST: undefined,
+				CI_DEV_SHARD_INDEX: undefined,
+				CI_DEV_SHARD_RECEIPTS: undefined,
+				AFFECTED_TASK_KEY: undefined,
 				GITHUB_EVENT_NAME: "push",
 				CI_DEV_PLAN_MODE: "push",
 				CI_DEV_CHANGED_PATHS: changedPaths,
@@ -222,18 +286,200 @@ describe("--matrix-json and --task CLI fan-out", () => {
 
 		const entries = JSON.parse(stdout.trim());
 		expect(entries.some((entry: { key: string; rust: boolean; native: boolean }) => entry.key === "rust-check" && entry.rust === true && entry.native === false)).toBe(true);
+		expect(entries.some((entry: { key: string; rust: boolean; nativeBuild: boolean }) => entry.key.startsWith("cargo-build:") && entry.rust === true && entry.nativeBuild === false)).toBe(true);
+		expect(entries.filter((entry: { key: string }) => entry.key === "native-linux-x64")).toHaveLength(1);
 
 		const output = await Bun.file(outputFile).text();
 		expect(output).toContain("has_tasks=true");
-		expect(output).toContain("has_native=false");
+		expect(output).toContain("has_native=true");
 		expect(output).toContain("changed_paths<<");
 
 		const matrixLine = output.split("\n").find(line => line.startsWith("matrix="));
 		expect(matrixLine).toBeDefined();
 		const matrix = JSON.parse((matrixLine as string).slice("matrix=".length));
 		expect(matrix.include.some((shard: { key: string }) => shard.key === "rust-check")).toBe(true);
+		expect(matrix.include.some((shard: { key: string }) => shard.key.startsWith("cargo-build:"))).toBe(true);
 		// Native build tasks never appear as shards.
 		expect(matrix.include.every((shard: { key: string }) => shard.key !== "native-linux-x64")).toBe(true);
+	});
+
+	test("changed-path ranges use the canonical source head instead of ambient PR merge SHA", async () => {
+		const head = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repoRoot }).stdout.toString().trim();
+		// The affected-shard checkout intentionally contains only the canonical source
+		// commit. Reusing it as the base proves source-head authority without assuming
+		// that unrelated parent or remote refs exist in the shallow checkout.
+		const base = head;
+		const missingMergeSha = "1".repeat(40);
+		const pr = await runScript(["--matrix-json"], "", {
+			GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "", GITHUB_BASE_SHA: base,
+			GITHUB_SHA: missingMergeSha, CI_DEV_SOURCE_SHA: head,
+		});
+		expect(pr.exitCode).toBe(0);
+
+		const push = await runScript(["--matrix-json"], "", {
+			GITHUB_EVENT_NAME: "push", GITHUB_EVENT_BEFORE: base, GITHUB_BASE_SHA: "",
+			GITHUB_SHA: missingMergeSha, CI_DEV_SOURCE_SHA: head,
+		});
+		expect(push.exitCode).toBe(0);
+
+		const missingHead = await runScript(["--matrix-json"], "", {
+			GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "", GITHUB_BASE_SHA: base,
+			GITHUB_SHA: head, CI_DEV_SOURCE_SHA: "2".repeat(40),
+		});
+		expect(missingHead.exitCode).toBe(1);
+		expect(missingHead.stderr).toContain("source head");
+		expect(missingHead.stderr).toContain("is not available");
+	});
+
+	test("Cargo selection includes transitive dependents and never emits vendored shards", async () => {
+		const sdk = await runScript(["--matrix-json"], "crates/gjc-sdk/src/lib.rs");
+		expect(sdk.exitCode).toBe(0);
+		const sdkKeys = (JSON.parse(sdk.stdout.trim()) as Array<{ key: string }>).map(entry => entry.key);
+		expect(sdkKeys.filter(key => key.startsWith("cargo-build:"))).toEqual([
+			"cargo-build:cargo:Z2pjLXNkaw:Y3JhdGVzL2dqYy1zZGsvQ2FyZ28udG9tbA",
+			"cargo-build:cargo:cGktbmF0aXZlcw:Y3JhdGVzL3BpLW5hdGl2ZXMvQ2FyZ28udG9tbA",
+		]);
+		expect(sdkKeys.filter(key => key === "native-linux-x64")).toHaveLength(1);
+
+		const vendored = await runScript(["--matrix-json"], "crates/brush-core-vendored/src/lib.rs");
+		expect(vendored.exitCode).toBe(0);
+		const vendoredKeys = (JSON.parse(vendored.stdout.trim()) as Array<{ key: string }>).map(entry => entry.key);
+		expect(vendoredKeys.filter(key => key.startsWith("cargo-build:"))).toHaveLength(5);
+		expect(vendoredKeys.some(key => key.includes("brush"))).toBe(false);
+	});
+
+	test("root/shared build inputs select every inventory TypeScript build in stable order", async () => {
+		const { stdout, exitCode } = await runScript(["--matrix-json"], "bun.lock");
+		expect(exitCode).toBe(0);
+		const entries = JSON.parse(stdout.trim()) as Array<{ key: string }>;
+		expect(entries.filter(entry => entry.key.startsWith("ts-build:")).map(entry => entry.key)).toEqual([
+			"ts-build:ts:Y29kaW5nLWFnZW50:cGFja2FnZXMvY29kaW5nLWFnZW50",
+			"ts-build:ts:c3RhdHM:cGFja2FnZXMvc3RhdHM",
+		]);
+	});
+
+	test("package documentation changes do not schedule build shards", async () => {
+		const { stdout, exitCode } = await runScript(["--matrix-json"], "packages/coding-agent/README.md", {
+			CI_DEV_PLAN_MODE: "pr",
+			CI_DEV_SOURCE_SHA: "a".repeat(40),
+			PATH: path.dirname(process.execPath),
+		});
+		expect(exitCode).toBe(0);
+		expect(JSON.parse(stdout.trim())).toEqual([]);
+	});
+
+	test("unknown unowned inputs fail open to every TypeScript and Cargo build family", async () => {
+		for (const changedPath of ["Makefile", "packages/new-workspace/src/index.ts"]) {
+			const { stdout, exitCode } = await runScript(["--matrix-json"], changedPath);
+			expect(exitCode).toBe(0);
+			const entries = JSON.parse(stdout.trim()) as Array<{ key: string }>;
+			expect(entries.filter(entry => entry.key.startsWith("ts-build:")).map(entry => entry.key)).toHaveLength(2);
+			expect(entries.filter(entry => entry.key.startsWith("cargo-build:")).map(entry => entry.key)).toHaveLength(5);
+			expect(entries.filter(entry => entry.key === "native-linux-x64")).toHaveLength(1);
+		}
+	});
+
+	test("native workspace changes have exact PR and push plans", async () => {
+		const pr = await runScript(["--matrix-json"], "packages/natives/src/index.ts", { CI_DEV_PLAN_MODE: "pr" });
+		expect(pr.exitCode).toBe(0);
+		expect((JSON.parse(pr.stdout.trim()) as Array<{ key: string }>).map(entry => entry.key)).toEqual([
+			"check:@gajae-code/natives",
+			"native-linux-x64",
+			"ts-build:ts:Y29kaW5nLWFnZW50:cGFja2FnZXMvY29kaW5nLWFnZW50",
+			"ts-build:ts:c3RhdHM:cGFja2FnZXMvc3RhdHM",
+		]);
+
+		const push = await runScript(["--matrix-json"], "packages/natives/src/index.ts", { CI_DEV_PLAN_MODE: "push" });
+		expect(push.exitCode).toBe(0);
+		expect((JSON.parse(push.stdout.trim()) as Array<{ key: string }>).map(entry => entry.key)).toEqual([
+			"check:@gajae-code/agent-core", "test:@gajae-code/agent-core",
+			"check:@gajae-code/ai", "test:@gajae-code/ai",
+			"check:@gajae-code/coding-agent",
+			...Array.from({ length: 8 }, (_, index) => `test:@gajae-code/coding-agent:shard-${index + 1}-of-8`),
+			"check:@gajae-code/natives", "test:@gajae-code/natives",
+			"check:@gajae-code/stats",
+			"check:@gajae-code/tui", "test:@gajae-code/tui",
+			"check:@gajae-code/typescript-edit-benchmark", "test:@gajae-code/typescript-edit-benchmark",
+			"check:@gajae-code/utils", "test:@gajae-code/utils",
+			"native-linux-x64",
+			"ts-build:ts:Y29kaW5nLWFnZW50:cGFja2FnZXMvY29kaW5nLWFnZW50",
+			"ts-build:ts:c3RhdHM:cGFja2FnZXMvc3RhdHM",
+		]);
+	});
+
+	test("canonical plan validation binds exact bytes and source head", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ci-dev-affected-plan-"));
+		tempDirs.push(tempDir);
+		const outputFile = path.join(tempDir, "github-output.txt");
+		const planFile = path.join(tempDir, "plan.json");
+		const head = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repoRoot }).stdout.toString().trim();
+		const generated = await runScript(["--matrix-json"], "packages/stats/src/index.ts", {
+			GITHUB_OUTPUT: outputFile,
+			CI_DEV_SOURCE_SHA: head,
+		});
+		expect(generated.exitCode).toBe(0);
+		await Bun.write(planFile, Bun.file(path.join(repoRoot, ".ci-dev-affected-plan.json")));
+		const output = await Bun.file(outputFile).text();
+		const digest = output.split("\n").find(line => line.startsWith("plan_digest="))?.slice("plan_digest=".length);
+		expect(digest).toBeDefined();
+		const valid = await runScript(["--validate-plan"], "packages/stats/src/index.ts", {
+			CI_DEV_AFFECTED_PLAN: planFile,
+			CI_DEV_PLAN_DIGEST: digest as string,
+			CI_DEV_PLAN_SOURCE_SHA: head,
+		});
+		expect(valid.exitCode).toBe(0);
+		const receiptDir = path.join(tempDir, "receipts");
+		await fs.mkdir(receiptDir);
+		const plan = JSON.parse(await Bun.file(planFile).text()) as { tasks: Array<{ key: string; identity: string; capabilities: { nativeProducer: boolean } }> };
+		const expectedShards = plan.tasks.filter(task => !task.capabilities.nativeProducer);
+		for (const [index, task] of expectedShards.entries()) {
+			await Bun.write(path.join(receiptDir, `${index}.json`), JSON.stringify({ key: task.key, identity: task.identity }));
+		}
+		const receiptsValid = await runScript(["--validate-shard-receipts"], "packages/stats/src/index.ts", {
+			CI_DEV_AFFECTED_PLAN: planFile,
+			CI_DEV_PLAN_DIGEST: digest as string,
+			CI_DEV_PLAN_SOURCE_SHA: head,
+			CI_DEV_SHARD_RECEIPTS: receiptDir,
+		});
+		expect(receiptsValid.exitCode).toBe(0);
+		await fs.rm(path.join(receiptDir, "0.json"));
+		const receiptMissing = await runScript(["--validate-shard-receipts"], "packages/stats/src/index.ts", {
+			CI_DEV_AFFECTED_PLAN: planFile,
+			CI_DEV_PLAN_DIGEST: digest as string,
+			CI_DEV_PLAN_SOURCE_SHA: head,
+			CI_DEV_SHARD_RECEIPTS: receiptDir,
+		});
+		expect(receiptMissing.exitCode).toBe(1);
+		expect(receiptMissing.stderr).toContain("shard receipt set does not match canonical plan");
+		const wrongSource = await runScript(["--validate-plan"], "packages/stats/src/index.ts", {
+			CI_DEV_AFFECTED_PLAN: planFile,
+			CI_DEV_PLAN_DIGEST: digest as string,
+			CI_DEV_PLAN_SOURCE_SHA: "0".repeat(40),
+		});
+		expect(wrongSource.exitCode).toBe(1);
+		expect(wrongSource.stderr).toContain("source SHA mismatch");
+
+		const matrixEntry = (JSON.parse(generated.stdout.trim()) as Array<{ key: string; rust: boolean; nextest: boolean; native: boolean }>).find(entry => !entry.key.startsWith("native-linux-x64"));
+		expect(matrixEntry).toBeDefined();
+		const wrongCapabilities = await runScript(["--validate-plan"], "packages/stats/src/index.ts", {
+			CI_DEV_AFFECTED_PLAN: planFile,
+			CI_DEV_PLAN_DIGEST: digest as string,
+			CI_DEV_PLAN_SOURCE_SHA: head,
+			CI_DEV_MATRIX_KEY: matrixEntry?.key as string,
+			CI_DEV_MATRIX_RUST: String(!(matrixEntry?.rust ?? false)),
+			CI_DEV_MATRIX_NEXTEST: String(matrixEntry?.nextest ?? false),
+			CI_DEV_MATRIX_NATIVE: String(matrixEntry?.native ?? false),
+		});
+		expect(wrongCapabilities.exitCode).toBe(1);
+		expect(wrongCapabilities.stderr).toContain("matrix capabilities mismatch");
+		await Bun.write(planFile, `${await Bun.file(planFile).text()}\n`);
+		const tampered = await runScript(["--validate-plan"], "packages/stats/src/index.ts", {
+			CI_DEV_AFFECTED_PLAN: planFile,
+			CI_DEV_PLAN_DIGEST: digest as string,
+			CI_DEV_PLAN_SOURCE_SHA: head,
+		});
+		expect(tampered.exitCode).toBe(1);
+		expect(tampered.stderr).toContain("digest mismatch");
 	});
 
 	test("--task runs exactly the selected planned task", async () => {
@@ -345,10 +591,13 @@ describe("planTargetedTasks PR-mode targeting", () => {
 		const liveShard = entries.find(entry => entry.key === "test:packages/coding-agent/test/rlm-live-model-e2e.test.ts");
 		expect(liveShard).toEqual({
 			key: "test:packages/coding-agent/test/rlm-live-model-e2e.test.ts",
+			identity: "legacy:dGVzdDpwYWNrYWdlcy9jb2RpbmctYWdlbnQvdGVzdC9ybG0tbGl2ZS1tb2RlbC1lMmUudGVzdC50cw:Lg",
 			description: "Test packages/coding-agent/test/rlm-live-model-e2e.test.ts",
 			command: ["bun", "test", "packages/coding-agent/test/rlm-live-model-e2e.test.ts"],
+			cwd: undefined,
 			native: true,
 			rust: false,
+			nextest: false,
 			nativeBuild: false,
 		});
 		expect(entries.find(entry => entry.key === "native-linux-x64")?.nativeBuild).toBe(true);
@@ -543,5 +792,66 @@ describe("push-mode broad planning still runs the fuller suite", () => {
 			"test:@gajae-code/coding-agent:shard-7-of-8",
 			"test:@gajae-code/coding-agent:shard-8-of-8",
 		]);
+	});
+});
+
+describe("normalizeChangedPaths", () => {
+	test("normalizes, deduplicates, and orders safe repository-relative paths", () => {
+		expect(normalizeChangedPaths(["packages\\stats/src/index.ts", "./packages/stats/src/index.ts"])).toEqual(["packages/stats/src/index.ts"]);
+	});
+
+	test("rejects absolute and escaping paths", () => {
+		for (const unsafe of ["/etc/passwd", "../package.json", "packages/../package.json", "C:/workspace/package.json"]) {
+			expect(() => normalizeChangedPaths([unsafe])).toThrow("affected-path-invalid");
+		}
+	});
+});
+
+describe("build inventory validation", () => {
+	test("rejects unknown fields and duplicate Cargo names without the typed emergency", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "ci-dev-inventory-"));
+		try {
+			const source = JSON.parse(await Bun.file(path.join(import.meta.dir, "ci-dev-affected-build-inventory.json")).text()) as {
+				schemaVersion: number;
+				typescript: Array<Record<string, unknown>>;
+				cargo: Array<Record<string, unknown>>;
+				emergency: Record<string, unknown>;
+			};
+			const unknownPath = path.join(root, "unknown.json");
+			await Bun.write(unknownPath, JSON.stringify({ ...source, unexpected: true }));
+			await expect(loadBuildInventory(unknownPath)).rejects.toThrow("unexpected build inventory field");
+
+			const duplicatePath = path.join(root, "duplicate.json");
+			const duplicateCargo = source.cargo.map((unit, index) => index === 1 ? { ...unit, name: source.cargo[0]?.name } : unit);
+			await Bun.write(duplicatePath, JSON.stringify({ ...source, cargo: duplicateCargo, emergency: {} }));
+			await expect(loadBuildInventory(duplicatePath)).rejects.toThrow("duplicate Cargo names require workspace emergency");
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("workspace dependent closure", () => {
+	const leaf: WorkspacePackage = { name: "leaf", dir: "packages/leaf", manifest: { name: "leaf", dependencies: { top: "workspace:*" } } };
+	const middle: WorkspacePackage = { name: "middle", dir: "packages/middle", manifest: { name: "middle", dependencies: { leaf: "workspace:*" } } };
+	const top: WorkspacePackage = { name: "top", dir: "packages/top", manifest: { name: "top", dependencies: { middle: "workspace:*" } } };
+	const graph = [leaf, middle, top];
+
+	test("selects direct and transitive dependents through a cycle without duplicates", () => {
+		expect(expandWithDependents([leaf], graph).map(unit => unit.name)).toEqual(["leaf", "middle", "top"]);
+		expect(expandWithDependents([middle], graph).map(unit => unit.name)).toEqual(["leaf", "middle", "top"]);
+	});
+});
+
+describe("Cargo workspace ambiguity", () => {
+	const first: CargoInventoryUnit = { id: "first", name: "duplicate", manifestPath: "crates/first/Cargo.toml", supported: true, nativeAddonSource: false };
+	const second: CargoInventoryUnit = { id: "second", name: "duplicate", manifestPath: "crates/second/Cargo.toml", supported: true, nativeAddonSource: false };
+	const unique: CargoInventoryUnit = { id: "unique", name: "unique", manifestPath: "crates/unique/Cargo.toml", supported: true, nativeAddonSource: false };
+	const supported = [first, second, unique];
+
+	test("uses the workspace emergency when any selected name is globally duplicated", () => {
+		expect(requiresCargoWorkspaceEmergency([first], supported)).toBe(true);
+		expect(requiresCargoWorkspaceEmergency([first, second], supported)).toBe(true);
+		expect(requiresCargoWorkspaceEmergency([unique], supported)).toBe(false);
 	});
 });

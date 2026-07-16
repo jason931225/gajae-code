@@ -6,6 +6,9 @@
  */
 
 import { APP_NAME, getAgentDir } from "@gajae-code/utils";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { YAML } from "bun";
 import chalk from "chalk";
 import {
 	getDefault,
@@ -25,7 +28,7 @@ import { initXdg } from "./commands/init-xdg";
 // Types
 // =============================================================================
 
-export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg";
+export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg" | "doctor";
 
 export interface ConfigCommandArgs {
 	action: ConfigAction;
@@ -111,7 +114,7 @@ function getSettingValues(def: CliSettingDef): readonly string[] | undefined {
 // Argument Parser
 // =============================================================================
 
-const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
+const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg", "doctor"];
 
 /**
  * Parse config subcommand arguments.
@@ -302,6 +305,9 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 		case "init-xdg":
 			await initXdg();
 			break;
+		case "doctor":
+			await handleDoctor(cmd.flags);
+			break;
 	}
 }
 
@@ -443,6 +449,43 @@ function handlePath(): void {
 	console.log(getAgentDir());
 }
 
+type ConfigDoctorReport = { unknownKeys: string[]; invalidValues: Array<{ path: string; value: unknown }>; legacyShapes: string[] };
+
+function flattenConfig(value: unknown, prefix = ""): Array<[string, unknown]> {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return prefix ? [[prefix, value]] : [];
+	return Object.entries(value).flatMap(([key, child]) => flattenConfig(child, prefix ? `${prefix}.${key}` : key));
+}
+
+export async function inspectConfigFile(configPath = path.join(getAgentDir(), "config.yml")): Promise<ConfigDoctorReport> {
+	const report: ConfigDoctorReport = { unknownKeys: [], invalidValues: [], legacyShapes: [] };
+	try {
+		const raw = YAML.parse(await fs.readFile(configPath, "utf8"));
+		if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+			report.legacyShapes.push("config root is not a mapping");
+			return report;
+		}
+		for (const [settingPath, value] of flattenConfig(raw)) {
+			if (!ALL_SETTING_PATHS.includes(settingPath as SettingPath)) report.unknownKeys.push(settingPath);
+			else if ((SETTINGS_SCHEMA[settingPath as SettingPath] as { validate?: (value: unknown) => boolean }).validate?.(value) === false)
+				report.invalidValues.push({ path: settingPath, value });
+		}
+		if ((raw as Record<string, unknown>).theme === "dark" || (raw as Record<string, unknown>).theme === "light") report.legacyShapes.push("legacy theme name");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") report.legacyShapes.push(`unable to parse config: ${String(error)}`);
+	}
+	return report;
+}
+
+async function handleDoctor(flags: { json?: boolean }): Promise<void> {
+	const report = await inspectConfigFile();
+	if (flags.json) console.log(JSON.stringify(report, null, 2));
+	else {
+		console.log(`Unknown keys: ${report.unknownKeys.length ? report.unknownKeys.join(", ") : "none"}`);
+		console.log(`Invalid values: ${report.invalidValues.length ? report.invalidValues.map(item => item.path).join(", ") : "none"}`);
+		console.log(`Legacy shapes: ${report.legacyShapes.length ? report.legacyShapes.join(", ") : "none"}`);
+	}
+}
+
 // =============================================================================
 // Help
 // =============================================================================
@@ -457,6 +500,7 @@ ${chalk.bold("Commands:")}
   reset <key>        Reset a setting to its default value
   path               Print the config directory path
   init-xdg           Initialize XDG Base Directory structure
+  doctor             Report unknown, invalid, and legacy config entries
 
 ${chalk.bold("Options:")}
   --json             Output as JSON
@@ -472,6 +516,7 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} config list --json
   ${APP_NAME} config get auth.broker.token --show-secrets
   ${APP_NAME} config init-xdg
+  ${APP_NAME} config doctor --json
 
 ${chalk.bold("Boolean Values:")}
   true, false, yes, no, on, off, 1, 0

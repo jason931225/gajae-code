@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getConfigRootDir, setAgentDir } from "@gajae-code/utils";
-import { runConfigCommand } from "../src/cli/config-cli";
+import { inspectConfigFile, runConfigCommand } from "../src/cli/config-cli";
 import { resetSettingsForTest } from "../src/config/settings";
 
 let testAgentDir = "";
@@ -263,5 +263,14 @@ describe("config CLI schema coverage", () => {
 			expect(setPayload.value).toBe(secret);
 			expect(getPayload.value).toBe(secret);
 		});
+	});
+});
+
+describe("config doctor", () => {
+	it("reports typoed settings from a fixture config", async () => {
+		const configPath = path.join(testAgentDir, "config.yml");
+		await fs.writeFile(configPath, "compaction:\n  enabled: true\n  enabld: false\n");
+		const report = await inspectConfigFile(configPath);
+		expect(report.unknownKeys).toContain("compaction.enabld");
 	});
 });

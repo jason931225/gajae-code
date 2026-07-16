@@ -118,11 +118,19 @@ describe("AgentSession deep-interview continuation", () => {
 	async function deliverQueuedUserTurn(
 		message: Extract<AgentEvent, { type: "message_start" }>["message"],
 	): Promise<void> {
+		const steeringIndex = session.agent.snapshotSteering().indexOf(message);
+		if (steeringIndex >= 0) {
+			expect(session.agent.removeSteerAt(steeringIndex)).toBe(message);
+		} else {
+			const followUpIndex = session.agent.snapshotFollowUp().indexOf(message);
+			expect(followUpIndex).toBeGreaterThanOrEqual(0);
+			expect(session.agent.removeFollowUpAt(followUpIndex)).toBe(message);
+		}
+		await emitLifecycleAndWait({ type: "turn_start" }, event => event.type === "turn_start");
 		await emitLifecycleAndWait(
 			{ type: "message_start", message },
 			event => event.type === "message_start" && event.message === message,
 		);
-		await emitLifecycleAndWait({ type: "turn_start" }, event => event.type === "turn_start");
 	}
 
 	async function emitTerminalStop(assistant: AssistantMessage): Promise<void> {
@@ -140,7 +148,7 @@ describe("AgentSession deep-interview continuation", () => {
 	async function emitTerminalStopAfterDeepInterviewCheck(assistant: AssistantMessage): Promise<void> {
 		const checked = Promise.withResolvers<void>();
 		const buildSkillStopOutput = skillState.buildSkillStopOutput;
-		vi.spyOn(skillState, "buildSkillStopOutput").mockImplementation(async options => {
+		const stopOutputSpy = vi.spyOn(skillState, "buildSkillStopOutput").mockImplementation(async options => {
 			try {
 				return await buildSkillStopOutput(options);
 			} finally {
@@ -149,14 +157,17 @@ describe("AgentSession deep-interview continuation", () => {
 		});
 		await emitTerminalStop(assistant);
 		await checked.promise;
+		stopOutputSpy.mockRestore();
 		await session.waitForIdle();
 	}
 
 	it("continues when the model stops during an active interview", async () => {
 		await activateWorkflow("deep-interview");
-		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const continued = Promise.withResolvers<void>();
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => continued.resolve());
 
 		await emitAssistantStop(100);
+		await continued.promise;
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 		const [reminder] = developerReminders();
@@ -242,8 +253,8 @@ describe("AgentSession deep-interview continuation", () => {
 		await session.steer("keep interviewing");
 		const [queued] = session.agent.snapshotSteering();
 		if (queued?.role !== "user") throw new Error("Expected queued user message");
-		session.agent.emitExternalEvent({ type: "message_start", message: queued });
 		session.agent.emitExternalEvent({ type: "turn_start" });
+		session.agent.emitExternalEvent({ type: "message_start", message: queued });
 		await session.waitForIdle();
 
 		await emitAssistantStop(400);
@@ -254,7 +265,8 @@ describe("AgentSession deep-interview continuation", () => {
 
 	it("delivers preclaimed steering messages in order without continuing between their turns", async () => {
 		await activateWorkflow("deep-interview");
-		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const continued = Promise.withResolvers<void>();
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => continued.resolve());
 		await session.steer("steer A");
 		await session.steer("steer B");
 		const [first, second] = session.agent.snapshotSteering();
@@ -270,11 +282,16 @@ describe("AgentSession deep-interview continuation", () => {
 		expect(session.getQueuedMessages().steering).toEqual([]);
 		expect(continueSpy).not.toHaveBeenCalled();
 		expect(developerReminders()).toHaveLength(0);
+		await emitTerminalStopAfterDeepInterviewCheck({ ...createAssistantMessage("B stopped."), timestamp: 2 });
+		expect(developerReminders()).toHaveLength(1);
+		await continued.promise;
+		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("delivers preclaimed follow-up messages in order without continuing between their turns", async () => {
 		await activateWorkflow("deep-interview");
-		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const continued = Promise.withResolvers<void>();
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => continued.resolve());
 		await session.followUp("follow-up A");
 		await session.followUp("follow-up B");
 		const [first, second] = session.agent.snapshotFollowUp();
@@ -290,6 +307,10 @@ describe("AgentSession deep-interview continuation", () => {
 		expect(session.getQueuedMessages().followUp).toEqual([]);
 		expect(continueSpy).not.toHaveBeenCalled();
 		expect(developerReminders()).toHaveLength(0);
+		await emitTerminalStopAfterDeepInterviewCheck({ ...createAssistantMessage("B stopped."), timestamp: 2 });
+		expect(developerReminders()).toHaveLength(1);
+		await continued.promise;
+		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("never grants workspace-controlled workflow state developer authority", async () => {
@@ -375,8 +396,8 @@ describe("AgentSession deep-interview continuation", () => {
 
 		const [queued] = session.agent.snapshotSteering();
 		if (queued?.role !== "user") throw new Error("Expected queued user message");
-		session.agent.emitExternalEvent({ type: "message_start", message: queued });
 		session.agent.emitExternalEvent({ type: "turn_start" });
+		session.agent.emitExternalEvent({ type: "message_start", message: queued });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
 		await Bun.sleep(50);
 		await session.waitForIdle();

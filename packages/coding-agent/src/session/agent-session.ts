@@ -1421,7 +1421,6 @@ export class AgentSession {
 	#todoReminderCount = 0;
 	#deepInterviewUserIntentEpoch = 0;
 	#deepInterviewTurnOwnerEpoch = 0;
-	#deepInterviewStagedTurnOwnerEpoch: number | undefined;
 	#deepInterviewGenuineUserMessageEpochs = new WeakMap<object, number>();
 	#deepInterviewPreclaimedCustomInputEpochs = new WeakMap<object, number>();
 	#deepInterviewAssistantIdentities = new WeakMap<object, string>();
@@ -2640,7 +2639,7 @@ export class AgentSession {
 			const epoch = this.#deepInterviewGenuineUserMessageEpochs.get(event.message);
 			if (epoch !== undefined) {
 				this.#deepInterviewContinuationBudget = { epoch, committed: 0, reserved: 0 };
-				this.#deepInterviewStagedTurnOwnerEpoch = epoch;
+				this.#deepInterviewTurnOwnerEpoch = epoch;
 			}
 		}
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -2749,11 +2748,7 @@ export class AgentSession {
 			}
 		}
 
-		if (event.type === "turn_start") {
-			this.#deepInterviewTurnOwnerEpoch =
-				this.#deepInterviewStagedTurnOwnerEpoch ?? this.#deepInterviewUserIntentEpoch;
-			this.#deepInterviewStagedTurnOwnerEpoch = undefined;
-		}
+		if (event.type === "turn_start") this.#deepInterviewTurnOwnerEpoch = this.#deepInterviewUserIntentEpoch;
 		if (event.type === "turn_start" && this.#goalRuntime.shouldTrackTurnBaseline()) {
 			const usage = this.getSessionStats().tokens;
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {

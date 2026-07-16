@@ -11501,7 +11501,7 @@ export class AgentSession {
 			(trigger.class === "quota" || trigger.class === "rate_limit") &&
 			(await this.#markFailedManagedCredential(trigger));
 		if (credentialRotated) {
-			controller.resetAttemptBudget();
+			controller.restorePreviousEntryForRetry();
 			outcome = "retry";
 		}
 		if (outcome === "exhausted") {

@@ -95,6 +95,15 @@ export class FallbackChainController {
 		return true;
 	}
 
+	/** Restore the entry that just advanced when its credential rotation permits a fresh retry. */
+	restorePreviousEntryForRetry(): boolean {
+		if (this.activeIndex === 0) return false;
+		this.activeIndex -= 1;
+		this.exhaustedForTurn = false;
+		this.resetAttemptBudget();
+		return true;
+	}
+
 	isExhausted(): boolean {
 		return this.exhaustedForTurn;
 	}

@@ -649,7 +649,8 @@ describe("ModelRegistry", () => {
 			expect(resolved?.input.includes("image")).toBe(true);
 			expect(resolved?.provider).toBe("anthropic");
 		});
-		test("caches available models until disabled providers change", () => {
+		test("caches available models until disabled providers change", async () => {
+			await Settings.init({ inMemory: true });
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			const initial = registry.getAvailable();
 			expect(registry.getAvailable()).toBe(initial);

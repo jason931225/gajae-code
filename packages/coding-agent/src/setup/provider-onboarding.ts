@@ -1,8 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir } from "@gajae-code/utils";
+import { getAgentDir, logger } from "@gajae-code/utils";
 import { YAML } from "bun";
 import { type ModelsConfig, ModelsConfigSchema } from "../config/models-config-schema";
+import { AuthStorage } from "../session/auth-storage";
+import providerPresets from "./provider-presets.json";
 
 export type ProviderCompatibility = "openai" | "anthropic";
 export type ProviderSetupApi = "openai-responses" | "openai-completions" | "anthropic-messages";
@@ -52,63 +54,7 @@ interface ProviderPreset {
 const PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const REDACT_PREFIX = 4;
 const REDACT_SUFFIX = 4;
-// Preset compat values are onboarding snapshots for generated models.yml entries.
-// Keep them aligned with provider descriptor behavior without importing descriptor internals into setup UX.
-const MINIMAX_OPENAI_COMPAT: ProviderCompatConfig = {
-	supportsStore: false,
-	supportsDeveloperRole: false,
-	supportsReasoningEffort: false,
-	reasoningContentField: "reasoning_content",
-};
-
-const GLM_OPENAI_COMPAT: ProviderCompatConfig = {
-	supportsDeveloperRole: false,
-	supportsReasoningEffort: false,
-	thinkingFormat: "zai",
-	reasoningContentField: "reasoning_content",
-};
-
-export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
-	{
-		id: "minimax",
-		aliases: ["minimax-code"],
-		name: "MiniMax Coding Plan",
-		description: "OpenAI-compatible MiniMax Coding Plan endpoint",
-		compatibility: "openai",
-		api: "openai-completions",
-		providerId: "minimax-code",
-		baseUrl: "https://api.minimax.io/v1",
-		apiKeyEnv: "MINIMAX_CODE_API_KEY",
-		models: ["minimax-m3"],
-		compat: MINIMAX_OPENAI_COMPAT,
-	},
-	{
-		id: "minimax-cn",
-		aliases: ["minimax-code-cn", "minimaxi"],
-		name: "MiniMax Coding Plan (China)",
-		description: "OpenAI-compatible MiniMax China endpoint",
-		compatibility: "openai",
-		api: "openai-completions",
-		providerId: "minimax-code-cn",
-		baseUrl: "https://api.minimaxi.com/v1",
-		apiKeyEnv: "MINIMAX_CODE_CN_API_KEY",
-		models: ["minimax-m3"],
-		compat: MINIMAX_OPENAI_COMPAT,
-	},
-	{
-		id: "glm",
-		aliases: ["zai", "z-ai", "bigmodel"],
-		name: "GLM / zAI",
-		description: "OpenAI-compatible GLM endpoint from zAI/BigModel",
-		compatibility: "openai",
-		api: "openai-completions",
-		providerId: "glm-proxy",
-		baseUrl: "https://api.z.ai/api/paas/v4",
-		apiKeyEnv: "ZAI_API_KEY",
-		models: ["glm-4.6"],
-		compat: GLM_OPENAI_COMPAT,
-	},
-];
+export const PROVIDER_PRESETS: readonly ProviderPreset[] = providerPresets as ProviderPreset[];
 
 export function getDefaultModelsPath(): string {
 	return path.join(getAgentDir(), "models.yml");
@@ -291,7 +237,13 @@ async function writeModelsConfig(modelsPath: string, config: ModelsConfig): Prom
 		throw new Error(`Generated models config is invalid at ${where}: ${first?.message ?? "unknown schema error"}`);
 	}
 	await fs.mkdir(path.dirname(modelsPath), { recursive: true });
-	await Bun.write(modelsPath, YAML.stringify(checked.data, null, 2));
+	try {
+		await fs.writeFile(modelsPath, YAML.stringify(checked.data, null, 2), { mode: 0o600 });
+		await fs.chmod(modelsPath, 0o600);
+	} catch (error) {
+		logger.warn("Failed to restrict models config permissions", { path: modelsPath, error: String(error) });
+		throw error;
+	}
 }
 
 export async function addApiCompatibleProvider(input: ProviderSetupInput): Promise<ProviderSetupResult> {
@@ -311,7 +263,12 @@ export async function addApiCompatibleProvider(input: ProviderSetupInput): Promi
 	if (validated.credentialSource === "env") {
 		provider.apiKeyEnv = validated.apiKey;
 	} else {
-		provider.apiKey = validated.apiKey;
+		const authStorage = await AuthStorage.create(path.join(path.dirname(modelsPath), "agent.db"));
+		try {
+			await authStorage.set(validated.providerId, { type: "api_key", key: validated.apiKey });
+		} finally {
+			authStorage.close();
+		}
 	}
 	const next: ModelsConfig = {
 		...existing,

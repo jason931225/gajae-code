@@ -1185,6 +1185,61 @@ function lifecycleDeleteMetadataCleanupPlan(
 	};
 }
 
+type LifecycleDeleteMetadataPreflight = { cleanup: CleanupEvidence } | BrokerResponse;
+
+/**
+ * Capture lifecycle metadata before deleting any saved user data. A fresh delete
+ * may only clean metadata owned by one dead lifecycle process.
+ */
+function preflightLifecycleDeleteMetadata(
+	root: string,
+	id: string,
+	record: { pid: number } | undefined,
+): LifecycleDeleteMetadataPreflight {
+	const metadataPaths = [lifecycleMarkerPath(root, id), lifecycleReadyPath(root, id)];
+	const lifecycleMetadata: Array<{
+		metadataPath: string;
+		metadata: LifecycleFileCapture;
+		marker: EffectMarker;
+	}> = [];
+	for (const metadataPath of metadataPaths) {
+		let metadata: LifecycleFileCapture | undefined;
+		try {
+			metadata = captureLifecycleFile(metadataPath, true);
+		} catch {
+			return fail("terminal_uncertain", "Lifecycle metadata path is occupied by an unsafe object.");
+		}
+		if (!metadata) continue;
+		let marker: unknown;
+		try {
+			marker = JSON.parse(metadata.bytes.toString("utf8"));
+		} catch {
+			return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
+		}
+		if (!isEffectMarker(marker) || (record && marker.pid !== record.pid) || !hasObservedProcessExit(marker.pid))
+			return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
+		lifecycleMetadata.push({ metadataPath, metadata, marker });
+	}
+	const canonicalLifecycleMarker = lifecycleMetadata.find(
+		metadata => metadata.metadataPath === lifecycleMarkerPath(root, id),
+	);
+	const lifecycleReadyMarker = lifecycleMetadata.find(
+		metadata => metadata.metadataPath === lifecycleReadyPath(root, id),
+	);
+	if (lifecycleReadyMarker && !canonicalLifecycleMarker)
+		return fail(
+			"terminal_uncertain",
+			"Lifecycle readiness metadata lacks canonical marker authority for fresh cleanup.",
+		);
+	if (
+		canonicalLifecycleMarker &&
+		lifecycleReadyMarker &&
+		!sameEffectMarker(canonicalLifecycleMarker.marker, lifecycleReadyMarker.marker)
+	)
+		return fail("terminal_uncertain", "Lifecycle metadata siblings do not share one owner marker.");
+	return { cleanup: lifecycleDeleteMetadataCleanupPlan(root, id, lifecycleMetadata) };
+}
+
 async function reconcileLifecycleCleanup(
 	broker: Broker,
 	identity: string,
@@ -1205,12 +1260,25 @@ async function reconcileLifecycleCleanup(
 		const file = activeCleanup.lifecycleFiles![index];
 		if (!validateLifecycleCleanupFile(activeCleanup.metadataRoot!, activeCleanup.sessionId!, file))
 			return fail("terminal_uncertain", "Lifecycle cleanup replay contains an invalid path authority.");
-		if (file.completed) continue;
-
 		const candidates = [file.path, file.detachedPath, file.plannedPath].filter(
 			(value, candidateIndex, values): value is string =>
 				typeof value === "string" && values.indexOf(value) === candidateIndex,
 		);
+		if (file.completed) {
+			for (const candidate of candidates) {
+				try {
+					fsSync.lstatSync(candidate);
+					return fail(
+						"terminal_uncertain",
+						"Lifecycle cleanup receipt marks a target complete while an authorized candidate remains.",
+					);
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+						return fail("terminal_uncertain", "Lifecycle cleanup completion could not be safely inspected.");
+				}
+			}
+			continue;
+		}
 		let activePath: string | undefined;
 		let captured: ReturnType<typeof captureLifecycleFile>;
 		let foundUnauthorized = false;
@@ -2565,6 +2633,9 @@ async function executeLifecycleResponse(
 		if (record?.live) return fail("live_session", "Refusing to delete a live session; close it first.");
 		const validated = await validateDeletePath(broker, input, id, record, cleanup);
 		if ("ok" in validated) return validated;
+		const metadataPreflight = preflightLifecycleDeleteMetadata(validated.metadataRoot, id, record);
+		if ("ok" in metadataPreflight) return metadataPreflight;
+		const metadataCleanup = metadataPreflight.cleanup;
 		let cleanupTarget: VerifiedSessionDeleteTarget = {
 			...validated.target,
 			...(validated.target.plannedArtifactsPath &&
@@ -2741,63 +2812,7 @@ async function executeLifecycleResponse(
 				},
 			);
 
-		if (record)
-			await broker.index.append({
-				type: "session_closed",
-				sessionId: id,
-				locator: record.locator,
-				endpointGeneration: record.endpointGeneration,
-				pid: record.pid,
-			});
-		const metadataPaths = [
-			lifecycleMarkerPath(validated.metadataRoot, id),
-			lifecycleReadyPath(validated.metadataRoot, id),
-		];
-		const lifecycleMetadata: Array<{
-			metadataPath: string;
-			metadata: LifecycleFileCapture;
-			marker: EffectMarker;
-		}> = [];
-		for (const metadataPath of metadataPaths) {
-			if (fsSync.existsSync(metadataPath)) {
-				const stat = fsSync.lstatSync(metadataPath);
-				if (stat.isSymbolicLink() || !stat.isFile())
-					return fail("terminal_uncertain", "Lifecycle metadata path is occupied by an unsafe object.");
-			}
-			let metadata: LifecycleFileCapture | undefined;
-			try {
-				metadata = captureLifecycleFile(metadataPath);
-			} catch {
-				return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
-			}
-			if (!metadata) continue;
-			let marker: unknown;
-			try {
-				marker = JSON.parse(metadata.bytes.toString("utf8"));
-			} catch {
-				return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
-			}
-			if (!isEffectMarker(marker) || (record && marker.pid !== record.pid) || !hasObservedProcessExit(marker.pid))
-				return fail("terminal_uncertain", "Lifecycle metadata ownership could not be verified.");
-			lifecycleMetadata.push({ metadataPath, metadata, marker });
-		}
-		const canonicalLifecycleMarker = lifecycleMetadata.find(
-			metadata => metadata.metadataPath === lifecycleMarkerPath(validated.metadataRoot, id),
-		);
-		const lifecycleReadyMarker = lifecycleMetadata.find(
-			metadata => metadata.metadataPath === lifecycleReadyPath(validated.metadataRoot, id),
-		);
-		if (lifecycleReadyMarker && !canonicalLifecycleMarker)
-			return fail(
-				"terminal_uncertain",
-				"Lifecycle readiness metadata lacks canonical marker authority for fresh cleanup.",
-			);
-		if (
-			lifecycleMetadata.length === metadataPaths.length &&
-			!sameEffectMarker(lifecycleMetadata[0].marker, lifecycleMetadata[1].marker)
-		)
-			return fail("terminal_uncertain", "Lifecycle metadata siblings do not share one owner marker.");
-		const metadataCleanup = lifecycleDeleteMetadataCleanupPlan(validated.metadataRoot, id, lifecycleMetadata);
+		const completion = { ok: true, result: { sessionId: id } } as const;
 		if (metadataCleanup.lifecycleFiles?.length) {
 			await broker.ledger.transition(identity, "effect_started", {
 				intendedSessionId: id,
@@ -2807,9 +2822,18 @@ async function executeLifecycleResponse(
 					metadataCleanup,
 				),
 			});
-			return reconcileLifecycleCleanup(broker, identity, metadataCleanup, { ok: true, result: { sessionId: id } });
+			const reconciled = await reconcileLifecycleCleanup(broker, identity, metadataCleanup, completion);
+			if (!reconciled.ok) return reconciled;
 		}
-		return { ok: true, result: { sessionId: id } };
+		if (record)
+			await broker.index.append({
+				type: "session_closed",
+				sessionId: id,
+				locator: record.locator,
+				endpointGeneration: record.endpointGeneration,
+				pid: record.pid,
+			});
+		return completion;
 	}
 	return fail("invalid_input", "Unknown lifecycle operation.");
 }

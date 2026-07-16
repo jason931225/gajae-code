@@ -67,6 +67,37 @@ function canonicalJson(value: unknown): string {
 		.join(",")}}`;
 }
 
+async function snapshotDeleteSurface(
+	sessionPath: string,
+): Promise<{ transcript: Buffer; artifacts: string | undefined }> {
+	const artifactsPath = sessionPath.slice(0, -6);
+	const digestTree = async (directory: string): Promise<string> => {
+		const entries = await fs.readdir(directory, { withFileTypes: true });
+		const parts = await Promise.all(
+			entries
+				.sort((left, right) => left.name.localeCompare(right.name))
+				.map(async entry => {
+					const entryPath = path.join(directory, entry.name);
+					if (entry.isDirectory()) return `d:${entry.name}:${await digestTree(entryPath)}`;
+					if (entry.isFile())
+						return `f:${entry.name}:${createHash("sha256")
+							.update(await fs.readFile(entryPath))
+							.digest("hex")}`;
+
+					return `other:${entry.name}`;
+				}),
+		);
+		return createHash("sha256").update(parts.join("\n")).digest("hex");
+	};
+	return {
+		transcript: await fs.readFile(sessionPath),
+		artifacts: await digestTree(artifactsPath).catch(error => {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}),
+	};
+}
+
 test("startup diagnostics redact identifier-prefixed assignment secrets before bounded truncation", () => {
 	const secret = "credential-value";
 	const message = sanitizeSdkStartupMessage(
@@ -1109,6 +1140,10 @@ test("broker refuses fresh lifecycle cleanup when ready sibling has a different 
 		const sessionPath = saved.getSessionFile();
 		if (!sessionPath) throw new Error("Expected persisted delete transcript.");
 		await saved.close();
+		const artifactsPath = sessionPath.slice(0, -6);
+		await fs.mkdir(path.join(artifactsPath, "nested"), { recursive: true });
+		await fs.writeFile(path.join(artifactsPath, "nested", "preserve.txt"), "preserve mismatch artifacts");
+
 		await broker.start();
 		await expect(
 			broker.handleRequest(
@@ -1141,6 +1176,7 @@ test("broker refuses fresh lifecycle cleanup when ready sibling has a different 
 			incarnation: string;
 		};
 		await fs.writeFile(readyPath, JSON.stringify({ ...marker, effectMarker: "different-ready-owner" }));
+		const surfaceBeforeDelete = await snapshotDeleteSurface(sessionPath);
 
 		await expect(
 			broker.handleRequest(
@@ -1151,6 +1187,8 @@ test("broker refuses fresh lifecycle cleanup when ready sibling has a different 
 		).resolves.toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
 		await expect(fs.stat(markerPath)).resolves.toBeDefined();
 		await expect(fs.stat(readyPath)).resolves.toBeDefined();
+		expect(await snapshotDeleteSurface(sessionPath)).toEqual(surfaceBeforeDelete);
+
 		const rows = (await fs.readFile(path.join(agentDir, "sdk", "lifecycle-ledger.jsonl"), "utf8"))
 			.split("\n")
 			.filter(Boolean)
@@ -1180,6 +1218,10 @@ test("broker preserves ready-only lifecycle metadata without canonical marker au
 		const sessionPath = saved.getSessionFile();
 		if (!sessionPath) throw new Error("Expected persisted delete transcript.");
 		await saved.close();
+		const artifactsPath = sessionPath.slice(0, -6);
+		await fs.mkdir(path.join(artifactsPath, "nested"), { recursive: true });
+		await fs.writeFile(path.join(artifactsPath, "nested", "preserve.txt"), "preserve ready-only artifacts");
+
 		const deadOwner = Bun.spawn([process.execPath, "-e", ""]);
 		await deadOwner.exited;
 		const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
@@ -1190,6 +1232,7 @@ test("broker preserves ready-only lifecycle metadata without canonical marker au
 		};
 		await fs.mkdir(path.dirname(readyPath), { recursive: true });
 		await fs.writeFile(readyPath, canonicalJson(readyMarker));
+		const surfaceBeforeDelete = await snapshotDeleteSurface(sessionPath);
 
 		await broker.start();
 		await expect(
@@ -1200,6 +1243,7 @@ test("broker preserves ready-only lifecycle metadata without canonical marker au
 			),
 		).resolves.toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
 		await expect(fs.readFile(readyPath, "utf8")).resolves.toBe(canonicalJson(readyMarker));
+		expect(await snapshotDeleteSurface(sessionPath)).toEqual(surfaceBeforeDelete);
 		const rows = (await fs.readFile(path.join(agentDir, "sdk", "lifecycle-ledger.jsonl"), "utf8"))
 			.split("\n")
 			.filter(Boolean)
@@ -1386,6 +1430,103 @@ test("broker replays a completed base metadata cleanup receipt and rejects a rep
 		});
 		await expect(fs.stat(mismatchedMarkerPath)).rejects.toThrow();
 		await expect(fs.readFile(mismatchedReadyPath, "utf8")).resolves.toBe(canonicalJson(replacedReady));
+	} finally {
+		await broker?.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 30_000);
+
+test("broker rejects a corrupt completed lifecycle cleanup receipt when its ready sibling remains", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-completed-lifecycle-replay-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const sessionId = "completed-lifecycle-replay";
+	const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
+	const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
+	const request = { sessionId };
+	const key = "completed-lifecycle-replay";
+	let broker: Broker | undefined;
+	try {
+		const marker = {
+			pid: process.pid,
+			effectMarker: "completed-replay",
+			incarnation: "completed-replay",
+		};
+
+		await fs.mkdir(path.dirname(markerPath), { recursive: true });
+		await fs.writeFile(markerPath, canonicalJson(marker));
+		await fs.writeFile(readyPath, canonicalJson(marker));
+		const [markerStat, markerBytes, readyStat, readyBytes] = await Promise.all([
+			fs.stat(markerPath, { bigint: true }),
+			fs.readFile(markerPath),
+			fs.stat(readyPath, { bigint: true }),
+			fs.readFile(readyPath),
+		]);
+		const target = createHash("sha256").update(canonicalJson(request)).digest("hex");
+		const identity = await deriveIdempotencyIdentity(agentDir, "session.delete", key, target);
+		const requestHash = createHash("sha256")
+			.update(canonicalJson({ operation: "session.delete", input: request }))
+			.digest("hex");
+		const ledger = await new LifecycleLedger(agentDir).open();
+		await ledger.begin(identity, requestHash);
+		await ledger.transition(identity, "effect_started", {
+			response: {
+				ok: false,
+				error: {
+					code: "cleanup_pending",
+					message: "Lifecycle cleanup is pending.",
+					cleanup: {
+						phase: "lifecycle",
+						sessionId,
+						metadataRoot: stateRoot,
+						lifecycleFiles: [
+							{
+								path: markerPath,
+								identity: {
+									dev: markerStat.dev.toString(),
+									ino: markerStat.ino.toString(),
+									size: Number(markerStat.size),
+									mtimeNs: markerStat.mtimeNs.toString(),
+									sha256: createHash("sha256").update(markerBytes).digest("hex"),
+								},
+								attempt: 1,
+								plannedPath: path.join(
+									path.dirname(markerPath),
+									`.gjc-delete-marker-${sessionId}.lifecycle.json`,
+								),
+
+								completed: true,
+							},
+							{
+								path: readyPath,
+								identity: {
+									dev: readyStat.dev.toString(),
+									ino: readyStat.ino.toString(),
+									size: Number(readyStat.size),
+									mtimeNs: readyStat.mtimeNs.toString(),
+									sha256: createHash("sha256").update(readyBytes).digest("hex"),
+								},
+								attempt: 1,
+								plannedPath: path.join(
+									path.dirname(readyPath),
+									`.gjc-delete-ready-${sessionId}.lifecycle.ready.json`,
+								),
+								completed: true,
+							},
+						],
+					},
+				},
+			},
+		});
+		await fs.unlink(markerPath);
+		broker = new Broker({ agentDir });
+		await broker.start();
+		await expect(broker.handleRequest("session.delete", request, key)).resolves.toMatchObject({
+			ok: false,
+			error: { code: "terminal_uncertain" },
+		});
+		await expect(fs.stat(markerPath)).rejects.toThrow();
+		await expect(fs.readFile(readyPath)).resolves.toEqual(readyBytes);
 	} finally {
 		await broker?.stop();
 		await fs.rm(root, { recursive: true, force: true });

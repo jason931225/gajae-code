@@ -457,6 +457,29 @@ function flattenConfig(value: unknown, prefix = ""): Array<[string, unknown]> {
 	return Object.entries(value).flatMap(([key, child]) => flattenConfig(child, prefix ? `${prefix}.${key}` : key));
 }
 
+function matchesSettingType(path: SettingPath, value: unknown): boolean {
+	const definition = SETTINGS_SCHEMA[path];
+	switch (definition.type) {
+		case "string":
+		case "enum":
+			return typeof value === "string" && (definition.type !== "enum" || getEnumValues(path)?.includes(value) === true);
+		case "number":
+			return typeof value === "number" && Number.isFinite(value);
+		case "boolean":
+			return typeof value === "boolean";
+		case "array":
+			return Array.isArray(value);
+		case "record":
+			return value !== null && typeof value === "object" && !Array.isArray(value);
+	}
+}
+
+function isValidSettingValue(path: SettingPath, value: unknown): boolean {
+	if (!matchesSettingType(path, value)) return false;
+	const validate = (SETTINGS_SCHEMA[path] as { validate?: (value: unknown) => boolean }).validate;
+	return validate?.(value) ?? true;
+}
+
 export async function inspectConfigFile(configPath = path.join(getAgentDir(), "config.yml")): Promise<ConfigDoctorReport> {
 	const report: ConfigDoctorReport = { unknownKeys: [], invalidValues: [], legacyShapes: [] };
 	try {
@@ -467,7 +490,7 @@ export async function inspectConfigFile(configPath = path.join(getAgentDir(), "c
 		}
 		for (const [settingPath, value] of flattenConfig(raw)) {
 			if (!ALL_SETTING_PATHS.includes(settingPath as SettingPath)) report.unknownKeys.push(settingPath);
-			else if ((SETTINGS_SCHEMA[settingPath as SettingPath] as { validate?: (value: unknown) => boolean }).validate?.(value) === false)
+			else if (!isValidSettingValue(settingPath as SettingPath, value))
 				report.invalidValues.push({ path: settingPath, value: redactConfigValue(settingPath, value) });
 		}
 	} catch (error) {

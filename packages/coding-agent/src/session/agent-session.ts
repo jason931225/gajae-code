@@ -1421,9 +1421,9 @@ export class AgentSession {
 	#todoReminderCount = 0;
 	#deepInterviewUserIntentEpoch = 0;
 	#deepInterviewTurnOwnerEpoch = 0;
-	#deepInterviewGenuineUserMessages = new WeakSet<object>();
-	#deepInterviewDeliveredGenuineUserMessages = new WeakSet<object>();
-	#deepInterviewPreclaimedCustomInputs = new WeakSet<object>();
+	#deepInterviewStagedTurnOwnerEpoch: number | undefined;
+	#deepInterviewGenuineUserMessageEpochs = new WeakMap<object, number>();
+	#deepInterviewPreclaimedCustomInputEpochs = new WeakMap<object, number>();
 	#deepInterviewAssistantIdentities = new WeakMap<object, string>();
 	#nextDeepInterviewAssistantFallbackId = 0;
 	#handledDeepInterviewAssistantIds = new Set<string>();
@@ -2636,17 +2636,12 @@ export class AgentSession {
 		const agentEndOwnerEpoch = event.type === "agent_end" ? this.#deepInterviewTurnOwnerEpoch : undefined;
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
-		if (
-			event.type === "message_start" &&
-			this.#deepInterviewGenuineUserMessages.has(event.message) &&
-			!this.#deepInterviewDeliveredGenuineUserMessages.has(event.message)
-		) {
-			this.#deepInterviewDeliveredGenuineUserMessages.add(event.message);
-			this.#deepInterviewContinuationBudget = {
-				epoch: this.#deepInterviewUserIntentEpoch,
-				committed: 0,
-				reserved: 0,
-			};
+		if (event.type === "message_start") {
+			const epoch = this.#deepInterviewGenuineUserMessageEpochs.get(event.message);
+			if (epoch !== undefined) {
+				this.#deepInterviewContinuationBudget = { epoch, committed: 0, reserved: 0 };
+				this.#deepInterviewStagedTurnOwnerEpoch = epoch;
+			}
 		}
 		if (event.type === "message_start" && event.message.role === "user") {
 			const messageText = this.#getUserMessageText(event.message);
@@ -2754,7 +2749,11 @@ export class AgentSession {
 			}
 		}
 
-		if (event.type === "turn_start") this.#deepInterviewTurnOwnerEpoch = this.#deepInterviewUserIntentEpoch;
+		if (event.type === "turn_start") {
+			this.#deepInterviewTurnOwnerEpoch =
+				this.#deepInterviewStagedTurnOwnerEpoch ?? this.#deepInterviewUserIntentEpoch;
+			this.#deepInterviewStagedTurnOwnerEpoch = undefined;
+		}
 		if (event.type === "turn_start" && this.#goalRuntime.shouldTrackTurnBaseline()) {
 			const usage = this.getSessionStats().tokens;
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
@@ -5811,7 +5810,7 @@ export class AgentSession {
 			throw Object.assign(new Error("skill.invoke args must be a string."), { code: "invalid_input" });
 		const skill = this.skills.find(candidate => candidate.name === skillName);
 		if (!skill) throw Object.assign(new Error(`Skill ${skillName} was not found.`), { code: "invalid_input" });
-		this.#claimDeepInterviewUserIntent();
+		const deepInterviewUserIntentEpoch = this.#claimDeepInterviewUserIntent();
 		const activation = await resolveSubskillActivationForSkillInvocation({
 			cwd: this.sessionManager.getCwd(),
 			sessionId: this.sessionId,
@@ -5831,7 +5830,7 @@ export class AgentSession {
 			details: built.details,
 			attribution: "user" as const,
 		};
-		this.#deepInterviewPreclaimedCustomInputs.add(skillPromptMessage);
+		this.#deepInterviewPreclaimedCustomInputEpochs.set(skillPromptMessage, deepInterviewUserIntentEpoch);
 		await this.promptCustomMessage(skillPromptMessage);
 		return {
 			name: skill.name,
@@ -6333,7 +6332,8 @@ export class AgentSession {
 		assertImagePlaceholdersHavePayload(expandedText, options?.images);
 		const workflowIntentDiff = options?.synthetic ? null : buildWorkflowIntentDiff(expandedText);
 		const claimsGenuineUserIntent = !options?.synthetic && options?.attribution !== "agent";
-		if (claimsGenuineUserIntent && !this.isStreaming) this.#claimDeepInterviewUserIntent();
+		const deepInterviewUserIntentEpoch =
+			claimsGenuineUserIntent && !this.isStreaming ? this.#claimDeepInterviewUserIntent() : undefined;
 
 		// If streaming, queue via steer() or followUp() based on option
 		if (this.isStreaming) {
@@ -6382,7 +6382,8 @@ export class AgentSession {
 						timestamp: Date.now(),
 					}
 				: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
-			if (claimsGenuineUserIntent) this.#deepInterviewGenuineUserMessages.add(message);
+			if (deepInterviewUserIntentEpoch !== undefined)
+				this.#deepInterviewGenuineUserMessageEpochs.set(message, deepInterviewUserIntentEpoch);
 			await this.refreshGjcSubskillTools();
 
 			if (eagerTodoPrelude?.toolChoice) {
@@ -6485,16 +6486,19 @@ export class AgentSession {
 						.map(content => content.text)
 						.join("");
 		const claimsGenuineUserIntent = message.attribution === "user";
-		const userIntentAlreadyClaimed = this.#deepInterviewPreclaimedCustomInputs.delete(message);
-		if (claimsGenuineUserIntent && !this.isStreaming && !userIntentAlreadyClaimed) {
-			this.#claimDeepInterviewUserIntent();
-		}
+		const preclaimedUserIntentEpoch = this.#deepInterviewPreclaimedCustomInputEpochs.get(message);
+		this.#deepInterviewPreclaimedCustomInputEpochs.delete(message);
+		const deepInterviewUserIntentEpoch =
+			claimsGenuineUserIntent && !this.isStreaming
+				? (preclaimedUserIntentEpoch ?? this.#claimDeepInterviewUserIntent())
+				: preclaimedUserIntentEpoch;
 
 		if (this.isStreaming) {
 			if (!options?.streamingBehavior) {
 				throw new AgentBusyError();
 			}
-			if (userIntentAlreadyClaimed) this.#deepInterviewPreclaimedCustomInputs.add(message);
+			if (preclaimedUserIntentEpoch !== undefined)
+				this.#deepInterviewPreclaimedCustomInputEpochs.set(message, preclaimedUserIntentEpoch);
 			await this.sendCustomMessage(message, {
 				deliverAs: options.streamingBehavior,
 				followUpQueuePolicy: options.followUpQueuePolicy,
@@ -6515,7 +6519,8 @@ export class AgentSession {
 				attribution: message.attribution ?? "agent",
 				timestamp: Date.now(),
 			};
-			if (claimsGenuineUserIntent) this.#deepInterviewGenuineUserMessages.add(customMessage);
+			if (deepInterviewUserIntentEpoch !== undefined)
+				this.#deepInterviewGenuineUserMessageEpochs.set(customMessage, deepInterviewUserIntentEpoch);
 
 			await this.#syncSkillPromptActiveStateSafely(customMessage, true);
 			try {
@@ -6986,8 +6991,8 @@ export class AgentSession {
 		if (images && images.length > 0) content.push(...images);
 		const message = { role: "user" as const, content, attribution: "user" as const, timestamp: Date.now() };
 		if (options?.claimsGenuineUserIntent) {
-			this.#claimDeepInterviewUserIntent();
-			this.#deepInterviewGenuineUserMessages.add(message);
+			const epoch = this.#claimDeepInterviewUserIntent();
+			this.#deepInterviewGenuineUserMessageEpochs.set(message, epoch);
 		}
 		this.agent.steer(message);
 		// A live agent loop polls the steering queue at every tool/turn boundary
@@ -7020,8 +7025,8 @@ export class AgentSession {
 		if (images && images.length > 0) content.push(...images);
 		const message = { role: "user" as const, content, attribution: "user" as const, timestamp: Date.now() };
 		if (options?.claimsGenuineUserIntent) {
-			this.#claimDeepInterviewUserIntent();
-			this.#deepInterviewGenuineUserMessages.add(message);
+			const epoch = this.#claimDeepInterviewUserIntent();
+			this.#deepInterviewGenuineUserMessageEpochs.set(message, epoch);
 		}
 		this.agent.followUp(message, options?.forceOneAtATime ? { forceOneAtATime: true } : undefined);
 		// When fully idle AND the session is in a resumable assistant-ended state,
@@ -7186,10 +7191,11 @@ export class AgentSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
-		const userIntentAlreadyClaimed = this.#deepInterviewPreclaimedCustomInputs.delete(message);
+		const preclaimedUserIntentEpoch = this.#deepInterviewPreclaimedCustomInputEpochs.get(message);
+		this.#deepInterviewPreclaimedCustomInputEpochs.delete(message);
 		if (appMessage.attribution === "user") {
-			if (!userIntentAlreadyClaimed) this.#claimDeepInterviewUserIntent();
-			this.#deepInterviewGenuineUserMessages.add(appMessage);
+			const epoch = preclaimedUserIntentEpoch ?? this.#claimDeepInterviewUserIntent();
+			this.#deepInterviewGenuineUserMessageEpochs.set(appMessage, epoch);
 		}
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
@@ -9912,8 +9918,8 @@ export class AgentSession {
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 		return true;
 	}
-	#claimDeepInterviewUserIntent(): void {
-		this.#deepInterviewUserIntentEpoch++;
+	#claimDeepInterviewUserIntent(): number {
+		return ++this.#deepInterviewUserIntentEpoch;
 	}
 
 	#deepInterviewAssistantIdentity(message: AssistantMessage): string {

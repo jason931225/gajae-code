@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent, type AgentToolContext } from "@gajae-code/agent-core";
+import { Agent, type AgentEvent, type AgentToolContext } from "@gajae-code/agent-core";
 import type { AssistantMessage } from "@gajae-code/ai";
 import { getBundledModel } from "@gajae-code/ai/models";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
@@ -9,7 +9,7 @@ import { modeStatePath } from "@gajae-code/coding-agent/gjc-runtime/session-layo
 import * as skillState from "@gajae-code/coding-agent/hooks/skill-state";
 import { ensureWorkflowSkillActivationState } from "@gajae-code/coding-agent/hooks/skill-state";
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
-import { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@gajae-code/coding-agent/session/agent-session";
 import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
 import type { ToolSession } from "@gajae-code/coding-agent/tools";
@@ -100,6 +100,56 @@ describe("AgentSession deep-interview continuation", () => {
 			.filter(message => message.role === "developer")
 			.map(message => JSON.stringify(message.content))
 			.filter(content => content.includes("goal is still active and uncleared"));
+	}
+
+	async function emitLifecycleAndWait(
+		event: AgentEvent,
+		matches: (event: AgentSessionEvent) => boolean,
+	): Promise<void> {
+		const observed = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe(emitted => {
+			if (matches(emitted)) observed.resolve();
+		});
+		session.agent.emitExternalEvent(event);
+		await observed.promise;
+		unsubscribe();
+	}
+
+	async function deliverQueuedUserTurn(
+		message: Extract<AgentEvent, { type: "message_start" }>["message"],
+	): Promise<void> {
+		await emitLifecycleAndWait(
+			{ type: "message_start", message },
+			event => event.type === "message_start" && event.message === message,
+		);
+		await emitLifecycleAndWait({ type: "turn_start" }, event => event.type === "turn_start");
+	}
+
+	async function emitTerminalStop(assistant: AssistantMessage): Promise<void> {
+		await emitLifecycleAndWait(
+			{ type: "message_end", message: assistant },
+			event => event.type === "message_end" && event.message === assistant,
+		);
+		await emitLifecycleAndWait(
+			{ type: "agent_end", messages: [assistant] },
+			event => event.type === "agent_end" && event.messages[0] === assistant,
+		);
+		await session.waitForIdle();
+	}
+
+	async function emitTerminalStopAfterDeepInterviewCheck(assistant: AssistantMessage): Promise<void> {
+		const checked = Promise.withResolvers<void>();
+		const buildSkillStopOutput = skillState.buildSkillStopOutput;
+		vi.spyOn(skillState, "buildSkillStopOutput").mockImplementation(async options => {
+			try {
+				return await buildSkillStopOutput(options);
+			} finally {
+				checked.resolve();
+			}
+		});
+		await emitTerminalStop(assistant);
+		await checked.promise;
+		await session.waitForIdle();
 	}
 
 	it("continues when the model stops during an active interview", async () => {
@@ -200,6 +250,46 @@ describe("AgentSession deep-interview continuation", () => {
 		// The queued user message owns one continuation; the later deep-interview stop owns the other.
 		expect(continueSpy).toHaveBeenCalledTimes(4);
 		expect(developerReminders()).toHaveLength(3);
+	});
+
+	it("delivers preclaimed steering messages in order without continuing between their turns", async () => {
+		await activateWorkflow("deep-interview");
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		await session.steer("steer A");
+		await session.steer("steer B");
+		const [first, second] = session.agent.snapshotSteering();
+		if (!first || !second) throw new Error("Expected two queued steering messages");
+
+		await deliverQueuedUserTurn(first);
+		expect(session.getQueuedMessages().steering).toEqual(["steer B"]);
+		await emitTerminalStopAfterDeepInterviewCheck({ ...createAssistantMessage("A stopped."), timestamp: 1 });
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(developerReminders()).toHaveLength(0);
+
+		await deliverQueuedUserTurn(second);
+		expect(session.getQueuedMessages().steering).toEqual([]);
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(developerReminders()).toHaveLength(0);
+	});
+
+	it("delivers preclaimed follow-up messages in order without continuing between their turns", async () => {
+		await activateWorkflow("deep-interview");
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		await session.followUp("follow-up A");
+		await session.followUp("follow-up B");
+		const [first, second] = session.agent.snapshotFollowUp();
+		if (!first || !second) throw new Error("Expected two queued follow-up messages");
+
+		await deliverQueuedUserTurn(first);
+		expect(session.getQueuedMessages().followUp).toEqual(["follow-up B"]);
+		await emitTerminalStopAfterDeepInterviewCheck({ ...createAssistantMessage("A stopped."), timestamp: 1 });
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(developerReminders()).toHaveLength(0);
+
+		await deliverQueuedUserTurn(second);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(developerReminders()).toHaveLength(0);
 	});
 
 	it("never grants workspace-controlled workflow state developer authority", async () => {

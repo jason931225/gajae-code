@@ -1116,10 +1116,15 @@ export class WorkerIntegrationRequestScheduler {
 
 	#start(): void {
 		this.#pending = false;
-		// Isolate request rejections so flush() can never reject or deadlock: the
-		// request is expected to handle/log its own errors, but a throwing generic
-		// request must still clear #inFlight and drain any trailing pending run.
-		this.#inFlight = this.request()
+		// Invoke synchronously so enqueue retains its existing single-flight timing,
+		// while converting a synchronous generic request throw into a settled promise.
+		let request: Promise<void>;
+		try {
+			request = this.request();
+		} catch {
+			request = Promise.resolve();
+		}
+		this.#inFlight = request
 			.catch(() => {})
 			.finally(() => {
 				this.#inFlight = undefined;
@@ -1475,6 +1480,7 @@ export class AgentSession {
 
 	#turnIndex = 0;
 	#workerIntegrationScheduler: WorkerIntegrationRequestScheduler;
+	#workerIntegrationRequestedForTurn = false;
 	// First-party internal before-agent-start contributors (not user hooks).
 	#beforeAgentStartContributors: BeforeAgentStartContributor[] = [];
 
@@ -1885,8 +1891,7 @@ export class AgentSession {
 			// Worker integration is first-party lifecycle persistence, not an extension
 			// hook. Make it durable before publishing the terminal boundary while user
 			// extension delivery remains asynchronous.
-			this.#requestWorkerIntegrationAttempt();
-			await this.#flushWorkerIntegrationAttempt();
+			await this.#flushWorkerIntegrationForAgentEnd();
 			// Persist before notifying synchronous subscribers: a subscriber may start a
 			// successor prompt from agent_end, whose running state must serialize after
 			// this terminal boundary rather than be overwritten by it.
@@ -2585,7 +2590,6 @@ export class AgentSession {
 	#queuedExtensionEvents: Promise<void> = Promise.resolve();
 
 	#queueExtensionEvent(event: AgentSessionEvent, workerIntegrationSettled = false): Promise<void> {
-		if (event.type === "turn_end") this.#requestWorkerIntegrationAttempt();
 		this.#queuedExtensionEventCount++;
 		const emit = async () => {
 			await this.#emitExtensionEvent(event, workerIntegrationSettled);
@@ -2635,6 +2639,12 @@ export class AgentSession {
 				void this.#queueExtensionEvent(event);
 			}
 			return;
+		}
+		if (event.type === "turn_start") {
+			this.#workerIntegrationRequestedForTurn = false;
+		} else if (event.type === "turn_end" && !this.#workerIntegrationRequestedForTurn) {
+			this.#workerIntegrationRequestedForTurn = true;
+			this.#requestWorkerIntegrationAttempt();
 		}
 		// A maintenance agent_end is an internal checkpoint only while another
 		// continuation will follow. An aborted maintenance run is its terminal
@@ -4204,11 +4214,21 @@ export class AgentSession {
 		await this.#workerIntegrationScheduler.flush();
 	}
 
+	async #flushWorkerIntegrationForAgentEnd(): Promise<void> {
+		if (!this.#workerIntegrationRequestedForTurn) {
+			this.#requestWorkerIntegrationAttempt();
+		}
+		try {
+			await this.#flushWorkerIntegrationAttempt();
+		} finally {
+			this.#workerIntegrationRequestedForTurn = false;
+		}
+	}
+
 	/** Emit extension events based on session events */
 	async #emitExtensionEvent(event: AgentSessionEvent, workerIntegrationSettled = false): Promise<void> {
-		if (event.type === "turn_end") this.#requestWorkerIntegrationAttempt();
 		if (event.type === "agent_end" && !workerIntegrationSettled) {
-			await this.#flushWorkerIntegrationAttempt();
+			await this.#flushWorkerIntegrationForAgentEnd();
 		}
 		if (!this.#extensionRunner) return;
 		if (event.type === "agent_start") {

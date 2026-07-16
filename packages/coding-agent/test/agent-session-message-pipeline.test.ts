@@ -755,6 +755,8 @@ describe("AgentSession message pipeline", () => {
 	it("holds prompt settlement until worker integration is durable", async () => {
 		const integrationStarted = Promise.withResolvers<void>();
 		const releaseIntegration = Promise.withResolvers<void>();
+		let integrationRequests = 0;
+		let failIntegration = false;
 		const model: Model = {
 			id: "worker-integration-model",
 			name: "worker-integration-model",
@@ -784,9 +786,11 @@ describe("AgentSession message pipeline", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: { getApiKey: async () => "test-key" } as never,
-			workerIntegrationRequest: async () => {
+			workerIntegrationRequest: () => {
+				integrationRequests++;
+				if (failIntegration) throw new Error("worker integration failed");
 				integrationStarted.resolve();
-				await releaseIntegration.promise;
+				return releaseIntegration.promise;
 			},
 		});
 		sessions.push(session);
@@ -805,6 +809,19 @@ describe("AgentSession message pipeline", () => {
 		releaseIntegration.resolve();
 		await prompt;
 		expect(events.filter(event => event.type === "agent_end")).toHaveLength(1);
+		expect(integrationRequests).toBe(1);
+
+		failIntegration = true;
+		await session.prompt("again");
+		await session.waitForIdle();
+		expect(events.filter(event => event.type === "agent_end")).toHaveLength(2);
+		expect(integrationRequests).toBe(2);
+
+		failIntegration = false;
+		await session.prompt("third time");
+		await session.waitForIdle();
+		expect(events.filter(event => event.type === "agent_end")).toHaveLength(3);
+		expect(integrationRequests).toBe(3);
 	});
 	it("drains deferred agent_end extension delivery before session shutdown", async () => {
 		const extensionStarted = Promise.withResolvers<void>();

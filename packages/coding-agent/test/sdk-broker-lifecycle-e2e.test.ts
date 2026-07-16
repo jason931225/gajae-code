@@ -1263,7 +1263,7 @@ test("broker preserves ready-only lifecycle metadata without canonical marker au
 	}
 }, 30_000);
 
-test("broker replays a completed base metadata cleanup receipt and rejects a replaced ready sibling after marker loss", async () => {
+test("broker replays an unmarked base metadata cleanup receipt and rejects a replaced ready sibling after marker loss", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-legacy-metadata-replay-"));
 	const agentDir = path.join(root, "agent");
 	const stateRoot = path.join(root, ".gjc", "state");
@@ -1307,7 +1307,6 @@ test("broker replays a completed base metadata cleanup receipt and rejects a rep
 						},
 						metadataAttempt: 1,
 						plannedMetadataPath: plannedPath,
-						metadataCompleted: true,
 					},
 				},
 			},
@@ -1417,7 +1416,6 @@ test("broker replays a completed base metadata cleanup receipt and rejects a rep
 							sha256: createHash("sha256").update(mismatchedBytes).digest("hex"),
 						},
 						plannedMetadataPath: mismatchedPlannedPath,
-						metadataCompleted: true,
 					},
 				},
 			},

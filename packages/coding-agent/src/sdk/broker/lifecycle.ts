@@ -1284,8 +1284,9 @@ function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | 
 		if (activeMarker) return undefined;
 		activeMarker = current.capture;
 	}
-	if (!activeMarker && cleanup.metadataCompleted !== true) return undefined;
-	// A completed legacy marker can be absent; bind its ready sibling to the persisted canonical marker digest.
+	const markerCompleted = !activeMarker;
+	// Legacy receipts can crash after exact marker unlink and before recording metadataCompleted.
+	// With every authorized marker candidate absent, only the persisted marker digest may bind a ready sibling.
 	let marker: EffectMarker | undefined;
 	if (activeMarker) {
 		try {
@@ -1309,14 +1310,9 @@ function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | 
 			return undefined;
 		}
 		if (marker && !sameEffectMarker(marker, readyMarker)) return undefined;
-		if (
-			!marker &&
-			cleanup.metadataCompleted === true &&
-			createHash("sha256").update(canonicalJson(readyMarker)).digest("hex") !== persistedIdentity.sha256
-		)
+		if (!marker && createHash("sha256").update(canonicalJson(readyMarker)).digest("hex") !== persistedIdentity.sha256)
 			return undefined;
 	}
-	if (!marker && !readyMarker && cleanup.metadataCompleted !== true) return undefined;
 
 	return {
 		phase: "lifecycle",
@@ -1333,7 +1329,7 @@ function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | 
 				attempt: cleanup.metadataAttempt ?? 1,
 				plannedPath,
 				...(detachedPath ? { detachedPath } : {}),
-				...(!activeMarker && cleanup.metadataCompleted === true ? { completed: true as const } : {}),
+				...(markerCompleted ? { completed: true as const } : {}),
 			},
 			...(ready.kind === "present"
 				? [

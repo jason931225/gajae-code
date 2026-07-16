@@ -10,9 +10,6 @@ import {
 	buildDiscoverableToolSearchIndex,
 	type DiscoverableTool,
 	type DiscoverableToolSearchIndex,
-	formatDiscoverableToolServerSummary,
-	searchDiscoverableTools,
-	summarizeDiscoverableTools,
 } from "../tool-discovery/tool-index";
 import { renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
@@ -166,13 +163,8 @@ function isDiscoveryEnabled(session: ToolSession): boolean {
 	return session.isMCPDiscoveryEnabled?.() ?? false;
 }
 
-export function renderSearchToolBm25Description(discoverableTools: DiscoverableTool[] = []): string {
-	const summary = summarizeDiscoverableTools(discoverableTools);
-	return prompt.render(searchToolBm25Description, {
-		discoverableMCPToolCount: summary.toolCount,
-		discoverableMCPServerSummaries: summary.servers.map(formatDiscoverableToolServerSummary),
-		hasDiscoverableMCPServers: summary.servers.length > 0,
-	});
+export function renderSearchToolBm25Description(): string {
+	return prompt.render(searchToolBm25Description, {});
 }
 
 function renderMatchLines(match: SearchToolBm25Match, theme: Theme): string[] {
@@ -209,9 +201,7 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 	readonly name = "search_tool_bm25";
 	readonly label = "SearchTools";
 	readonly loadMode = "essential";
-	get description(): string {
-		return renderSearchToolBm25Description(getDiscoverableToolsForDescription(this.session));
-	}
+	readonly description = renderSearchToolBm25Description();
 	readonly parameters = searchToolBm25Schema;
 	readonly strict = true;
 

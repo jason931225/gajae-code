@@ -109,6 +109,13 @@ describe("SearchToolBm25Tool", () => {
 		]),
 	];
 
+	it("uses a static description independent of the discoverable catalog", () => {
+		const empty = new SearchToolBm25Tool(createSession([]));
+		const populated = new SearchToolBm25Tool(createSession(discoverableTools));
+		expect(populated.description).toBe(empty.description);
+		expect(populated.description).not.toContain("Total discoverable tools available");
+	});
+
 	it("uses the session-provided cached search index during execution", async () => {
 		let rawToolsCalls = 0;
 		let searchIndexCalls = 0;

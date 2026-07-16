@@ -95,7 +95,7 @@ describe("provider onboarding wizard", () => {
 		]);
 	});
 
-	it("masks literal credentials and clears them after submission", () => {
+	it("preserves literal credentials for force confirmation and clears them on completion", () => {
 		const submissions: CustomProviderWizardSubmit[] = [];
 		const wizard = new CustomProviderWizardComponent(
 			input => submissions.push(input),
@@ -115,12 +115,18 @@ describe("provider onboarding wizard", () => {
 		typeText(wizard, "literal-model");
 		wizard.handleInput("\n");
 		wizard.handleInput("\n");
+		wizard.setSubmitError("Provider setup failed: Provider 'literal-provider' already exists.");
+		wizard.handleInput("\x1b[B");
 		wizard.handleInput("\n");
 
 		expect(submissions).toEqual([
-			expect.objectContaining({ apiKey: "literal-secret", apiKeyEnv: undefined }),
-			expect.objectContaining({ apiKey: "", apiKeyEnv: undefined }),
+			expect.objectContaining({ apiKey: "literal-secret", apiKeyEnv: undefined, force: false }),
+			expect.objectContaining({ apiKey: "literal-secret", apiKeyEnv: undefined, force: true }),
 		]);
+
+		wizard.complete();
+		wizard.handleInput("\n");
+		expect(submissions.at(-1)).toEqual(expect.objectContaining({ apiKey: "", force: true }));
 	});
 
 	it("requires explicit force confirmation before overwrite", () => {

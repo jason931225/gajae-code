@@ -82,6 +82,7 @@ export class CustomProviderWizardComponent extends Container {
 	handleInput(keyData: string): void {
 		if (matchesAppInterrupt(keyData)) {
 			if (this.#step === "compatibility") {
+				this.#clearLiteralCredential();
 				this.#onCancel();
 				return;
 			}
@@ -315,8 +316,16 @@ export class CustomProviderWizardComponent extends Container {
 				.filter(Boolean),
 			force,
 		};
-		if (this.#state.credentialSource === "literal") this.#state.credential = "";
+
 		return input;
+	}
+
+	complete(): void {
+		this.#clearLiteralCredential();
+	}
+
+	#clearLiteralCredential(): void {
+		if (this.#state.credentialSource === "literal") this.#state.credential = "";
 	}
 
 	#moveSelection(delta: number): void {

@@ -968,6 +968,7 @@ export class SelectorController {
 					await this.ctx.session.modelRegistry.refresh("offline");
 					await this.ctx.notifyConfigChanged?.();
 					this.ctx.showStatus(formatProviderSetupResult(result));
+					wizard.complete();
 					done();
 					this.ctx.ui.requestRender();
 				} catch (err) {

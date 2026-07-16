@@ -26,7 +26,7 @@ export class ThemeSelectorComponent extends Container {
 			description: name === currentTheme ? "(current)" : undefined,
 		}));
 
-		const framed = FramedSelect(undefined, themeItems, {
+		const framed = FramedSelect("Select theme", themeItems, {
 			maxVisible: 10,
 			selectedValue: currentTheme,
 			onSelect: item => onSelect(item.value),

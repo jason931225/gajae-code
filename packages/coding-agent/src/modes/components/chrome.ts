@@ -1,4 +1,4 @@
-import { type Component, Container, type SelectItem, SelectList, Spacer, Text } from "@gajae-code/tui";
+import { Container, type SelectItem, SelectList, Text } from "@gajae-code/tui";
 import { getSelectListTheme, theme } from "../../modes/theme/theme";
 import { DynamicBorder } from "./dynamic-border";
 
@@ -37,19 +37,4 @@ export function FramedSelect(
 	container.addChild(selectList);
 	container.addChild(new DynamicBorder());
 	return { container, selectList };
-}
-
-/** Build the common settings submenu anatomy around an interactive control. */
-export function Submenu(title: string, description: string, control: Component, hint: string): Container {
-	const container = new Container();
-	container.addChild(new Text(theme.bold(theme.fg("accent", title)), 0, 0));
-	if (description) {
-		container.addChild(new Spacer(1));
-		container.addChild(new Text(theme.fg("muted", description), 0, 0));
-	}
-	container.addChild(new Spacer(1));
-	container.addChild(control);
-	container.addChild(new Spacer(1));
-	container.addChild(new Text(theme.fg("dim", hint), 0, 0));
-	return container;
 }

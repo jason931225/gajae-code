@@ -450,7 +450,8 @@ function safeThinkingSignature(signature: string | undefined): string | undefine
 	return signature;
 }
 
-function safeThinkingText(content: ThinkingContent): string | undefined {
+function safeThinkingText(content: ThinkingContent, api: AssistantMessage["api"]): string | undefined {
+	if (api === "openai-responses" && content.provenance === undefined) return undefined;
 	if (content.provenance === "raw") return undefined;
 	if (content.provenance === "mixed") return content.summaryText;
 	if (content.provenance === "summary") return content.summaryText ?? content.thinking;
@@ -476,7 +477,7 @@ function encodeContentBlocks(message: AssistantMessage): Record<string, unknown>
 				blocks.push({ type: "text", text: c.text });
 				break;
 			case "thinking": {
-				const thinking = safeThinkingText(c);
+				const thinking = safeThinkingText(c, message.api);
 				if (thinking === undefined) break;
 				const b: Record<string, unknown> = { type: "thinking", thinking };
 				const sig = safeThinkingSignature(c.thinkingSignature);

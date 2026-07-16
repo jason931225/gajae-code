@@ -378,11 +378,8 @@ describe("anthropic-messages serialized Responses signature privacy", () => {
 		expect(encodedBytes).not.toContain(RAW_SENTINEL);
 		expect(encodedBytes).not.toContain(RESPONSES_REASONING_SIGNATURE);
 		expect(encodedBytes).toContain(SUMMARY_SENTINEL);
-		expect(encodedBytes).toContain(OPAQUE_SIGNATURE);
-		expect(encoded.content).toEqual([
-			{ type: "thinking", thinking: SUMMARY_SENTINEL },
-			{ type: "thinking", thinking: "provider thought", signature: OPAQUE_SIGNATURE },
-		]);
+		expect(encodedBytes).not.toContain(OPAQUE_SIGNATURE);
+		expect(encoded.content).toEqual([{ type: "thinking", thinking: SUMMARY_SENTINEL }]);
 		const providerMessage: AssistantMessage = {
 			...message,
 			content: [{ type: "thinking", thinking: "provider thought", thinkingSignature: OPAQUE_SIGNATURE }],

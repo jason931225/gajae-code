@@ -417,7 +417,8 @@ function buildUsage(message: AssistantMessage): Record<string, unknown> {
 	return usage;
 }
 
-function safeThinkingText(content: ThinkingContent): string | undefined {
+function safeThinkingText(content: ThinkingContent, api: AssistantMessage["api"]): string | undefined {
+	if (api === "openai-responses" && content.provenance === undefined) return undefined;
 	if (content.provenance === "raw") return undefined;
 	if (content.provenance === "mixed") return content.summaryText;
 	if (content.provenance === "summary") return content.summaryText ?? content.thinking;
@@ -449,7 +450,7 @@ function flattenAssistant(message: AssistantMessage): {
 				text += part.text;
 				break;
 			case "thinking": {
-				const thinking = safeThinkingText(part);
+				const thinking = safeThinkingText(part, message.api);
 				if (thinking !== undefined) reasoning += thinking;
 				break;
 			}

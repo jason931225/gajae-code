@@ -173,7 +173,8 @@ function isSerializedResponsesReasoningItem(signature: string): boolean {
  * raw-only blocks, retain only the displayable summary for mixed blocks, and
  * never forward a serialized Responses reasoning item as a signature.
  */
-function sanitizeThinking(content: ThinkingContent): ThinkingContent | undefined {
+function sanitizeThinking(content: ThinkingContent, api: AssistantMessage["api"]): ThinkingContent | undefined {
+	if (api === "openai-responses" && content.provenance === undefined) return undefined;
 	if (content.provenance === "raw") return undefined;
 
 	let thinking: string;
@@ -200,6 +201,7 @@ function sanitizeMessage(message: AssistantMessage): AssistantMessage {
 			continue;
 		}
 		const needsSanitizing =
+			(message.api === "openai-responses" && part.provenance === undefined) ||
 			part.provenance !== undefined ||
 			part.rawText !== undefined ||
 			(part.thinkingSignature !== undefined && isSerializedResponsesReasoningItem(part.thinkingSignature));
@@ -207,7 +209,7 @@ function sanitizeMessage(message: AssistantMessage): AssistantMessage {
 			content.push(part);
 			continue;
 		}
-		const sanitized = sanitizeThinking(part);
+		const sanitized = sanitizeThinking(part, message.api);
 		changed = true;
 		if (sanitized !== undefined) content.push(sanitized);
 	}
@@ -227,7 +229,12 @@ interface BufferedThinkingEvent {
 }
 
 function isFinalSafeThinking(partial: AssistantMessage, contentIndex: number): boolean {
-	return partial.content[contentIndex]?.type === "thinking" && !hasRawOrMixedThinking(partial, contentIndex);
+	const content = partial.content[contentIndex];
+	return (
+		content?.type === "thinking" &&
+		!(partial.api === "openai-responses" && content.provenance === undefined) &&
+		!hasRawOrMixedThinking(partial, contentIndex)
+	);
 }
 
 function maskBufferedThinking(message: AssistantMessage, contentIndexes: ReadonlySet<number>): AssistantMessage {

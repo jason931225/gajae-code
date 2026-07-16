@@ -60,7 +60,7 @@ describe("routing adversarial contract probes", () => {
 		expect(effectiveFallbackDelay(100, 1_000, 1, THREE_HOURS_MS, () => 1)).toBe(THREE_HOURS_MS);
 	});
 
-	test("retries the rotated entry before advancing to the next chain entry", () => {
+	test("charges rotated-entry retries against the chain-wide attempt budget", () => {
 		const controller = new FallbackChainController(
 			{ role: "default", entries: ["xai/grok", "anthropic/claude"], origin: "test", explicitHead: true },
 			1,
@@ -69,16 +69,49 @@ describe("routing adversarial contract probes", () => {
 		expect(controller.onAttemptFailure("quota", "429")).toBe("advance");
 		expect(controller.currentSelector()).toBe("anthropic/claude");
 
-		// A rotated credential changes the advance into a fresh retry of the failed entry.
 		expect(controller.restorePreviousEntryForRetry()).toBe(true);
 		expect(controller.currentSelector()).toBe("xai/grok");
 		expect(controller.attemptsUsed).toBe(0);
-		controller.onAttemptStarted();
-		expect(controller.onAttemptFailure("quota", "429 again")).toBe("advance");
-		expect(controller.currentSelector()).toBe("anthropic/claude");
+		expect(controller.totalAttemptsUsed).toBe(1);
+		expect(controller.tried).toHaveLength(1);
 
 		controller.onAttemptStarted();
-		expect(controller.onAttemptFailure("quota", "chain exhausted")).toBe("exhausted");
+		expect(controller.onAttemptFailure("quota", "429 again")).toBe("exhausted");
+		expect(controller.totalAttemptsUsed).toBe(2);
+		expect(controller.tried).toHaveLength(2);
+		expect(controller.currentSelector()).toBeUndefined();
+	});
+
+	test("caps multiple credential rotations at the configured chain budget", () => {
+		const controller = new FallbackChainController(
+			{
+				role: "default",
+				entries: ["xai/grok", "anthropic/claude", "openai/gpt"],
+				origin: "test",
+				explicitHead: true,
+			},
+			1,
+		);
+
+		for (let attempt = 1; attempt <= 3; attempt += 1) {
+			controller.onAttemptStarted();
+			const outcome = controller.onAttemptFailure("quota", `429 credential ${attempt}`);
+			expect(controller.totalAttemptsUsed).toBe(attempt);
+			expect(controller.tried).toHaveLength(attempt);
+			if (attempt < 3) {
+				expect(outcome).toBe("advance");
+				expect(controller.restorePreviousEntryForRetry()).toBe(true);
+				expect(controller.attemptsUsed).toBe(0);
+			} else {
+				expect(outcome).toBe("exhausted");
+			}
+		}
+
+		expect(controller.currentSelector()).toBeUndefined();
+		controller.onAttemptStarted();
+		expect(controller.onAttemptFailure("quota", "budget already exhausted")).toBe("exhausted");
+		expect(controller.totalAttemptsUsed).toBe(3);
+		expect(controller.tried).toHaveLength(3);
 	});
 
 	test("invalidates availability for every auth and environment mutation while preserving identity between mutations", () => {

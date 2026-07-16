@@ -2,9 +2,10 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@gajae-code/agent-core";
 import { getOAuthProviders } from "@gajae-code/ai/utils/oauth";
 import type { OAuthProvider } from "@gajae-code/ai/utils/oauth/types";
-import type { Component, OverlayHandle } from "@gajae-code/tui";
+import type { Component, OverlayHandle, SlashCommand } from "@gajae-code/tui";
 import { Input, isPetMode, Loader, Spacer, Text } from "@gajae-code/tui";
 import { getAgentDbPath, getProjectDir, logger, VERSION } from "@gajae-code/utils";
+import { type AppKeybinding, formatKeyHints } from "../../config/keybindings";
 import {
 	activateModelProfile,
 	type MaterializeModelProfileForDeletionResult,
@@ -108,6 +109,11 @@ import {
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AssistantMessageComponent } from "../components/assistant-message";
+import {
+	type CommandPaletteAction,
+	CommandPaletteComponent,
+	type CommandPaletteEntry,
+} from "../components/command-palette";
 import {
 	CustomModelPresetWizardComponent,
 	type CustomModelPresetWizardSubmit,
@@ -726,6 +732,52 @@ export class SelectorController {
 		this.ctx.ui.requestRender();
 	}
 
+	showCommandPalette(
+		commands: SlashCommand[],
+		actions: CommandPaletteAction[],
+		executeSlashCommand: (name: string) => Promise<void>,
+	): void {
+		const seenCommands = new Set<string>();
+		const entries: CommandPaletteEntry[] = [
+			...actions.map(action => ({
+				id: `action:${action.id}`,
+				label: action.label,
+				description: action.id,
+				keybinding: formatKeyHints(this.ctx.keybindings.getKeys(action.id as AppKeybinding)) || undefined,
+				searchText: action.id,
+				handler: action.handler,
+			})),
+			...commands
+				.filter(command => {
+					if (seenCommands.has(command.name)) return false;
+					seenCommands.add(command.name);
+					return true;
+				})
+				.map(command => ({
+					id: `command:${command.name}`,
+					label: `/${command.name}`,
+					description: command.description ?? "Slash command",
+					searchText: command.name,
+					handler: () => executeSlashCommand(command.name),
+				})),
+		];
+
+		this.showSelector(done => {
+			const selector = new CommandPaletteComponent(
+				entries,
+				entry => {
+					done();
+					void Promise.resolve()
+						.then(() => entry.handler?.())
+						.catch(error => {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+						});
+				},
+				done,
+			);
+			return { component: selector, focus: selector };
+		});
+	}
 	showProviderOnboarding(): void {
 		this.showSelector(done => {
 			const selector = new ProviderOnboardingSelectorComponent(

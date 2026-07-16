@@ -88,6 +88,7 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-colo
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
+import type { CommandPaletteAction } from "./components/command-palette";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import type { EvalExecutionComponent } from "./components/eval-execution";
@@ -2853,6 +2854,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	// Selector handling
+	showCommandPalette(
+		commands: SlashCommand[],
+		actions: CommandPaletteAction[],
+		executeSlashCommand: (name: string) => Promise<void>,
+	): void {
+		this.#selectorController.showCommandPalette(commands, actions, executeSlashCommand);
+	}
+
 	showSettingsSelector(): void {
 		this.#selectorController.showSettingsSelector();
 	}

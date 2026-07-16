@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@gajae-code/agent-core";
 import type { CompactionOutcome } from "@gajae-code/agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, UsageReport } from "@gajae-code/ai";
-import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@gajae-code/tui";
+import type { Component, Container, EditorTheme, Loader, SlashCommand, Spacer, Text, TUI } from "@gajae-code/tui";
 import type { KeybindingsManager } from "../config/keybindings";
 import type { Settings } from "../config/settings";
 import type {
@@ -22,6 +22,7 @@ import type { CredentialAutoImportOptions } from "../setup/credential-auto-impor
 import type { LspStartupServerInfo } from "../tools";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
+import type { CommandPaletteAction } from "./components/command-palette";
 import type { CustomEditor } from "./components/custom-editor";
 import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { PetMode } from "./components/gajae-pet-widget";
@@ -286,6 +287,11 @@ export interface InteractiveModeContext {
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 
 	// Selector handling
+	showCommandPalette(
+		commands: SlashCommand[],
+		actions: CommandPaletteAction[],
+		executeSlashCommand: (name: string) => Promise<void>,
+	): void;
 	showSettingsSelector(): void;
 	showThemeSelector(): void;
 	showPetSelector(): void;

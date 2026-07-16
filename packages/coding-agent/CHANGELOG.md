@@ -1,8 +1,12 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- Palette slash commands now run only from an empty composer; drafts are never touched.
+
 ### Added
 - Double-Esc now clears an idle draft after a confirmation hint, saving it to prompt history; from an empty editor it follows the configured tree, branch, or disabled action.
+- Added a searchable command palette with direct action dispatch; slash commands run only from an empty composer, and drafts are never touched.
 
 ### Fixed
 

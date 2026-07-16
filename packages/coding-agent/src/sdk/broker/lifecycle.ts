@@ -1024,6 +1024,130 @@ function validateLifecycleCleanupFile(root: string, id: string, file: LifecycleC
 	return cleanupIdentity(file.identity) !== undefined;
 }
 
+function lifecycleCleanupCandidates(file: LifecycleCleanupFile): string[] {
+	return [file.path, file.detachedPath, file.plannedPath].filter(
+		(value, index, values): value is string => typeof value === "string" && values.indexOf(value) === index,
+	);
+}
+
+function lifecycleMetadataReplayFiles(cleanup: CleanupEvidence): LifecycleCleanupFile[] | undefined {
+	if (cleanup.lifecycleDeleteMetadata !== true) return undefined;
+	return cleanup.lifecycleFiles?.length ? cleanup.lifecycleFiles : undefined;
+}
+
+function absentLifecyclePath(file: string): boolean {
+	try {
+		fsSync.lstatSync(file);
+		return false;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT";
+	}
+}
+
+function isLifecycleCleanupResponse(value: LifecycleFileCapture | BrokerResponse | undefined): value is BrokerResponse {
+	return typeof value === "object" && value !== null && "ok" in value;
+}
+
+function validateLifecycleMetadataReplay(cleanup: CleanupEvidence): BrokerResponse | undefined {
+	const files = lifecycleMetadataReplayFiles(cleanup);
+	if (!files) return undefined;
+	const root = path.resolve(cleanup.metadataRoot!);
+	const id = cleanup.sessionId!;
+	const markerPath = lifecycleMarkerPath(root, id);
+	const readyPath = lifecycleReadyPath(root, id);
+	const authorities = new Set<string>();
+	const candidates = new Set<string>();
+	for (const file of files) {
+		const authority = path.resolve(file.path);
+		if ((authority !== markerPath && authority !== readyPath) || authorities.has(authority))
+			return fail("terminal_uncertain", "Lifecycle metadata replay contains duplicate or non-canonical authority.");
+		authorities.add(authority);
+		for (const candidate of lifecycleCleanupCandidates(file)) {
+			const resolved = path.resolve(candidate);
+			if (candidates.has(resolved))
+				return fail("terminal_uncertain", "Lifecycle metadata replay contains duplicate candidate authority.");
+			candidates.add(resolved);
+		}
+	}
+	const markerEntry = files.find(file => path.resolve(file.path) === markerPath);
+	const readyEntry = files.find(file => path.resolve(file.path) === readyPath);
+	const capture = (file: string): LifecycleFileCapture | undefined | BrokerResponse => {
+		try {
+			return captureLifecycleFile(file, true);
+		} catch {
+			return fail("terminal_uncertain", "Lifecycle metadata sibling could not be safely inspected.");
+		}
+	};
+	const marker = capture(markerPath);
+	const ready = capture(readyPath);
+	if (isLifecycleCleanupResponse(marker)) return marker;
+	if (isLifecycleCleanupResponse(ready)) return ready;
+	if (marker && (!markerEntry || !sameLifecycleCleanupIdentity(marker.identity, markerEntry.identity)))
+		return fail("terminal_uncertain", "Lifecycle marker sibling lacks exact replay authority.");
+	if (ready && (!readyEntry || !sameLifecycleCleanupIdentity(ready.identity, readyEntry.identity)))
+		return fail("terminal_uncertain", "Lifecycle readiness sibling lacks exact replay authority.");
+	for (const file of files) {
+		let activeCandidates = 0;
+		for (const candidate of lifecycleCleanupCandidates(file)) {
+			let current: LifecycleFileCapture | undefined;
+			try {
+				current = captureLifecycleFile(candidate, true);
+			} catch {
+				return fail("terminal_uncertain", "Lifecycle metadata candidate could not be safely inspected.");
+			}
+			if (!current) continue;
+			if (!sameLifecycleCleanupIdentity(current.identity, file.identity))
+				return fail("terminal_uncertain", "Lifecycle metadata candidate lacks exact replay authority.");
+			activeCandidates++;
+		}
+		if (file.completed && activeCandidates > 0)
+			return fail(
+				"terminal_uncertain",
+				"Lifecycle cleanup receipt marks a metadata target complete while a candidate remains.",
+			);
+		if (!file.completed && activeCandidates > 1)
+			return fail("terminal_uncertain", "Lifecycle metadata replay has multiple active candidates.");
+	}
+	if (ready && !markerEntry)
+		return fail("terminal_uncertain", "Lifecycle readiness metadata lacks canonical marker authority.");
+	if (!ready) return undefined;
+	let readyMarker: EffectMarker;
+	try {
+		const value: unknown = JSON.parse(ready.bytes.toString("utf8"));
+		if (!isEffectMarker(value)) throw new Error("invalid ready marker");
+		readyMarker = value;
+	} catch {
+		return fail("terminal_uncertain", "Lifecycle readiness metadata ownership could not be verified.");
+	}
+	if (!markerEntry)
+		return fail("terminal_uncertain", "Lifecycle readiness metadata lacks canonical marker authority.");
+	if (!marker) {
+		if (createHash("sha256").update(canonicalJson(readyMarker)).digest("hex") !== markerEntry.identity.sha256)
+			return fail(
+				"terminal_uncertain",
+				"Lifecycle readiness metadata is not bound to the completed marker authority.",
+			);
+		return undefined;
+	}
+	try {
+		const value: unknown = JSON.parse(marker.bytes.toString("utf8"));
+		if (!isEffectMarker(value) || !sameEffectMarker(value, readyMarker)) throw new Error("mismatched marker");
+	} catch {
+		return fail("terminal_uncertain", "Lifecycle metadata siblings do not share one owner marker.");
+	}
+	return undefined;
+}
+
+function lifecycleMetadataReplayAbsent(cleanup: CleanupEvidence): boolean {
+	const files = lifecycleMetadataReplayFiles(cleanup);
+	if (!files) return true;
+	const root = path.resolve(cleanup.metadataRoot!);
+	const id = cleanup.sessionId!;
+	const required = new Set<string>([lifecycleMarkerPath(root, id), lifecycleReadyPath(root, id)]);
+	for (const file of files) for (const candidate of lifecycleCleanupCandidates(file)) required.add(candidate);
+	return [...required].every(absentLifecyclePath);
+}
+
 /**
  * Base dev persisted metadata cleanup one file at a time. Accept only its
  * identity-bound marker receipt and translate it into the current replay plan.
@@ -1129,6 +1253,7 @@ function legacyMetadataCleanupPlan(cleanup: CleanupEvidence): CleanupEvidence | 
 		phase: "lifecycle",
 		sessionId: cleanup.sessionId,
 		metadataRoot: root,
+		lifecycleDeleteMetadata: true,
 		lifecycleFiles: [
 			{
 				path: metadataPath,
@@ -1167,6 +1292,7 @@ function lifecycleDeleteMetadataCleanupPlan(
 		phase: "lifecycle",
 		sessionId: id,
 		metadataRoot,
+		lifecycleDeleteMetadata: true,
 		lifecycleFiles: files.map(({ metadataPath, metadata }) => ({
 			path: metadataPath,
 			identity: serializeCleanupIdentity({
@@ -1255,15 +1381,17 @@ async function reconcileLifecycleCleanup(
 		cleanup.lifecycleFiles.length === 0
 	)
 		return fail("terminal_uncertain", "Lifecycle cleanup replay lacks immutable identity-bound intent.");
-	let activeCleanup = cleanup;
+	let activeCleanup =
+		cleanup.lifecycleDeleteMetadata === true || completion.ok
+			? { ...cleanup, lifecycleDeleteMetadata: true as const }
+			: cleanup;
+	const metadataReplayValidation = validateLifecycleMetadataReplay(activeCleanup);
+	if (metadataReplayValidation) return metadataReplayValidation;
 	for (let index = 0; index < activeCleanup.lifecycleFiles!.length; index++) {
 		const file = activeCleanup.lifecycleFiles![index];
 		if (!validateLifecycleCleanupFile(activeCleanup.metadataRoot!, activeCleanup.sessionId!, file))
 			return fail("terminal_uncertain", "Lifecycle cleanup replay contains an invalid path authority.");
-		const candidates = [file.path, file.detachedPath, file.plannedPath].filter(
-			(value, candidateIndex, values): value is string =>
-				typeof value === "string" && values.indexOf(value) === candidateIndex,
-		);
+		const candidates = lifecycleCleanupCandidates(file);
 		if (file.completed) {
 			for (const candidate of candidates) {
 				try {
@@ -1363,6 +1491,8 @@ async function reconcileLifecycleCleanup(
 		});
 		lifecycleCleanupHooksForTest.get(broker)?.();
 	}
+	if (!lifecycleMetadataReplayAbsent(activeCleanup))
+		return fail("terminal_uncertain", "Lifecycle metadata replay left an authorized sibling behind.");
 	await syncDirectory(path.join(activeCleanup.metadataRoot!, "sdk"));
 	return completion;
 }

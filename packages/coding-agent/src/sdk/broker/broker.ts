@@ -127,6 +127,8 @@ export type BrokerCleanupEvidence = {
 	plannedTranscriptPath?: string;
 	/** Fully identity-bound startup-failure cleanup plan, persisted before any detach. */
 	lifecycleFiles?: BrokerLifecycleCleanupFile[];
+	/** Delete metadata receipts authorize only the canonical marker/ready sibling pair. */
+	lifecycleDeleteMetadata?: true;
 };
 export type BrokerResponse =
 	| { ok: true; result?: unknown; indexSeq?: number }

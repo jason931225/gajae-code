@@ -1456,10 +1456,9 @@ test("broker rejects a corrupt completed lifecycle cleanup receipt when its read
 		await fs.mkdir(path.dirname(markerPath), { recursive: true });
 		await fs.writeFile(markerPath, canonicalJson(marker));
 		await fs.writeFile(readyPath, canonicalJson(marker));
-		const [markerStat, markerBytes, readyStat, readyBytes] = await Promise.all([
+		const [markerStat, markerBytes, readyBytes] = await Promise.all([
 			fs.stat(markerPath, { bigint: true }),
 			fs.readFile(markerPath),
-			fs.stat(readyPath, { bigint: true }),
 			fs.readFile(readyPath),
 		]);
 		const target = createHash("sha256").update(canonicalJson(request)).digest("hex");
@@ -1497,22 +1496,6 @@ test("broker rejects a corrupt completed lifecycle cleanup receipt when its read
 
 								completed: true,
 							},
-							{
-								path: readyPath,
-								identity: {
-									dev: readyStat.dev.toString(),
-									ino: readyStat.ino.toString(),
-									size: Number(readyStat.size),
-									mtimeNs: readyStat.mtimeNs.toString(),
-									sha256: createHash("sha256").update(readyBytes).digest("hex"),
-								},
-								attempt: 1,
-								plannedPath: path.join(
-									path.dirname(readyPath),
-									`.gjc-delete-ready-${sessionId}.lifecycle.ready.json`,
-								),
-								completed: true,
-							},
 						],
 					},
 				},
@@ -1533,6 +1516,233 @@ test("broker rejects a corrupt completed lifecycle cleanup receipt when its read
 	}
 }, 30_000);
 
+test("broker rejects duplicate lifecycle marker replay authorities without unlinking siblings", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-duplicate-lifecycle-replay-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const sessionId = "duplicate-lifecycle-replay";
+	const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
+	const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
+	const request = { sessionId };
+	const key = "duplicate-lifecycle-replay";
+	let broker: Broker | undefined;
+	try {
+		const marker = { pid: process.pid, effectMarker: "duplicate-replay", incarnation: "duplicate-replay" };
+		await fs.mkdir(path.dirname(markerPath), { recursive: true });
+		await fs.writeFile(markerPath, canonicalJson(marker));
+		await fs.writeFile(readyPath, canonicalJson(marker));
+		const [markerStat, markerBytes, readyBytes] = await Promise.all([
+			fs.stat(markerPath, { bigint: true }),
+			fs.readFile(markerPath),
+			fs.readFile(readyPath),
+		]);
+		const identity = await deriveIdempotencyIdentity(
+			agentDir,
+			"session.delete",
+			key,
+			createHash("sha256").update(canonicalJson(request)).digest("hex"),
+		);
+		const ledger = await new LifecycleLedger(agentDir).open();
+		await ledger.begin(
+			identity,
+			createHash("sha256")
+				.update(canonicalJson({ operation: "session.delete", input: request }))
+				.digest("hex"),
+		);
+		const cleanupFile = (plannedPath: string) => ({
+			path: markerPath,
+			identity: {
+				dev: markerStat.dev.toString(),
+				ino: markerStat.ino.toString(),
+				size: Number(markerStat.size),
+				mtimeNs: markerStat.mtimeNs.toString(),
+				sha256: createHash("sha256").update(markerBytes).digest("hex"),
+			},
+			attempt: 1,
+			plannedPath,
+		});
+		await ledger.transition(identity, "effect_started", {
+			response: {
+				ok: false,
+				error: {
+					code: "cleanup_pending",
+					message: "Lifecycle cleanup is pending.",
+					cleanup: {
+						phase: "lifecycle",
+						lifecycleDeleteMetadata: true,
+						sessionId,
+						metadataRoot: stateRoot,
+						lifecycleFiles: [
+							cleanupFile(path.join(stateRoot, "sdk", ".gjc-delete-one")),
+							cleanupFile(path.join(stateRoot, "sdk", ".gjc-delete-two")),
+						],
+					},
+				},
+			},
+		});
+		broker = new Broker({ agentDir });
+		await broker.start();
+		await expect(broker.handleRequest("session.delete", request, key)).resolves.toMatchObject({
+			ok: false,
+			error: { code: "terminal_uncertain" },
+		});
+		await expect(fs.readFile(markerPath)).resolves.toEqual(markerBytes);
+		await expect(fs.readFile(readyPath)).resolves.toEqual(readyBytes);
+	} finally {
+		await broker?.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 30_000);
+test("broker rejects a ready-only lifecycle replay entry without marker authority", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-ready-only-replay-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const sessionId = "ready-only-lifecycle-replay";
+	const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
+	const request = { sessionId };
+	const key = "ready-only-lifecycle-replay";
+	let broker: Broker | undefined;
+	try {
+		const marker = { pid: process.pid, effectMarker: "ready-only-replay", incarnation: "ready-only-replay" };
+		await fs.mkdir(path.dirname(readyPath), { recursive: true });
+		await fs.writeFile(readyPath, canonicalJson(marker));
+		const [readyStat, readyBytes] = await Promise.all([fs.stat(readyPath, { bigint: true }), fs.readFile(readyPath)]);
+		const identity = await deriveIdempotencyIdentity(
+			agentDir,
+			"session.delete",
+			key,
+			createHash("sha256").update(canonicalJson(request)).digest("hex"),
+		);
+		const ledger = await new LifecycleLedger(agentDir).open();
+		await ledger.begin(
+			identity,
+			createHash("sha256")
+				.update(canonicalJson({ operation: "session.delete", input: request }))
+				.digest("hex"),
+		);
+		await ledger.transition(identity, "effect_started", {
+			response: {
+				ok: false,
+				error: {
+					code: "cleanup_pending",
+					message: "Lifecycle cleanup is pending.",
+					cleanup: {
+						phase: "lifecycle",
+						lifecycleDeleteMetadata: true,
+						sessionId,
+						metadataRoot: stateRoot,
+						lifecycleFiles: [
+							{
+								path: readyPath,
+								identity: {
+									dev: readyStat.dev.toString(),
+									ino: readyStat.ino.toString(),
+									size: Number(readyStat.size),
+									mtimeNs: readyStat.mtimeNs.toString(),
+									sha256: createHash("sha256").update(readyBytes).digest("hex"),
+								},
+								attempt: 1,
+								plannedPath: path.join(stateRoot, "sdk", ".gjc-delete-ready-only"),
+							},
+						],
+					},
+				},
+			},
+		});
+		broker = new Broker({ agentDir });
+		await broker.start();
+		await expect(broker.handleRequest("session.delete", request, key)).resolves.toMatchObject({
+			ok: false,
+			error: { code: "terminal_uncertain" },
+		});
+		await expect(fs.readFile(readyPath)).resolves.toEqual(readyBytes);
+	} finally {
+		await broker?.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 30_000);
+test("broker fails closed when a lifecycle ready sibling is swapped after marker reconciliation", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-lifecycle-swap-replay-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const sessionId = "lifecycle-swap-replay";
+	const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
+	const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
+	const preservePath = path.join(root, "preserve-ready-user-data");
+	const request = { sessionId };
+	const key = "lifecycle-swap-replay";
+	let broker: Broker | undefined;
+	try {
+		const marker = { pid: process.pid, effectMarker: "swap-replay", incarnation: "swap-replay" };
+		await fs.mkdir(path.dirname(markerPath), { recursive: true });
+		await fs.writeFile(markerPath, canonicalJson(marker));
+		await fs.writeFile(readyPath, canonicalJson(marker));
+		await fs.writeFile(preservePath, "preserve this user data");
+		const captures = await Promise.all(
+			[markerPath, readyPath].map(async file => ({
+				path: file,
+				stat: await fs.stat(file, { bigint: true }),
+				bytes: await fs.readFile(file),
+			})),
+		);
+		const identity = await deriveIdempotencyIdentity(
+			agentDir,
+			"session.delete",
+			key,
+			createHash("sha256").update(canonicalJson(request)).digest("hex"),
+		);
+		const ledger = await new LifecycleLedger(agentDir).open();
+		await ledger.begin(
+			identity,
+			createHash("sha256")
+				.update(canonicalJson({ operation: "session.delete", input: request }))
+				.digest("hex"),
+		);
+		await ledger.transition(identity, "effect_started", {
+			response: {
+				ok: false,
+				error: {
+					code: "cleanup_pending",
+					message: "Lifecycle cleanup is pending.",
+					cleanup: {
+						phase: "lifecycle",
+						lifecycleDeleteMetadata: true,
+						sessionId,
+						metadataRoot: stateRoot,
+						lifecycleFiles: captures.map(({ path: file, stat, bytes }) => ({
+							path: file,
+							identity: {
+								dev: stat.dev.toString(),
+								ino: stat.ino.toString(),
+								size: Number(stat.size),
+								mtimeNs: stat.mtimeNs.toString(),
+								sha256: createHash("sha256").update(bytes).digest("hex"),
+							},
+							attempt: 1,
+							plannedPath: path.join(stateRoot, "sdk", `.gjc-delete-swap-${path.basename(file)}`),
+						})),
+					},
+				},
+			},
+		});
+		broker = new Broker({ agentDir });
+		await broker.start();
+		setLifecycleCleanupHookForTest(broker, () => {
+			writeFileSync(readyPath, "replaced before unlink");
+			renameSync(preservePath, `${preservePath}.moved`);
+			writeFileSync(preservePath, "preserve this user data");
+		});
+		await expect(broker.handleRequest("session.delete", request, key)).resolves.toMatchObject({
+			ok: false,
+			error: { code: "terminal_uncertain" },
+		});
+		await expect(fs.readFile(readyPath, "utf8")).resolves.toBe("replaced before unlink");
+		await expect(fs.readFile(preservePath, "utf8")).resolves.toBe("preserve this user data");
+	} finally {
+		await broker?.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 30_000);
 test("broker terminalizes default command resolver failures", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-resolver-failure-"));
 	const agentDir = path.join(root, "agent");

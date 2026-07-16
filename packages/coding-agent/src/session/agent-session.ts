@@ -96,7 +96,11 @@ import {
 	resolveServiceTier,
 	streamSimple,
 } from "@gajae-code/ai";
-import { beginAttempt, classifyFallbackTrigger, type FallbackTriggerClass } from "@gajae-code/ai/utils/fallback-transport";
+import {
+	beginAttempt,
+	classifyFallbackTrigger,
+	type FallbackTriggerClass,
+} from "@gajae-code/ai/utils/fallback-transport";
 
 export interface ForkContextSeedMetadata {
 	sourceSessionId: string;
@@ -312,8 +316,8 @@ import {
 	type DefaultModelSelectionRollbackStage,
 } from "./default-model-selection";
 import {
-	cappedExponentialWithFullJitter,
 	type ConfiguredFallbackChain,
+	cappedExponentialWithFullJitter,
 	effectiveFallbackDelay,
 	FallbackChainController,
 } from "./fallback-chain-controller";
@@ -11445,7 +11449,10 @@ export class AgentSession {
 		return `Model fallback chain exhausted; models tried: ${tried}; models skipped: ${skipped}`;
 	}
 
-	async #markFailedManagedCredential(trigger: { class: FallbackTriggerClass; retryAfterMs?: number }): Promise<boolean> {
+	async #markFailedManagedCredential(trigger: {
+		class: FallbackTriggerClass;
+		retryAfterMs?: number;
+	}): Promise<boolean> {
 		if (!this.model || (trigger.class !== "auth" && trigger.class !== "quota" && trigger.class !== "rate_limit")) {
 			return false;
 		}
@@ -11526,11 +11533,7 @@ export class AgentSession {
 					? effectiveFallbackDelay(retrySettings.baseDelayMs, retrySettings.maxDelayMs, attemptsUsed, retryAfterMs)
 					: retryAfterMs !== undefined
 						? Math.min(retryAfterMs, retrySettings.maxDelayMs)
-						: cappedExponentialWithFullJitter(
-							retrySettings.baseDelayMs,
-							retrySettings.maxDelayMs,
-							attemptsUsed,
-						);
+						: cappedExponentialWithFullJitter(retrySettings.baseDelayMs, retrySettings.maxDelayMs, attemptsUsed);
 
 		if (managedFallback && trigger.class === "rate_limit" && trigger.retryAfterMs !== undefined) {
 			const selector = controller.currentSelector();

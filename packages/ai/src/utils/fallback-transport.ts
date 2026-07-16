@@ -87,13 +87,19 @@ export function transportFailureFacts(
 				? value.response.status
 				: capturedResponse?.status;
 	const anthropicErrorType =
-		typeof value.error?.type === "string" ? value.error.type : typeof value.type === "string" ? value.type : undefined;
+		typeof value.error?.type === "string"
+			? value.error.type
+			: typeof value.type === "string"
+				? value.type
+				: undefined;
 	const openaiErrorCode = typeof value.error?.code === "string" ? value.error.code : undefined;
 	const providerCode =
 		typeof value.providerCode === "string"
 			? value.providerCode
-			: openaiErrorCode ??
-				(typeof value.code === "string" ? value.code : anthropicErrorType ?? (typeof value.type === "string" ? value.type : undefined));
+			: (openaiErrorCode ??
+				(typeof value.code === "string"
+					? value.code
+					: (anthropicErrorType ?? (typeof value.type === "string" ? value.type : undefined))));
 	const headers = isTransportHeaders(value.headers)
 		? value.headers
 		: isTransportHeaders(value.response?.headers)

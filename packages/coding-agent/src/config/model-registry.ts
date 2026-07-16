@@ -78,7 +78,11 @@ const MAX_SESSION_CANONICAL_VARIANTS = 64;
 
 function envAvailabilityFingerprint(): string {
 	return Object.entries(process.env)
-		.filter(([name]) => /(?:_API_KEY|_OAUTH_TOKEN|_ACCESS_TOKEN)$/.test(name) || /^(?:GH_TOKEN|GITHUB_TOKEN|HF_TOKEN|COPILOT_GITHUB_TOKEN)$/.test(name))
+		.filter(
+			([name]) =>
+				/(?:_API_KEY|_OAUTH_TOKEN|_ACCESS_TOKEN)$/.test(name) ||
+				/^(?:GH_TOKEN|GITHUB_TOKEN|HF_TOKEN|COPILOT_GITHUB_TOKEN)$/.test(name),
+		)
 		.sort(([left], [right]) => left.localeCompare(right))
 		.map(([name, value]) => `${name}=${value ?? ""}`)
 		.join("\u0000");
@@ -2594,11 +2598,15 @@ export class ModelRegistry {
 			const leftExact = left.model.id === left.canonicalId ? 0 : 1;
 			const rightExact = right.model.id === right.canonicalId ? 0 : 1;
 			if (leftExact !== rightExact) return leftExact - rightExact;
-			if (sourceRank[left.source] !== sourceRank[right.source]) return sourceRank[left.source] - sourceRank[right.source];
+			if (sourceRank[left.source] !== sourceRank[right.source])
+				return sourceRank[left.source] - sourceRank[right.source];
 			const leftCost = left.model.cost.input + left.model.cost.cacheRead;
 			const rightCost = right.model.cost.input + right.model.cost.cacheRead;
 			if (leftCost !== rightCost) return leftCost - rightCost;
-			return (modelOrder.get(left.selector) ?? Number.MAX_SAFE_INTEGER) - (modelOrder.get(right.selector) ?? Number.MAX_SAFE_INTEGER);
+			return (
+				(modelOrder.get(left.selector) ?? Number.MAX_SAFE_INTEGER) -
+				(modelOrder.get(right.selector) ?? Number.MAX_SAFE_INTEGER)
+			);
 		})[0];
 	}
 

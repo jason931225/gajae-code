@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { classifyFallbackTrigger } from "@gajae-code/ai/utils/fallback-transport";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@gajae-code/coding-agent/config/settings";
+import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
 import {
 	buildCacheBehaviorWarning,
 	computeCacheMissCostSummary,
@@ -14,7 +15,6 @@ import {
 	effectiveFallbackDelay,
 	FallbackChainController,
 } from "@gajae-code/coding-agent/session/fallback-chain-controller";
-import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
 
 const THREE_HOURS_MS = 3 * 60 * 60 * 1_000;
 

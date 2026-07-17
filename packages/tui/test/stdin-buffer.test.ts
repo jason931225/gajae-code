@@ -99,6 +99,21 @@ describe("StdinBuffer", () => {
 			processInput(`${"1".repeat(256)}tail`);
 			expect(emittedSequences).toEqual(["t", "a", "i", "l"]);
 		});
+
+		it("preserves ordinary input and bracketed paste after a malformed delayed SGR report", async () => {
+			processInput("\x1b[<0;4");
+			await Bun.sleep(15);
+			processInput("xtext");
+			expect(emittedSequences).toEqual(["x", "t", "e", "x", "t"]);
+
+			const pasted: string[] = [];
+			buffer.on("paste", text => pasted.push(text));
+			emittedSequences = [];
+			processInput("\x1b[<0;4");
+			await Bun.sleep(15);
+			processInput("\x1b[200~pasted\x1b[201~");
+			expect(pasted).toEqual(["pasted"]);
+		});
 	});
 
 	describe("Mixed Content", () => {

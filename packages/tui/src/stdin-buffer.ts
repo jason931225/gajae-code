@@ -307,6 +307,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	#pendingSingleUtf8LeadByte: number | undefined;
 	#sgrQuarantine = false;
 	#sgrQuarantineBytes = 0;
+	#sgrQuarantineSemicolons = 0;
+	#sgrQuarantineHasDigit = false;
 
 	constructor(options: StdinBufferOptions = {}) {
 		super();
@@ -473,10 +475,20 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	}
 
 	#beginSgrQuarantine(): void {
+		const suffix = this.#buffer.slice(3);
 		this.#buffer = "";
 		this.#pendingKittyPrintableCodepoint = undefined;
 		this.#sgrQuarantine = true;
-		this.#sgrQuarantineBytes = 0;
+		this.#sgrQuarantineBytes = suffix.length;
+		this.#sgrQuarantineSemicolons = 0;
+		this.#sgrQuarantineHasDigit = false;
+		for (const char of suffix) {
+			if (/\d/u.test(char)) this.#sgrQuarantineHasDigit = true;
+			else if (char === ";" && this.#sgrQuarantineHasDigit && this.#sgrQuarantineSemicolons < 2) {
+				this.#sgrQuarantineSemicolons += 1;
+				this.#sgrQuarantineHasDigit = false;
+			}
+		}
 		this.#timeout = setTimeout(() => this.#endSgrQuarantine(), SGR_QUARANTINE_TIMEOUT_MS);
 	}
 
@@ -485,20 +497,37 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#timeout = undefined;
 		this.#sgrQuarantine = false;
 		this.#sgrQuarantineBytes = 0;
+		this.#sgrQuarantineSemicolons = 0;
+		this.#sgrQuarantineHasDigit = false;
 	}
 
 	#consumeSgrQuarantine(data: string): string {
-		const remaining = SGR_QUARANTINE_MAX_BYTES - this.#sgrQuarantineBytes;
-		const quarantined = data.slice(0, Math.max(0, remaining));
-		const terminator = quarantined.search(/[Mm]/u);
-		if (terminator >= 0) {
+		for (let index = 0; index < data.length; index += 1) {
+			const char = data[index]!;
+			if (this.#sgrQuarantineBytes >= SGR_QUARANTINE_MAX_BYTES) {
+				let resume = index;
+				while (resume < data.length && /[\d;]/u.test(data[resume]!)) resume += 1;
+				if (resume < data.length && /[Mm]/u.test(data[resume]!)) resume += 1;
+				this.#endSgrQuarantine();
+				return data.slice(resume);
+			}
+			if (/\d/u.test(char)) {
+				this.#sgrQuarantineHasDigit = true;
+				this.#sgrQuarantineBytes += 1;
+				continue;
+			}
+			if (char === ";" && this.#sgrQuarantineHasDigit && this.#sgrQuarantineSemicolons < 2) {
+				this.#sgrQuarantineSemicolons += 1;
+				this.#sgrQuarantineHasDigit = false;
+				this.#sgrQuarantineBytes += 1;
+				continue;
+			}
+			if ((char === "M" || char === "m") && this.#sgrQuarantineSemicolons === 2 && this.#sgrQuarantineHasDigit) {
+				this.#endSgrQuarantine();
+				return data.slice(index + 1);
+			}
 			this.#endSgrQuarantine();
-			return data.slice(terminator + 1);
-		}
-		this.#sgrQuarantineBytes += quarantined.length;
-		if (this.#sgrQuarantineBytes >= SGR_QUARANTINE_MAX_BYTES) {
-			this.#endSgrQuarantine();
-			return data.slice(quarantined.length);
+			return data.slice(index);
 		}
 		return "";
 	}
@@ -557,6 +586,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#pendingKittyPrintableCodepoint = undefined;
 		this.#sgrQuarantine = false;
 		this.#sgrQuarantineBytes = 0;
+		this.#sgrQuarantineSemicolons = 0;
+		this.#sgrQuarantineHasDigit = false;
 		// Drop any incomplete multi-byte sequence the decoder is holding so a
 		// stale partial prefix cannot combine with future input. destroy()
 		// resets the decoder by calling clear().

@@ -64,10 +64,12 @@ export class TranscriptViewerOverlay extends Container {
 	#contentOrigin = 3;
 	#followTailPending = false;
 	#skipFollowTailOnce = false;
+	#followTailActive = false;
 
 	constructor(options: TranscriptViewerOverlayOptions) {
 		super();
 		this.#options = options;
+		this.#followTailActive = options.followTail === true;
 		this.refresh();
 	}
 
@@ -91,9 +93,9 @@ export class TranscriptViewerOverlay extends Container {
 		else if (reconciledIndex >= 0) this.#selected = reconciledIndex;
 		else this.#selected = Math.min(previousPosition, Math.max(0, this.#entries.length - 1));
 		this.#followTailPending = Boolean(
-			this.#options.followTail && !this.#skipFollowTailOnce && (wasAtTail || !this.#initialized),
+			this.#followTailActive && !this.#skipFollowTailOnce && (wasAtTail || !this.#initialized),
 		);
-		if (this.#initialized && this.#options.followTail && wasAtTail && !this.#skipFollowTailOnce)
+		if (this.#initialized && this.#followTailActive && wasAtTail && !this.#skipFollowTailOnce)
 			this.#selected = Math.max(0, this.#entries.length - 1);
 		this.#skipFollowTailOnce = false;
 		this.#initialized = true;
@@ -159,6 +161,7 @@ export class TranscriptViewerOverlay extends Container {
 			entry => contentLine >= entry.lineStart && contentLine < entry.lineStart + entry.lineCount,
 		);
 		if (index < 0) return;
+		this.#followTailActive = false;
 		this.#selected = index;
 		this.#move(0);
 		this.#requestRender();
@@ -194,6 +197,7 @@ export class TranscriptViewerOverlay extends Container {
 			return;
 		}
 		if (keyData === "g") {
+			this.#followTailActive = false;
 			this.#followTailPending = false;
 			this.#selected = 0;
 			this.#scrollOffset = 0;
@@ -201,7 +205,8 @@ export class TranscriptViewerOverlay extends Container {
 			return;
 		}
 		if (keyData === "G") {
-			this.#followTailPending = false;
+			this.#followTailActive = true;
+			this.#followTailPending = true;
 			this.#selected = Math.max(0, count - 1);
 			this.#scrollOffset = this.#lines.length;
 			this.#requestRender();
@@ -212,6 +217,7 @@ export class TranscriptViewerOverlay extends Container {
 			return;
 		}
 		if (!this.#options.enterExpands && (matchesKey(keyData, "enter") || keyData === "\r")) {
+			this.#followTailActive = false;
 			this.#fullscreen = true;
 			this.#scrollOffset = 0;
 			this.#requestRender();
@@ -235,6 +241,7 @@ export class TranscriptViewerOverlay extends Container {
 	}
 
 	#scroll(keyData: string): void {
+		this.#followTailActive = false;
 		this.#followTailPending = false;
 		if (keyData === "j" || matchesKey(keyData, "down") || matchesKey(keyData, "pageDown"))
 			this.#scrollOffset += PAGE_SIZE;
@@ -262,12 +269,14 @@ export class TranscriptViewerOverlay extends Container {
 		this.#requestRender();
 	}
 	#page(direction: 1 | -1): void {
+		this.#followTailActive = false;
 		this.#followTailPending = false;
 		this.#selected = Math.max(0, Math.min(this.#selected + direction * 5, this.#entries.length - 1));
 		this.#scrollOffset += direction * PAGE_SIZE;
 		this.#requestRender();
 	}
 	#toggleExpand(): void {
+		this.#followTailActive = false;
 		const entry = this.#entries[this.#selected];
 		if (!entry || entry.foldable === false) return;
 		const expanding = !this.#expanded.has(entry.id);
@@ -288,6 +297,7 @@ export class TranscriptViewerOverlay extends Container {
 		this.#fullscreen = false;
 		this.#skipFollowTailOnce = false;
 		this.#followTailPending = false;
+		this.#followTailActive = this.#options.followTail === true;
 	}
 
 	#copy(metadata: boolean): void {

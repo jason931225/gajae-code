@@ -171,13 +171,21 @@ test("InteractiveMode preserves viewer selection when its provisional assistant 
 		if (!viewer) throw new Error("Transcript viewer was not shown");
 		// Move selection off index 0 so an index-0 fallback would pick a different logical entry.
 		viewer.handleInput("j");
-		expect(viewer.selectedEntryId).toBe("entry:stream:object:2:content:0");
+		expect(viewer.selectedEntryId).toBe("entry:stream:0:1:content:0");
 
-		associateSessionMessageEntryId(assistant, "assistant-1");
+		const replacement: AssistantMessage = {
+			...assistant,
+			content: [{ type: "text", text: "streaming response updated" }],
+		};
+		session.agent.state.messages[1] = replacement;
+		mode.refreshTranscriptViewer();
+		expect(viewer.selectedEntryId).toBe("entry:stream:0:1:content:0");
+
+		associateSessionMessageEntryId(replacement, "assistant-1");
 		mode.refreshTranscriptViewer();
 
 		expect(viewer.selectedEntryId).toBe("entry:assistant-1:content:0");
-		expect(viewer.render(100).join("\n")).toContain("streaming response");
+		expect(viewer.render(100).join("\n")).toContain("streaming response updated");
 		expect(showOverlay).toHaveBeenCalledTimes(1);
 	} finally {
 		mode?.stop();

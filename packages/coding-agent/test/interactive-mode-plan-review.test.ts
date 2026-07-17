@@ -103,6 +103,17 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.getActiveToolNames()).toEqual(["test_read", "test_write"]);
 		expect(session.peekStandingResolveHandler()).toBeUndefined();
 	});
+
+	it("fails SDK plan toggles closed when the interactive lifecycle refuses them", async () => {
+		mode.goalModeEnabled = true;
+		await expect(session.setSdkPlanMode(true)).rejects.toMatchObject({ code: "conflict" });
+		expect(session.getPlanModeState()).toBeUndefined();
+		mode.goalModeEnabled = false;
+
+		mode.planModePaused = true;
+		await expect(session.setSdkPlanMode(false)).rejects.toMatchObject({ code: "conflict" });
+		mode.planModePaused = false;
+	});
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		mode?.stop();

@@ -5918,6 +5918,9 @@ export class AgentSession {
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
 	}
+	get transcriptPromptGeneration(): number {
+		return this.#promptGeneration;
+	}
 
 	/** Main startup calls this exactly once, after a strict open returned `kind: "opened"`. */
 	async continuePersistedHistory(): Promise<void> {

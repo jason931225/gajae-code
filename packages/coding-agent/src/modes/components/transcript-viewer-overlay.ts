@@ -251,6 +251,10 @@ export class TranscriptViewerOverlay extends Container {
 	}
 	#move(delta: number): void {
 		this.#selected = Math.max(0, Math.min(this.#selected + delta, this.#entries.length - 1));
+		if (delta !== 0) {
+			this.#followTailActive = false;
+			this.#followTailPending = false;
+		}
 		this.#rebuild();
 		const entry = this.#renderedEntries[this.#selected];
 		if (entry) {

@@ -100,6 +100,12 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual(["t", "a", "i", "l"]);
 		});
 
+		it("resynchronizes immediately when the timed-out SGR suffix is already invalid", async () => {
+			processInput("\x1b[<0;x");
+			await Bun.sleep(15);
+			expect(emittedSequences).toEqual(["x"]);
+		});
+
 		it("preserves ordinary input and bracketed paste after a malformed delayed SGR report", async () => {
 			processInput("\x1b[<0;4");
 			await Bun.sleep(15);

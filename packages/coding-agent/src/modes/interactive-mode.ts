@@ -449,8 +449,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
 	#transcriptRegistry = new TranscriptItemRegistry();
-	#transcriptObjectIds = new WeakMap<object, string>();
-	#nextTranscriptObjectId = 0;
 
 	#jobsObserver?: JobsObserver;
 	#tasksAggregator?: TasksAggregator;
@@ -473,12 +471,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.session.setSdkPlanModeHandler(async on => {
-			if (on) {
-				await this.#enterPlanMode();
-			} else {
-				await this.#exitPlanMode();
+			if (on) await this.#enterPlanMode();
+			else await this.#exitPlanMode();
+			const state = this.session.getPlanModeState();
+			const applied = on
+				? this.planModeEnabled && state?.enabled === true
+				: !this.planModeEnabled && !this.planModePaused && state === undefined;
+			if (!applied) {
+				throw Object.assign(
+					new Error(`mode.plan.set could not ${on ? "enter" : "exit"} plan mode in the current lifecycle state.`),
+					{
+						code: "conflict",
+					},
+				);
 			}
-			return this.session.getPlanModeState();
+			return state;
 		});
 		this.session.setRetainedMemorySampler(() => ({
 			tuiChatChildren: this.chatContainer.children.length,
@@ -2899,8 +2906,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const items: RegisterTranscriptItem[] = [];
 		const identityMap = new Map<string, string>();
-		for (const message of this.session.messages) {
-			const provisionalEntryId = this.#transcriptObjectId(message);
+		for (const [messageIndex, message] of this.session.messages.entries()) {
+			const provisionalEntryId = transcriptItemId.stream(this.session.transcriptPromptGeneration, messageIndex);
 			const durableEntryId = getSessionMessageEntryId(message);
 			const entryId = durableEntryId ?? provisionalEntryId;
 			if (durableEntryId) {
@@ -2971,14 +2978,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#transcriptRegistry.rebuild(items);
 		return identityMap;
-	}
-
-	#transcriptObjectId(message: AgentMessage): string {
-		const existing = this.#transcriptObjectIds.get(message);
-		if (existing) return existing;
-		const id = transcriptItemId.stream("object", ++this.#nextTranscriptObjectId);
-		this.#transcriptObjectIds.set(message, id);
-		return id;
 	}
 
 	showJobsOverlay(): void {

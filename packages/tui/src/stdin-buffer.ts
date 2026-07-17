@@ -476,19 +476,31 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 
 	#beginSgrQuarantine(): void {
 		const suffix = this.#buffer.slice(3);
+		let semicolons = 0;
+		let hasDigit = false;
+		for (let index = 0; index < suffix.length; index += 1) {
+			const char = suffix[index]!;
+			if (/\d/u.test(char)) {
+				hasDigit = true;
+				continue;
+			}
+			if (char === ";" && hasDigit && semicolons < 2) {
+				semicolons += 1;
+				hasDigit = false;
+				continue;
+			}
+			const remainder = suffix.slice(index);
+			this.#buffer = "";
+			this.#pendingKittyPrintableCodepoint = undefined;
+			if (remainder) this.process(remainder);
+			return;
+		}
 		this.#buffer = "";
 		this.#pendingKittyPrintableCodepoint = undefined;
 		this.#sgrQuarantine = true;
 		this.#sgrQuarantineBytes = suffix.length;
-		this.#sgrQuarantineSemicolons = 0;
-		this.#sgrQuarantineHasDigit = false;
-		for (const char of suffix) {
-			if (/\d/u.test(char)) this.#sgrQuarantineHasDigit = true;
-			else if (char === ";" && this.#sgrQuarantineHasDigit && this.#sgrQuarantineSemicolons < 2) {
-				this.#sgrQuarantineSemicolons += 1;
-				this.#sgrQuarantineHasDigit = false;
-			}
-		}
+		this.#sgrQuarantineSemicolons = semicolons;
+		this.#sgrQuarantineHasDigit = hasDigit;
 		this.#timeout = setTimeout(() => this.#endSgrQuarantine(), SGR_QUARANTINE_TIMEOUT_MS);
 	}
 

@@ -183,6 +183,12 @@ export function resolveProviderModelReference(
 		return undefined;
 	}
 
+	// Preserve exact provider/id replacement semantics before case-insensitive
+	// ambiguity handling. Custom entries can intentionally replace a bundled
+	// model while a differently-cased catalog alias remains present.
+	const caseExact = availableModels.find(model => model.provider === trimmedProvider && model.id === trimmedModelId);
+	if (caseExact) return caseExact;
+
 	const index = getProviderModelIndex(availableModels);
 	const exact = index.get(`${normalizedProvider}\u0000${normalizedModelId}`);
 	if (exact === null) {
@@ -298,8 +304,6 @@ function buildPreferenceContext(
 function pickPreferredModel(candidates: Model<Api>[], context: ModelPreferenceContext): Model<Api> {
 	if (candidates.length <= 1) return candidates[0];
 	return [...candidates].sort((a, b) => {
-		const aKey = formatModelString(a);
-		const bKey = formatModelString(b);
 		const aUsage = context.modelUsageRank.get(modelPreferenceKey(a));
 		const bUsage = context.modelUsageRank.get(modelPreferenceKey(b));
 

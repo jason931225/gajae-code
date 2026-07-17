@@ -170,6 +170,20 @@ export class LifecycleLedger {
 	#rowCount = 0;
 	#byteCount = 0;
 	#warnings: string[] = [];
+	#mutationTail: Promise<void> = Promise.resolve();
+
+	async #mutate<T>(operation: () => Promise<T>): Promise<T> {
+		const previous = this.#mutationTail;
+		const completion = Promise.withResolvers<void>();
+		this.#mutationTail = previous.then(() => completion.promise);
+		await previous;
+		try {
+			return await operation();
+		} finally {
+			completion.resolve();
+		}
+	}
+
 	constructor(agentDir: string, limits: LifecycleLedgerLimits = {}) {
 		this.#file = path.join(agentDir, "sdk", "lifecycle-ledger.jsonl");
 		this.#corruptFile = `${this.#file}.corrupt`;
@@ -180,6 +194,10 @@ export class LifecycleLedger {
 		};
 	}
 	async open(): Promise<this> {
+		return this.#mutate(async () => this.#open());
+	}
+
+	async #open(): Promise<this> {
 		await fs.mkdir(path.dirname(this.#file), { recursive: true, mode: 0o700 });
 		this.#entries = [];
 		this.#byIdentity.clear();
@@ -213,6 +231,7 @@ export class LifecycleLedger {
 					const prior = this.#byIdentity.get(entry.identity);
 					const invalidHistory =
 						invalidIdentities.has(entry.identity) ||
+						uncertainAfterCorruption.has(entry.identity) ||
 						!hasValidTerminalDigests(entry) ||
 						!this.#isValidHistoryContinuation(prior, entry);
 					if (invalidHistory) {
@@ -224,7 +243,6 @@ export class LifecycleLedger {
 					}
 					this.#entries.push(entry);
 					this.#byIdentity.set(entry.identity, entry);
-					uncertainAfterCorruption.delete(entry.identity);
 				} catch (error) {
 					if (error instanceof Error && "code" in error && error.code === "unsupported_state_version") throw error;
 					for (const [identity, latest] of this.#byIdentity) {
@@ -245,7 +263,7 @@ export class LifecycleLedger {
 		}
 		// Effects may have completed after the last durable marker; do not retry them after a restart.
 		for (const entry of [...this.#byIdentity.values()]) {
-			if (entry.state === "effect_started" || entry.state === "awaiting_ready")
+			if ((entry.state === "effect_started" && !this.#isCleanupPending(entry)) || entry.state === "awaiting_ready")
 				await this.#append(this.#uncertainFrom(entry));
 		}
 		return this;
@@ -310,6 +328,14 @@ export class LifecycleLedger {
 		if (previous.state === "accepted") return true;
 		return next.state === "effect_started" || next.state === "awaiting_ready" || final(next.state);
 	}
+	#isCleanupPending(entry: LifecycleLedgerEntry): boolean {
+		if (!entry.response || typeof entry.response !== "object") return false;
+		const response = entry.response as { ok?: unknown; error?: { code?: unknown; cleanup?: unknown } };
+		return (
+			response.ok === false && response.error?.code === "cleanup_pending" && response.error.cleanup !== undefined
+		);
+	}
+
 	#uncertainFrom(entry: LifecycleLedgerEntry, trusted = true): LifecycleLedgerEntry {
 		if (trusted) return { ...entry, state: "terminal_uncertain", ts: Date.now() };
 		return {
@@ -446,6 +472,10 @@ export class LifecycleLedger {
 		return entry;
 	}
 	async begin(identity: string, requestHash: string): Promise<BeginResult> {
+		return this.#mutate(async () => this.#begin(identity, requestHash));
+	}
+
+	async #begin(identity: string, requestHash: string): Promise<BeginResult> {
 		const prior = this.#byIdentity.get(identity);
 		if (!prior)
 			return {
@@ -459,7 +489,8 @@ export class LifecycleLedger {
 				}),
 			};
 		if (prior.requestHash !== requestHash) return { kind: "idempotency_conflict" };
-		if (terminal(prior.state)) return { kind: "replay", entry: prior };
+		if (terminal(prior.state) || (prior.state === "effect_started" && this.#isCleanupPending(prior)))
+			return { kind: "replay", entry: prior };
 		if (prior.state === "terminal_uncertain") return { kind: "terminal_uncertain", entry: prior };
 		// An accepted row has no durable side effect. Target serialization makes retrying it safe.
 		if (prior.state === "accepted") return { kind: "new", entry: prior };
@@ -470,23 +501,25 @@ export class LifecycleLedger {
 		state: LifecycleState,
 		fields: Omit<Partial<LifecycleLedgerEntry>, "identity" | "requestHash" | "state" | "ts"> = {},
 	): Promise<LifecycleLedgerEntry> {
-		const previous = this.#byIdentity.get(identity);
-		if (!previous) throw new Error("Unknown lifecycle identity");
-		const next = { ...previous, ...fields, state, ts: Date.now() };
-		if (
-			(terminal(state) || state === "terminal_uncertain") &&
-			next.response !== undefined &&
-			next.responseDigest === undefined
-		)
-			next.responseDigest = createHash("sha256").update(canonicalJson(next.response)).digest("hex");
-		if (next.durableEffects && next.durableEffects.digest === undefined) {
-			const { digest: _digest, ...body } = next.durableEffects;
-			next.durableEffects = {
-				...body,
-				digest: createHash("sha256").update(canonicalJson(body)).digest("hex"),
-			};
-		}
-		return this.#append(next);
+		return this.#mutate(async () => {
+			const previous = this.#byIdentity.get(identity);
+			if (!previous) throw new Error("Unknown lifecycle identity");
+			const next = { ...previous, ...fields, state, ts: Date.now() };
+			if (
+				(terminal(state) || state === "terminal_uncertain") &&
+				next.response !== undefined &&
+				next.responseDigest === undefined
+			)
+				next.responseDigest = createHash("sha256").update(canonicalJson(next.response)).digest("hex");
+			if (next.durableEffects && next.durableEffects.digest === undefined) {
+				const { digest: _digest, ...body } = next.durableEffects;
+				next.durableEffects = {
+					...body,
+					digest: createHash("sha256").update(canonicalJson(body)).digest("hex"),
+				};
+			}
+			return this.#append(next);
+		});
 	}
 	async assertSupportedStateVersions(): Promise<void> {
 		const source = await this.#readBoundedSource();

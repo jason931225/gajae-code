@@ -71,7 +71,7 @@ describe("SDK lifecycle ledger", () => {
 		expect(JSON.parse(recoveredLines.at(-1)!)).toMatchObject({ identity: "i", state: "terminal_uncertain" });
 		expect((await new LifecycleLedger(dir).open()).get("i")?.state).toBe("terminal_uncertain");
 	});
-	it("lets a later valid terminal row supersede earlier corruption", async () => {
+	it("does not let a later terminal row clear uncertainty from corrupt middle history", async () => {
 		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-ledger-corrupt-"));
 		const ledgerPath = path.join(dir, "sdk", "lifecycle-ledger.jsonl");
 		const ledger = await new LifecycleLedger(dir).open();
@@ -91,8 +91,10 @@ describe("SDK lifecycle ledger", () => {
 		);
 
 		const resumed = await new LifecycleLedger(dir).open();
-		expect((await resumed.begin("i", "a")).kind).toBe("replay");
-		expect(resumed.get("i")?.state).toBe("terminal_ok");
+		expect((await resumed.begin("i", "a")).kind).toBe("terminal_uncertain");
+		expect(resumed.get("i")?.state).toBe("terminal_uncertain");
+		const quarantined = await fs.readFile(`${ledgerPath}.corrupt`, "utf8");
+		expect(quarantined).toContain('"state":"terminal_ok"');
 	});
 	it("persists complete multibyte rows through durable appends", async () => {
 		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-ledger-large-"));
@@ -300,6 +302,27 @@ describe("SDK lifecycle ledger bounded writer", () => {
 			kind: "replay",
 			entry: { response: { sessionId: "stable" } },
 		});
+	});
+});
+
+it("serializes concurrent distinct-identity compactions and reopens both terminal responses", async () => {
+	const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-ledger-compact-fifo-"));
+	const ledger = await new LifecycleLedger(dir, { maxRows: 3 }).open();
+	await Promise.all([ledger.begin("first", "first-request"), ledger.begin("second", "second-request")]);
+	await Promise.all([ledger.transition("first", "effect_started"), ledger.transition("second", "effect_started")]);
+	await Promise.all([
+		ledger.transition("first", "terminal_ok", { response: { sessionId: "first" } }),
+		ledger.transition("second", "terminal_ok", { response: { sessionId: "second" } }),
+	]);
+
+	const reopened = await new LifecycleLedger(dir, { maxRows: 3 }).open();
+	expect(await reopened.begin("first", "first-request")).toMatchObject({
+		kind: "replay",
+		entry: { response: { sessionId: "first" } },
+	});
+	expect(await reopened.begin("second", "second-request")).toMatchObject({
+		kind: "replay",
+		entry: { response: { sessionId: "second" } },
 	});
 });
 it("quarantines terminal-uncertain replay rows with corrupt response or durable-effect digests", async () => {

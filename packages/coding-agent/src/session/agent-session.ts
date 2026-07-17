@@ -72,6 +72,7 @@ import {
 import type {
 	AssistantMessage,
 	Context,
+	DeveloperMessage,
 	Effort,
 	ImageContent,
 	Message,
@@ -191,6 +192,9 @@ import type {
 	MessageEndEvent,
 	MessageStartEvent,
 	MessageUpdateEvent,
+	ReasoningSummaryDeltaEvent,
+	ReasoningSummaryEndEvent,
+	ReasoningSummaryStartEvent,
 	SessionBeforeBranchResult,
 	SessionBeforeCompactResult,
 	SessionBeforeSwitchResult,
@@ -229,7 +233,7 @@ import { requestGjcWorkerIntegrationAttempt } from "../gjc-runtime/team-runtime"
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
-import { ensureWorkflowSkillActivationState } from "../hooks/skill-state";
+import { buildSkillStopOutput, ensureWorkflowSkillActivationState } from "../hooks/skill-state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { shutdownAll as shutdownAllLspClients } from "../lsp/client";
 import { resolveMemoryBackend } from "../memory-backend";
@@ -351,7 +355,9 @@ import type {
 } from "./session-manager";
 
 import {
+	createReadonlySessionManager,
 	getLatestCompactionEntry,
+	getSessionMessageEntryId,
 	getSessionMessageObservationId,
 	transferSessionMessageIdentity,
 } from "./session-manager";
@@ -448,6 +454,8 @@ export interface AgentSessionConfig {
 	slashCommands?: FileSlashCommand[];
 	/** Extension runner (created in main.ts with wrapped tools) */
 	extensionRunner?: ExtensionRunner;
+	/** Override first-party worker integration dispatch for embedded hosts and deterministic lifecycle tests. */
+	workerIntegrationRequest?: () => Promise<void>;
 
 	/** Loaded skills (already discovered by SDK) */
 	skills?: Skill[];
@@ -1105,10 +1113,15 @@ export class WorkerIntegrationRequestScheduler {
 
 	#start(): void {
 		this.#pending = false;
-		// Isolate request rejections so flush() can never reject or deadlock: the
-		// request is expected to handle/log its own errors, but a throwing generic
-		// request must still clear #inFlight and drain any trailing pending run.
-		this.#inFlight = this.request()
+		// Invoke synchronously so enqueue retains its existing single-flight timing,
+		// while converting a synchronous generic request throw into a settled promise.
+		let request: Promise<void>;
+		try {
+			request = this.request();
+		} catch {
+			request = Promise.resolve();
+		}
+		this.#inFlight = request
 			.catch(() => {})
 			.finally(() => {
 				this.#inFlight = undefined;
@@ -1410,7 +1423,16 @@ export class AgentSession {
 	#fallbackInvocationId = 0;
 	// Todo completion reminder state
 	#todoReminderCount = 0;
+	#deepInterviewUserIntentEpoch = 0;
+	#deepInterviewTurnOwnerEpoch = 0;
+	#deepInterviewGenuineUserMessageEpochs = new WeakMap<object, number>();
+	#deepInterviewPreclaimedCustomInputEpochs = new WeakMap<object, number>();
+	#deepInterviewAssistantIdentities = new WeakMap<object, string>();
+	#nextDeepInterviewAssistantFallbackId = 0;
+	#handledDeepInterviewAssistantIds = new Set<string>();
+	#deepInterviewContinuationBudget = { epoch: 0, committed: 0, reserved: 0 };
 	#lastGoalReminderAssistantTimestamp: number | undefined = undefined;
+	#suppressNextGoalReminderAfterAbortGoalId: string | undefined = undefined;
 	#todoPhases: TodoPhase[] = [];
 	#toolChoiceQueue = new ToolChoiceQueue();
 
@@ -1454,11 +1476,8 @@ export class AgentSession {
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 
 	#turnIndex = 0;
-	#workerIntegrationScheduler = new WorkerIntegrationRequestScheduler(async () => {
-		await requestGjcWorkerIntegrationAttempt(this.sessionManager.getCwd(), process.env).catch(error => {
-			logger.warn("GJC team worker integration request failed", { error: String(error) });
-		});
-	});
+	#workerIntegrationScheduler: WorkerIntegrationRequestScheduler;
+	#workerIntegrationRequestedForTurn = false;
 	// First-party internal before-agent-start contributors (not user hooks).
 	#beforeAgentStartContributors: BeforeAgentStartContributor[] = [];
 
@@ -1589,6 +1608,8 @@ export class AgentSession {
 	#promptInFlightCount = 0;
 	#agentEventHandlersInFlight = 0;
 	#queuedExtensionEventCount = 0;
+	#extensionTurnGeneration = 0;
+	#closedExtensionTurnGeneration: number | undefined;
 	// Wire-level agent_end emission is deferred until both the prompt finalizer and
 	// async event handlers settle. Subscribers treat agent_end as readiness, so
 	// publishing it earlier lets a successor corrupt the prior prompt's lifecycle.
@@ -1597,6 +1618,11 @@ export class AgentSession {
 	// the successor or proves it cannot. Holds prevent a false idle event while
 	// preserving the predecessor for cancellation and preflight failures.
 	#pendingAgentEndContinuationHolds = new Map<symbol, AgentSessionEvent>();
+	#sessionSettlementPromise: Promise<void> | undefined;
+	#sessionSettlementResolve: (() => void) | undefined;
+	#agentEndPublicationInFlight = 0;
+	#agentEndPublicationPromise: Promise<void> = Promise.resolve();
+	#agentEndHandlingPromise: Promise<void> = Promise.resolve();
 
 	#obfuscator: SecretObfuscator | undefined;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -1775,6 +1801,7 @@ export class AgentSession {
 				if (candidatePending === pending) this.#pendingAgentEndContinuationHolds.delete(candidate);
 			}
 		}
+		this.#resolveSessionSettlement();
 		return pending;
 	}
 
@@ -1802,6 +1829,35 @@ export class AgentSession {
 		this.#restoreDeferredAgentEndAfterContinuationFailure(pending);
 	}
 
+	#isSessionSettlementPending(): boolean {
+		return (
+			this.#promptInFlightCount > 0 ||
+			this.#agentEventHandlersInFlight > 0 ||
+			this.#agentEndPublicationInFlight > 0 ||
+			this.#pendingAgentEndContinuationHolds.size > 0 ||
+			this.#pendingAgentEndEmit !== undefined
+		);
+	}
+
+	#resolveSessionSettlement(): void {
+		if (this.#isSessionSettlementPending() || !this.#sessionSettlementResolve) return;
+		const resolve = this.#sessionSettlementResolve;
+		this.#sessionSettlementResolve = undefined;
+		this.#sessionSettlementPromise = undefined;
+		resolve();
+	}
+
+	async #waitForSessionSettlement(): Promise<void> {
+		while (this.#isSessionSettlementPending()) {
+			if (!this.#sessionSettlementPromise) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				this.#sessionSettlementPromise = promise;
+				this.#sessionSettlementResolve = resolve;
+			}
+			await this.#sessionSettlementPromise;
+		}
+	}
+
 	#endInFlight(): void {
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount === 0) {
@@ -1815,25 +1871,50 @@ export class AgentSession {
 		if (
 			this.#promptInFlightCount > 0 ||
 			this.#agentEventHandlersInFlight > 0 ||
-			this.#queuedExtensionEventCount > 0 ||
 			this.#pendingAgentEndContinuationHolds.size > 0
 		)
 			return;
 		const pending = this.#pendingAgentEndEmit;
-		if (!pending) return;
+		if (!pending) {
+			this.#resolveSessionSettlement();
+			return;
+		}
 		this.#pendingAgentEndEmit = undefined;
-		// Persist before notifying synchronous subscribers: a subscriber may start a
-		// successor prompt from agent_end, whose running state must serialize after
-		// this terminal boundary rather than be overwritten by it.
-		this.#persistRuntimeStateInBackground(pending);
-		this.#emit(pending);
-		void this.#queueExtensionEvent(pending);
+		this.#agentEndPublicationInFlight++;
+		this.#agentEndPublicationPromise = this.#publishDeferredAgentEnd(pending);
+		void this.#agentEndPublicationPromise;
+	}
+
+	async #publishDeferredAgentEnd(pending: AgentSessionEvent): Promise<void> {
+		try {
+			// Worker integration is first-party lifecycle persistence, not an extension
+			// hook. Make it durable before publishing the terminal boundary while user
+			// extension delivery remains asynchronous.
+			await this.#flushWorkerIntegrationForAgentEnd();
+			// Persist before notifying synchronous subscribers: a subscriber may start a
+			// successor prompt from agent_end, whose running state must serialize after
+			// this terminal boundary rather than be overwritten by it.
+			this.#persistRuntimeStateInBackground(pending);
+			this.#emit(pending);
+			void this.#queueExtensionEvent(pending, undefined, true);
+		} finally {
+			this.#agentEndPublicationInFlight = Math.max(0, this.#agentEndPublicationInFlight - 1);
+			this.#resolveSessionSettlement();
+		}
 	}
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#workerIntegrationScheduler = new WorkerIntegrationRequestScheduler(
+			config.workerIntegrationRequest ??
+				(async () => {
+					await requestGjcWorkerIntegrationAttempt(this.sessionManager.getCwd(), process.env).catch(error => {
+						logger.warn("GJC team worker integration request failed", { error: String(error) });
+					});
+				}),
+		);
 		this.notificationSessionController = config.notificationSessionController;
 		this.taskDepth = config.taskDepth ?? 0;
 		// Register this session with the process-wide resource GC (idle/RSS browser-tab eviction
@@ -1974,9 +2055,7 @@ export class AgentSession {
 		this.#syncTodoPhasesFromBranch();
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
-			setState: state => {
-				this.#goalModeState = state;
-			},
+			setState: state => this.#applyGoalModeState(state),
 			getCurrentUsage: () => {
 				const usage = this.getSessionStats().tokens;
 				return {
@@ -2493,10 +2572,14 @@ export class AgentSession {
 	// Event Subscription
 	// =========================================================================
 
-	/** Emit an event to all listeners */
+	/** Emit an event to all listeners without letting one subscriber poison lifecycle settlement. */
 	#emit(event: AgentSessionEvent): void {
-		for (const l of this.#eventListenerSnapshot) {
-			l(event);
+		for (const listener of this.#eventListenerSnapshot) {
+			try {
+				listener(event);
+			} catch (error) {
+				logger.warn("Agent session event subscriber failed", { event: event.type, error: String(error) });
+			}
 		}
 	}
 
@@ -2515,10 +2598,26 @@ export class AgentSession {
 
 	#queuedExtensionEvents: Promise<void> = Promise.resolve();
 
-	#queueExtensionEvent(event: AgentSessionEvent): Promise<void> {
+	#queueExtensionEvent(
+		event: AgentSessionEvent,
+		turnGeneration?: number,
+		workerIntegrationSettled = false,
+	): Promise<void> {
+		// Streaming events observed after turn_end belong to no live extension turn.
+		// Events already queued before that boundary must drain in FIFO order, unless
+		// a successor turn replaces their generation while a handler is still running.
+		if (
+			turnGeneration !== undefined &&
+			(turnGeneration !== this.#extensionTurnGeneration || this.#closedExtensionTurnGeneration === turnGeneration)
+		) {
+			return Promise.resolve();
+		}
 		this.#queuedExtensionEventCount++;
+		const belongsToCurrentTurn = () =>
+			turnGeneration === undefined || turnGeneration === this.#extensionTurnGeneration;
 		const emit = async () => {
-			await this.#emitExtensionEvent(event);
+			if (!belongsToCurrentTurn()) return;
+			await this.#emitExtensionEvent(event, belongsToCurrentTurn, workerIntegrationSettled);
 		};
 		const queued = this.#queuedExtensionEvents.then(emit, emit);
 		this.#queuedExtensionEvents = queued.catch(() => {});
@@ -2531,6 +2630,8 @@ export class AgentSession {
 	}
 
 	#trackAgentEvent = async (event: AgentEvent): Promise<void> => {
+		const agentEndHandled = event.type === "agent_end" ? Promise.withResolvers<void>() : undefined;
+		if (agentEndHandled) this.#agentEndHandlingPromise = agentEndHandled.promise;
 		this.#agentEventHandlersInFlight++;
 		try {
 			await this.#handleAgentEvent(event);
@@ -2539,6 +2640,7 @@ export class AgentSession {
 		} finally {
 			this.#agentEventHandlersInFlight = Math.max(0, this.#agentEventHandlersInFlight - 1);
 			this.#flushPendingAgentEnd();
+			agentEndHandled?.resolve();
 		}
 	};
 
@@ -2553,15 +2655,27 @@ export class AgentSession {
 	}
 
 	async #emitSessionEvent(event: AgentSessionEvent): Promise<void> {
+		if (event.type === "turn_start") {
+			this.#extensionTurnGeneration++;
+			this.#closedExtensionTurnGeneration = undefined;
+		} else if (event.type === "turn_end") {
+			this.#closedExtensionTurnGeneration = this.#extensionTurnGeneration;
+		}
 		if (event.type === "message_update") {
 			// Fast path: message_update maps to no sidecar state, so we must not
 			// build the persistRuntimeState closure here (per-token hot path).
 			this.#emit(event);
 			if (this.#hasStreamingExtensionHandlers()) {
 				__agentSessionPerfCounters.messageUpdateExtensionQueues += 1;
-				void this.#queueExtensionEvent(event);
+				void this.#queueExtensionEvent(event, this.#extensionTurnGeneration);
 			}
 			return;
+		}
+		if (event.type === "turn_start") {
+			this.#workerIntegrationRequestedForTurn = false;
+		} else if (event.type === "turn_end" && !this.#workerIntegrationRequestedForTurn) {
+			this.#workerIntegrationRequestedForTurn = true;
+			this.#requestWorkerIntegrationAttempt();
 		}
 		// A maintenance agent_end is an internal checkpoint only while another
 		// continuation will follow. An aborted maintenance run is its terminal
@@ -2574,10 +2688,7 @@ export class AgentSession {
 		// have unwound. Subscribers treat this event as the ready signal; flushing it
 		// from abort while either barrier is active permits a successor to race the
 		// prior prompt's cleanup.
-		if (
-			event.type === "agent_end" &&
-			(this.#promptInFlightCount > 0 || this.#agentEventHandlersInFlight > 0 || this.#queuedExtensionEventCount > 0)
-		) {
+		if (event.type === "agent_end" && (this.#promptInFlightCount > 0 || this.#agentEventHandlersInFlight > 0)) {
 			this.#pendingAgentEndEmit = event;
 			return;
 		}
@@ -2616,9 +2727,21 @@ export class AgentSession {
 		// a later raw listener cannot revive a cancelled/replaced continuation.
 		const maintenanceGeneration =
 			event.type === "agent_end" && event.stopReason === "maintenance" ? this.#promptGeneration : undefined;
+		// Same pre-yield capture for ordinary agent_end stops: the deep-interview
+		// continuation check reads durable stop-state asynchronously and must stay
+		// bound to the generation that produced this stop.
+		const agentEndGeneration = event.type === "agent_end" ? this.#promptGeneration : undefined;
 		const maintenanceWasDisposed = this.#isDisposed;
+		const agentEndOwnerEpoch = event.type === "agent_end" ? this.#deepInterviewTurnOwnerEpoch : undefined;
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
+		if (event.type === "message_start") {
+			const epoch = this.#deepInterviewGenuineUserMessageEpochs.get(event.message);
+			if (epoch !== undefined) {
+				this.#deepInterviewContinuationBudget = { epoch, committed: 0, reserved: 0 };
+				this.#deepInterviewTurnOwnerEpoch = epoch;
+			}
+		}
 		if (event.type === "message_start" && event.message.role === "user") {
 			const messageText = this.#getUserMessageText(event.message);
 			if (messageText) {
@@ -2725,6 +2848,7 @@ export class AgentSession {
 			}
 		}
 
+		if (event.type === "turn_start") this.#deepInterviewTurnOwnerEpoch = this.#deepInterviewUserIntentEpoch;
 		if (event.type === "turn_start" && this.#goalRuntime.shouldTrackTurnBaseline()) {
 			const usage = this.getSessionStats().tokens;
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
@@ -3129,6 +3253,12 @@ export class AgentSession {
 			}
 			if (msg.stopReason !== "error" && msg.stopReason !== "aborted") {
 				if (this.#enforceRewindBeforeYield()) {
+					return;
+				}
+				if (
+					(await this.#checkActiveDeepInterviewCompletion(msg, agentEndGeneration, agentEndOwnerEpoch)) !==
+					"not_applicable"
+				) {
 					return;
 				}
 				if (await this.#checkGoalCompletion(msg)) {
@@ -4115,20 +4245,36 @@ export class AgentSession {
 		await this.#workerIntegrationScheduler.flush();
 	}
 
-	/** Emit extension events based on session events */
-	async #emitExtensionEvent(event: AgentSessionEvent): Promise<void> {
-		if (event.type === "turn_end") {
+	async #flushWorkerIntegrationForAgentEnd(): Promise<void> {
+		if (!this.#workerIntegrationRequestedForTurn) {
 			this.#requestWorkerIntegrationAttempt();
 		}
-		if (event.type === "agent_end") {
+		try {
 			await this.#flushWorkerIntegrationAttempt();
+		} finally {
+			this.#workerIntegrationRequestedForTurn = false;
+		}
+	}
+
+	/** Emit extension events based on session events */
+	async #emitExtensionEvent(
+		event: AgentSessionEvent,
+		continueWhile?: () => boolean,
+		workerIntegrationSettled = false,
+	): Promise<void> {
+		if (event.type === "agent_end" && !workerIntegrationSettled) {
+			await this.#flushWorkerIntegrationForAgentEnd();
 		}
 		if (!this.#extensionRunner) return;
 		if (event.type === "agent_start") {
 			this.#turnIndex = 0;
 			await this.#extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
-			await this.#extensionRunner.emit({ type: "agent_end", messages: event.messages });
+			await this.#extensionRunner.emit({
+				type: "agent_end",
+				messages: event.messages,
+				stopReason: event.stopReason,
+			});
 		} else if (event.type === "turn_start") {
 			const hookEvent: TurnStartEvent = {
 				type: "turn_start",
@@ -4157,7 +4303,32 @@ export class AgentSession {
 				message: event.message,
 				assistantMessageEvent: event.assistantMessageEvent,
 			};
-			await this.#extensionRunner.emit(extensionEvent);
+			await this.#extensionRunner.emit(extensionEvent, continueWhile);
+			if (continueWhile && !continueWhile()) return;
+			if (event.assistantMessageEvent.type === "reasoning_summary_start") {
+				const reasoningEvent: ReasoningSummaryStartEvent = {
+					type: "reasoning_summary_start",
+					message: event.message,
+					contentIndex: event.assistantMessageEvent.contentIndex,
+				};
+				await this.#extensionRunner.emit(reasoningEvent, continueWhile);
+			} else if (event.assistantMessageEvent.type === "reasoning_summary_delta") {
+				const reasoningEvent: ReasoningSummaryDeltaEvent = {
+					type: "reasoning_summary_delta",
+					message: event.message,
+					contentIndex: event.assistantMessageEvent.contentIndex,
+					delta: event.assistantMessageEvent.delta,
+				};
+				await this.#extensionRunner.emit(reasoningEvent, continueWhile);
+			} else if (event.assistantMessageEvent.type === "reasoning_summary_end") {
+				const reasoningEvent: ReasoningSummaryEndEvent = {
+					type: "reasoning_summary_end",
+					message: event.message,
+					contentIndex: event.assistantMessageEvent.contentIndex,
+					content: event.assistantMessageEvent.content,
+				};
+				await this.#extensionRunner.emit(reasoningEvent, continueWhile);
+			}
 		} else if (event.type === "message_end") {
 			const extensionEvent: MessageEndEvent = {
 				type: "message_end",
@@ -4366,6 +4537,8 @@ export class AgentSession {
 		]);
 		if (!disposeIdleSettled) this.agent.forceAbort("Session disposed");
 		await admissionClosed;
+		await this.#agentEndPublicationPromise;
+		await this.#queuedExtensionEvents;
 		this.#workflowGateEmitter?.fence?.();
 		this.#pendingBackgroundExchanges = [];
 		this.yieldQueue.clear();
@@ -4541,10 +4714,21 @@ export class AgentSession {
 		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
 	}
 
-	/** Wait until streaming and deferred recovery work are fully settled. */
+	/** Wait until streaming and session settlement work are fully settled. */
 	async waitForIdle(): Promise<void> {
-		await this.agent.waitForIdle();
-		await this.#waitForPostPromptRecovery();
+		while (true) {
+			await this.agent.waitForIdle();
+			await this.#waitForPostPromptRecovery();
+			await this.#waitForSessionSettlement();
+			if (
+				!this.agent.state.isStreaming &&
+				!this.#retryPromise &&
+				!this.#ttsrResumePromise &&
+				!this.#postPromptTasksPromise &&
+				!this.#isSessionSettlementPending()
+			)
+				return;
+		}
 	}
 
 	async drainAsyncJobDeliveriesForAcp(options?: { timeoutMs?: number }): Promise<boolean> {
@@ -4682,7 +4866,16 @@ export class AgentSession {
 	 * Get a tool by name from the registry.
 	 */
 	getToolByName(name: string): AgentTool | undefined {
-		return this.#toolRegistry.get(name);
+		const direct = this.#toolRegistry.get(name);
+		if (direct) return direct;
+		// Fall back to the model-facing wire name: some tools expose a customWireName
+		// that differs from their internal registry key (e.g. `edit` presents as
+		// `apply_patch` to GPT-5 in apply_patch mode), so a lookup by the wire name a
+		// tool call actually carried must still resolve to the registered tool.
+		for (const tool of this.#toolRegistry.values()) {
+			if (tool.customWireName === name) return tool;
+		}
+		return undefined;
 	}
 
 	/**
@@ -5394,7 +5587,7 @@ export class AgentSession {
 		}
 
 		const getCustomToolContext = (): CustomToolContext => ({
-			sessionManager: this.sessionManager,
+			sessionManager: createReadonlySessionManager(this.sessionManager),
 			modelRegistry: this.#modelRegistry,
 			model: this.model,
 			isIdle: () => !this.isStreaming,
@@ -5439,7 +5632,7 @@ export class AgentSession {
 
 	#getCustomToolContext(): CustomToolContext {
 		return {
-			sessionManager: this.sessionManager,
+			sessionManager: createReadonlySessionManager(this.sessionManager),
 			modelRegistry: this.#modelRegistry,
 			model: this.model,
 			isIdle: () => !this.isStreaming,
@@ -5587,6 +5780,7 @@ export class AgentSession {
 			this.#removeEphemeralCustomMessages();
 
 			this.#endInFlight();
+			await this.#waitForSessionSettlement();
 		}
 	}
 
@@ -5730,6 +5924,7 @@ export class AgentSession {
 			throw Object.assign(new Error("skill.invoke args must be a string."), { code: "invalid_input" });
 		const skill = this.skills.find(candidate => candidate.name === skillName);
 		if (!skill) throw Object.assign(new Error(`Skill ${skillName} was not found.`), { code: "invalid_input" });
+		const deepInterviewUserIntentEpoch = this.#claimDeepInterviewUserIntent();
 		const activation = await resolveSubskillActivationForSkillInvocation({
 			cwd: this.sessionManager.getCwd(),
 			sessionId: this.sessionId,
@@ -5742,13 +5937,15 @@ export class AgentSession {
 			cwd: this.sessionManager.getCwd(),
 			sessionId: this.sessionId,
 		});
-		await this.promptCustomMessage({
+		const skillPromptMessage = {
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
 			content: built.message,
 			display: true,
 			details: built.details,
-			attribution: "user",
-		});
+			attribution: "user" as const,
+		};
+		this.#deepInterviewPreclaimedCustomInputEpochs.set(skillPromptMessage, deepInterviewUserIntentEpoch);
+		await this.promptCustomMessage(skillPromptMessage);
 		return {
 			name: skill.name,
 			path: skill.filePath,
@@ -5832,8 +6029,20 @@ export class AgentSession {
 		return this.#goalModeState;
 	}
 
-	setGoalModeState(state: GoalModeState | undefined): void {
+	#applyGoalModeState(state: GoalModeState | undefined): void {
+		if (
+			!state?.enabled ||
+			state.goal.status !== "active" ||
+			(this.#suppressNextGoalReminderAfterAbortGoalId !== undefined &&
+				this.#suppressNextGoalReminderAfterAbortGoalId !== state.goal.id)
+		) {
+			this.#suppressNextGoalReminderAfterAbortGoalId = undefined;
+		}
 		this.#goalModeState = state;
+	}
+
+	setGoalModeState(state: GoalModeState | undefined): void {
+		this.#applyGoalModeState(state);
 	}
 
 	getWorkflowGateEmitter(): WorkflowGateEmitter | undefined {
@@ -6314,6 +6523,9 @@ export class AgentSession {
 		const expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 		assertImagePlaceholdersHavePayload(expandedText, options?.images);
 		const workflowIntentDiff = options?.synthetic ? null : buildWorkflowIntentDiff(expandedText);
+		const claimsGenuineUserIntent = !options?.synthetic && options?.attribution !== "agent";
+		const deepInterviewUserIntentEpoch =
+			claimsGenuineUserIntent && !this.isStreaming ? this.#claimDeepInterviewUserIntent() : undefined;
 
 		// If streaming, queue via steer() or followUp() based on option
 		if (this.isStreaming) {
@@ -6323,9 +6535,10 @@ export class AgentSession {
 			if (options.streamingBehavior === "followUp") {
 				await this.#queueFollowUp(expandedText, options?.images, {
 					forceOneAtATime: options.followUpQueuePolicy === "sequential",
+					claimsGenuineUserIntent,
 				});
 			} else {
-				await this.#queueSteer(expandedText, options?.images);
+				await this.#queueSteer(expandedText, options?.images, { claimsGenuineUserIntent });
 			}
 			if (workflowIntentDiff) {
 				this.sessionManager.appendCustomEntry(WORKFLOW_INTENT_DIFF_CUSTOM_TYPE, workflowIntentDiff);
@@ -6361,6 +6574,8 @@ export class AgentSession {
 						timestamp: Date.now(),
 					}
 				: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
+			if (deepInterviewUserIntentEpoch !== undefined)
+				this.#deepInterviewGenuineUserMessageEpochs.set(message, deepInterviewUserIntentEpoch);
 			await this.refreshGjcSubskillTools();
 
 			if (eagerTodoPrelude?.toolChoice) {
@@ -6462,11 +6677,20 @@ export class AgentSession {
 						.filter((content): content is TextContent => content.type === "text")
 						.map(content => content.text)
 						.join("");
+		const claimsGenuineUserIntent = message.attribution === "user";
+		const preclaimedUserIntentEpoch = this.#deepInterviewPreclaimedCustomInputEpochs.get(message);
+		this.#deepInterviewPreclaimedCustomInputEpochs.delete(message);
+		const deepInterviewUserIntentEpoch =
+			claimsGenuineUserIntent && !this.isStreaming
+				? (preclaimedUserIntentEpoch ?? this.#claimDeepInterviewUserIntent())
+				: preclaimedUserIntentEpoch;
 
 		if (this.isStreaming) {
 			if (!options?.streamingBehavior) {
 				throw new AgentBusyError();
 			}
+			if (preclaimedUserIntentEpoch !== undefined)
+				this.#deepInterviewPreclaimedCustomInputEpochs.set(message, preclaimedUserIntentEpoch);
 			await this.sendCustomMessage(message, {
 				deliverAs: options.streamingBehavior,
 				followUpQueuePolicy: options.followUpQueuePolicy,
@@ -6487,6 +6711,8 @@ export class AgentSession {
 				attribution: message.attribution ?? "agent",
 				timestamp: Date.now(),
 			};
+			if (deepInterviewUserIntentEpoch !== undefined)
+				this.#deepInterviewGenuineUserMessageEpochs.set(customMessage, deepInterviewUserIntentEpoch);
 
 			await this.#syncSkillPromptActiveStateSafely(customMessage, true);
 			try {
@@ -6507,6 +6733,7 @@ export class AgentSession {
 			admissionLease?: SessionAdmissionLease;
 		},
 	): Promise<void> {
+		await this.#agentEndPublicationPromise;
 		this.#beginInFlight();
 		const predecessorAgentEndHold =
 			options?.predecessorAgentEndHold ?? this.#reserveDeferredAgentEndForContinuation();
@@ -6732,6 +6959,12 @@ export class AgentSession {
 			}
 			this.#releaseDeferredAgentEndContinuation(predecessorAgentEndHold);
 			this.#endInFlight();
+			if (options?.skipPostPromptRecoveryWait) {
+				await this.#agentEndPublicationPromise;
+			} else {
+				await this.#agentEndHandlingPromise;
+				await this.#agentEndPublicationPromise;
+			}
 		}
 	}
 
@@ -6775,7 +7008,7 @@ export class AgentSession {
 			ui: noOpUIContext,
 			hasUI: false,
 			cwd: this.sessionManager.getCwd(),
-			sessionManager: this.sessionManager,
+			sessionManager: createReadonlySessionManager(this.sessionManager),
 			modelRegistry: this.#modelRegistry,
 			model: this.model ?? undefined,
 			isIdle: () => !this.isStreaming,
@@ -6791,6 +7024,10 @@ export class AgentSession {
 			getQueuedMessages: () => this.getQueuedMessageEntries(),
 			getActiveTools: () => this.getActiveToolNames(),
 			getAllTools: () => this.getAllToolNames(),
+			resolveTool: name => {
+				const tool = this.getToolByName(name);
+				return tool ? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields } : undefined;
+			},
 			cycleModel: () => this.cycleModel(),
 			cycleThinkingLevel: () => this.cycleThinkingLevel(),
 			setQueueMode: (kind, mode) => {
@@ -6926,7 +7163,7 @@ export class AgentSession {
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
 		assertImagePlaceholdersHavePayload(expandedText, images);
-		await this.#queueSteer(expandedText, images);
+		await this.#queueSteer(expandedText, images, { claimsGenuineUserIntent: true });
 	}
 
 	/**
@@ -6945,26 +7182,29 @@ export class AgentSession {
 		assertImagePlaceholdersHavePayload(expandedText, images);
 		await this.#queueFollowUp(expandedText, images, {
 			forceOneAtATime: options?.followUpQueuePolicy === "sequential",
+			claimsGenuineUserIntent: true,
 		});
 	}
 
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	async #queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+	async #queueSteer(
+		text: string,
+		images?: ImageContent[],
+		options?: { claimsGenuineUserIntent?: boolean },
+	): Promise<void> {
 		assertImagePlaceholdersHavePayload(text, images);
 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 		this.#steeringMessages.push(this.#createQueuedDisplayEntry(displayText));
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images && images.length > 0) {
-			content.push(...images);
+		if (images && images.length > 0) content.push(...images);
+		const message = { role: "user" as const, content, attribution: "user" as const, timestamp: Date.now() };
+		if (options?.claimsGenuineUserIntent) {
+			const epoch = this.#claimDeepInterviewUserIntent();
+			this.#deepInterviewGenuineUserMessageEpochs.set(message, epoch);
 		}
-		this.agent.steer({
-			role: "user",
-			content,
-			attribution: "user",
-			timestamp: Date.now(),
-		});
+		this.agent.steer(message);
 		// A live agent loop polls the steering queue at every tool/turn boundary
 		// and consumes this message on its own. But when a steer is queued while no
 		// loop is actively running — e.g. the session still reports busy only
@@ -6983,23 +7223,22 @@ export class AgentSession {
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	async #queueFollowUp(text: string, images?: ImageContent[], options?: { forceOneAtATime?: boolean }): Promise<void> {
+	async #queueFollowUp(
+		text: string,
+		images?: ImageContent[],
+		options?: { forceOneAtATime?: boolean; claimsGenuineUserIntent?: boolean },
+	): Promise<void> {
 		assertImagePlaceholdersHavePayload(text, images);
 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 		this.#followUpMessages.push(this.#createQueuedDisplayEntry(displayText));
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images && images.length > 0) {
-			content.push(...images);
+		if (images && images.length > 0) content.push(...images);
+		const message = { role: "user" as const, content, attribution: "user" as const, timestamp: Date.now() };
+		if (options?.claimsGenuineUserIntent) {
+			const epoch = this.#claimDeepInterviewUserIntent();
+			this.#deepInterviewGenuineUserMessageEpochs.set(message, epoch);
 		}
-		this.agent.followUp(
-			{
-				role: "user",
-				content,
-				attribution: "user",
-				timestamp: Date.now(),
-			},
-			options?.forceOneAtATime ? { forceOneAtATime: true } : undefined,
-		);
+		this.agent.followUp(message, options?.forceOneAtATime ? { forceOneAtATime: true } : undefined);
 		// When fully idle AND the session is in a resumable assistant-ended state,
 		// schedule an immediate continue so the queued follow-up is delivered
 		// without waiting for the next user turn. We gate on isStreaming (model
@@ -7162,6 +7401,12 @@ export class AgentSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		const preclaimedUserIntentEpoch = this.#deepInterviewPreclaimedCustomInputEpochs.get(message);
+		this.#deepInterviewPreclaimedCustomInputEpochs.delete(message);
+		if (appMessage.attribution === "user") {
+			const epoch = preclaimedUserIntentEpoch ?? this.#claimDeepInterviewUserIntent();
+			this.#deepInterviewGenuineUserMessageEpochs.set(appMessage, epoch);
+		}
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(appMessage, options?.triggerTurn ?? false);
@@ -7307,12 +7552,12 @@ export class AgentSession {
 		}
 
 		if (options?.deliverAs === "followUp") {
-			await this.#queueFollowUp(text, images);
+			await this.#queueFollowUp(text, images, { claimsGenuineUserIntent: true });
 			options.onPreflightAccepted?.();
 			return;
 		}
 		if (options?.deliverAs === "steer") {
-			await this.#queueSteer(text, images);
+			await this.#queueSteer(text, images, { claimsGenuineUserIntent: true });
 			options.onPreflightAccepted?.();
 			return;
 		}
@@ -7323,7 +7568,7 @@ export class AgentSession {
 		// in-flight compaction internally, and #queueSteer would otherwise park
 		// the message in the steering queue with no turn to consume it.
 		if (this.isStreaming) {
-			await this.#queueSteer(text, images);
+			await this.#queueSteer(text, images, { claimsGenuineUserIntent: true });
 			options?.onPreflightAccepted?.();
 			return;
 		}
@@ -7601,6 +7846,11 @@ export class AgentSession {
 		 *  hand-off rather than a failure. */
 		silent?: boolean;
 	}): Promise<void> {
+		const abortGoalState = this.getGoalModeState();
+		this.#suppressNextGoalReminderAfterAbortGoalId =
+			abortGoalState?.enabled === true && abortGoalState.goal.status === "active"
+				? abortGoalState.goal.id
+				: undefined;
 		this.#abortActiveMidRunBarriers();
 		if (options?.silent) {
 			this.#silentAbortPending = true;
@@ -9857,6 +10107,7 @@ export class AgentSession {
 		const state = this.getGoalModeState();
 		if (!state?.enabled || state.goal.status !== "active") {
 			this.#lastGoalReminderAssistantTimestamp = undefined;
+			this.#suppressNextGoalReminderAfterAbortGoalId = undefined;
 			return false;
 		}
 		if (this.#lastGoalReminderAssistantTimestamp === assistantMessage.timestamp) {
@@ -9874,6 +10125,11 @@ export class AgentSession {
 			continuationPrompt,
 			"</system-reminder>",
 		].join("\n");
+		if (this.#suppressNextGoalReminderAfterAbortGoalId !== undefined) {
+			const suppressReminder = this.#suppressNextGoalReminderAfterAbortGoalId === state.goal.id;
+			this.#suppressNextGoalReminderAfterAbortGoalId = undefined;
+			if (suppressReminder) return false;
+		}
 
 		logger.debug("Goal completion: sending active-goal reminder", { goalId: state.goal.id });
 		this.agent.appendMessage({
@@ -9884,6 +10140,94 @@ export class AgentSession {
 		});
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 		return true;
+	}
+	#claimDeepInterviewUserIntent(): number {
+		return ++this.#deepInterviewUserIntentEpoch;
+	}
+
+	#deepInterviewAssistantIdentity(message: AssistantMessage): string {
+		const existingIdentity = this.#deepInterviewAssistantIdentities.get(message);
+		if (existingIdentity) return existingIdentity;
+		const entryId = getSessionMessageEntryId(message);
+		const identity = entryId ? `entry:${entryId}` : `object:${++this.#nextDeepInterviewAssistantFallbackId}`;
+		this.#deepInterviewAssistantIdentities.set(message, identity);
+		return identity;
+	}
+
+	async #checkActiveDeepInterviewCompletion(
+		assistantMessage: AssistantMessage,
+		agentEndGeneration: number | undefined,
+		ownerEpoch: number | undefined,
+	): Promise<"not_applicable" | "continued" | "superseded" | "already_handled"> {
+		const identity = this.#deepInterviewAssistantIdentity(assistantMessage);
+		if (this.#handledDeepInterviewAssistantIds.has(identity)) return "already_handled";
+
+		const output = await buildSkillStopOutput({
+			cwd: this.sessionManager.getCwd(),
+			sessionId: this.sessionManager.getSessionId(),
+			sessionFile: this.sessionManager.getSessionFile(),
+		});
+		if (
+			agentEndGeneration === undefined ||
+			ownerEpoch === undefined ||
+			this.#isDisposed ||
+			agentEndGeneration !== this.#promptGeneration ||
+			ownerEpoch !== this.#deepInterviewUserIntentEpoch
+		) {
+			this.#handledDeepInterviewAssistantIds.add(identity);
+			return "superseded";
+		}
+		const stopReason = typeof output?.stopReason === "string" ? output.stopReason : "";
+		if (output?.decision !== "block") return "not_applicable";
+		if (stopReason !== "gjc_skill_deep_interview_interviewing") {
+			if (!stopReason.startsWith("gjc_skill_deep_interview_")) return "not_applicable";
+			this.#handledDeepInterviewAssistantIds.add(identity);
+			return "already_handled";
+		}
+		if (this.#handledDeepInterviewAssistantIds.has(identity)) return "already_handled";
+		this.#handledDeepInterviewAssistantIds.add(identity);
+
+		const budget = this.#deepInterviewContinuationBudget;
+		if (budget.epoch !== ownerEpoch) return "superseded";
+		if (budget.committed + budget.reserved >= 2) return "already_handled";
+		budget.reserved++;
+		let committed = false;
+		try {
+			if (
+				this.#isDisposed ||
+				agentEndGeneration !== this.#promptGeneration ||
+				ownerEpoch !== this.#deepInterviewUserIntentEpoch
+			) {
+				return "superseded";
+			}
+			budget.reserved--;
+			budget.committed++;
+			committed = true;
+			const reminder = [
+				"<system-reminder>",
+				`You stopped while the GJC deep-interview workflow is still active (stop gate: ${stopReason}).`,
+				"Continue the active round immediately: score and persist the answered round, report progress, then use the ask tool for the next question.",
+				"Only stop after crystallizing the spec, recording a handoff, or explicitly cancelling the workflow.",
+				`(Continuation ${budget.committed}/2 for this prompt)`,
+				"</system-reminder>",
+			].join("\n");
+			const reminderMessage: DeveloperMessage = {
+				role: "developer",
+				content: [{ type: "text", text: reminder }],
+				attribution: "agent",
+				timestamp: Date.now(),
+			};
+			this.agent.appendMessage(reminderMessage);
+			this.sessionManager.appendMessage(reminderMessage);
+			this.#scheduleAgentContinue({
+				generation: agentEndGeneration,
+				skipCompactionCheck: true,
+				shouldContinue: () => ownerEpoch === this.#deepInterviewUserIntentEpoch,
+			});
+			return "continued";
+		} finally {
+			if (!committed) budget.reserved--;
+		}
 	}
 	/**
 	 * Check if agent stopped with incomplete todos and prompt to continue.
@@ -13788,7 +14132,12 @@ export class AgentSession {
 	}
 
 	#hasStreamingExtensionHandlers(): boolean {
-		return this.hasExtensionHandlers("message_update");
+		return (
+			this.hasExtensionHandlers("message_update") ||
+			this.hasExtensionHandlers("reasoning_summary_start") ||
+			this.hasExtensionHandlers("reasoning_summary_delta") ||
+			this.hasExtensionHandlers("reasoning_summary_end")
+		);
 	}
 
 	/**

@@ -363,7 +363,7 @@ export declare class Shell {
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV0_11_0(): void
+export declare function __piNativesV0_11_1(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.

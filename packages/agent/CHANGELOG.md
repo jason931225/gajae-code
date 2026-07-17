@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-07-16
+
 ### Fixed
 
 - Hardened the managed fallback attempt snapshot: staged agent events and assistant partials were cloned with a bare `structuredClone`, so a single non-cloneable value in a staged payload (e.g. a live `Headers` inside `transportFailure`) threw `DataCloneError` ("The object can not be cloned."), masked the real provider outcome, and deterministically failed every attempt until the fallback chain exhausted. The snapshot now degrades to a cycle-aware sanitizing deep clone that always returns a detached, JSON-serializable value (unsupported leaves become placeholders), so event-time replay semantics are preserved and no local snapshot failure can masquerade as a provider attempt failure. Byte accounting in the provisional buffer measures the raw event before the snapshot duplicates it (over-limit payloads are rejected pre-clone), re-measures degraded snapshots so the retained sanitized form is what gets accounted, and uses the sanitized detached form as the cycle-safe estimator for cyclic payloads.

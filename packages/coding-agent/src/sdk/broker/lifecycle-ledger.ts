@@ -255,7 +255,8 @@ export class LifecycleLedger {
 		if (tornTail) await this.#sealTornTail();
 		for (const [identity, uncertain] of syntheticUncertain) {
 			this.#byIdentity.set(identity, uncertain);
-			await this.#append(uncertain);
+			if (this.#entries.some(entry => entry.identity === identity && entry.state === "accepted"))
+				await this.#append(uncertain);
 		}
 		for (const identity of uncertainAfterCorruption) {
 			const entry = this.#byIdentity.get(identity);
@@ -323,7 +324,7 @@ export class LifecycleLedger {
 	}
 
 	#isValidHistoryContinuation(previous: LifecycleLedgerEntry | undefined, next: LifecycleLedgerEntry): boolean {
-		if (!previous) return true;
+		if (!previous) return next.state === "accepted";
 		if (previous.requestHash !== next.requestHash || final(previous.state)) return false;
 		if (previous.state === "accepted") return true;
 		return next.state === "effect_started" || next.state === "awaiting_ready" || final(next.state);
@@ -386,8 +387,22 @@ export class LifecycleLedger {
 		await this.#quarantine(reason);
 		throw new Error(reason);
 	}
+	async #openAppendRegular(file: string): Promise<fs.FileHandle> {
+		const handle = await fs.open(
+			file,
+			fsSync.constants.O_WRONLY | fsSync.constants.O_APPEND | fsSync.constants.O_CREAT | fsSync.constants.O_NOFOLLOW,
+			0o600,
+		);
+		try {
+			if (!(await handle.stat()).isFile()) throw new Error("Lifecycle ledger write target is not a regular file.");
+			return handle;
+		} catch (error) {
+			await handle.close();
+			throw error;
+		}
+	}
 	async #sealTornTail(): Promise<void> {
-		const h = await fs.open(this.#file, "a", 0o600);
+		const h = await this.#openAppendRegular(this.#file);
 		try {
 			await h.writeFile("\n");
 			await h.sync();
@@ -397,7 +412,7 @@ export class LifecycleLedger {
 		}
 	}
 	async #quarantine(line: string | Uint8Array): Promise<void> {
-		const h = await fs.open(this.#corruptFile, "a", 0o600);
+		const h = await this.#openAppendRegular(this.#corruptFile);
 		try {
 			await h.writeFile(line);
 			await h.writeFile("\n");
@@ -415,8 +430,22 @@ export class LifecycleLedger {
 			await directory.close();
 		}
 	}
-	async #compact(): Promise<void> {
-		const snapshot = [...this.#byIdentity.values()];
+	async #compact(replacement?: LifecycleLedgerEntry): Promise<boolean> {
+		const anchors = new Map<string, LifecycleLedgerEntry>();
+		for (const entry of this.#entries) {
+			const latest = replacement?.identity === entry.identity ? replacement : this.#byIdentity.get(entry.identity);
+			if (entry.state === "accepted" && !anchors.has(entry.identity) && entry.requestHash === latest?.requestHash)
+				anchors.set(entry.identity, entry);
+		}
+		const snapshot: LifecycleLedgerEntry[] = [];
+		const compacted = new Map(this.#byIdentity);
+		if (replacement) compacted.set(replacement.identity, replacement);
+		for (const [identity, latest] of compacted) {
+			const anchor = anchors.get(identity);
+			if (!anchor) throw new Error("Lifecycle ledger compaction requires an accepted identity anchor.");
+			snapshot.push(anchor);
+			if (latest.state !== "accepted") snapshot.push(latest);
+		}
 		const contents = Buffer.from(snapshot.map(entry => `${JSON.stringify(entry)}\n`).join(""));
 		if (
 			snapshot.length > this.#limits.maxRows ||
@@ -430,7 +459,14 @@ export class LifecycleLedger {
 		);
 		let renamed = false;
 		try {
-			const h = await fs.open(temporary, "wx", 0o600);
+			const h = await fs.open(
+				temporary,
+				fsSync.constants.O_WRONLY |
+					fsSync.constants.O_CREAT |
+					fsSync.constants.O_EXCL |
+					fsSync.constants.O_NOFOLLOW,
+				0o600,
+			);
 			try {
 				await h.writeFile(contents);
 				await h.sync();
@@ -441,11 +477,13 @@ export class LifecycleLedger {
 			renamed = true;
 			await this.#syncDirectory();
 			this.#entries = snapshot;
+			this.#byIdentity = compacted;
 			this.#rowCount = snapshot.length;
 			this.#byteCount = contents.length;
 		} finally {
 			if (!renamed) await fs.unlink(temporary).catch(() => {});
 		}
+		return replacement !== undefined;
 	}
 	get warnings(): readonly string[] {
 		return this.#warnings;
@@ -454,11 +492,13 @@ export class LifecycleLedger {
 		const line = Buffer.from(`${JSON.stringify(entry)}\n`);
 		if (line.length - 1 > this.#limits.maxLineBytes)
 			throw new Error("Lifecycle ledger row exceeds the maximum byte length.");
+		let replacementCompacted = false;
 		if (this.#rowCount + 1 > this.#limits.maxRows || this.#byteCount + line.length > this.#limits.maxBytes)
-			await this.#compact();
+			replacementCompacted = await this.#compact(this.#byIdentity.has(entry.identity) ? entry : undefined);
+		if (replacementCompacted) return entry;
 		if (this.#rowCount + 1 > this.#limits.maxRows || this.#byteCount + line.length > this.#limits.maxBytes)
 			throw new Error("Lifecycle ledger append exceeds configured bounds.");
-		const h = await fs.open(this.#file, "a", 0o600);
+		const h = await this.#openAppendRegular(this.#file);
 		try {
 			await h.writeFile(line);
 			await h.sync();

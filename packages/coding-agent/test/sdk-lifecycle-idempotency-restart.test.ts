@@ -254,6 +254,49 @@ describe("SDK lifecycle ledger history validation", () => {
 		expect(await ledger.begin("i", "request")).toMatchObject({ kind: "replay", entry: { response } });
 		expect(await fs.stat(`${ledgerPath}.corrupt`).catch(() => undefined)).toBeUndefined();
 	});
+
+	it("quarantines standalone cleanup authority without appending lifecycle authority", async () => {
+		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-ledger-unanchored-cleanup-"));
+		const ledgerPath = path.join(dir, "sdk", "lifecycle-ledger.jsonl");
+		await fs.mkdir(path.dirname(ledgerPath), { recursive: true });
+		const cleanupOnly = lifecycleRow("cleanup", "request", "effect_started", 1, {
+			response: { ok: false, error: { code: "cleanup_pending", cleanup: { target: "outside" } } },
+		});
+		const terminalOnly = lifecycleRow("terminal", "request", "terminal_ok", 2, {
+			response: { sessionId: "untrusted" },
+			responseDigest: createHash("sha256").update('{"sessionId":"untrusted"}').digest("hex"),
+		});
+		const source = [cleanupOnly, terminalOnly].map(row => `${JSON.stringify(row)}\n`).join("");
+		await fs.writeFile(ledgerPath, source);
+
+		const ledger = await new LifecycleLedger(dir).open();
+		expect(await ledger.begin("cleanup", "request")).toMatchObject({ kind: "terminal_uncertain" });
+		expect(await ledger.begin("terminal", "request")).toMatchObject({ kind: "terminal_uncertain" });
+		await expect(new LifecycleLedger(dir).readTerminal("cleanup", "request")).resolves.toBeUndefined();
+		await expect(new LifecycleLedger(dir).readTerminal("terminal", "request")).resolves.toBeUndefined();
+		expect(await fs.readFile(ledgerPath, "utf8")).toBe(source);
+		expect(await fs.readFile(`${ledgerPath}.corrupt`, "utf8")).toContain('"effect_started"');
+	});
+
+	it("rejects ledger and corrupt-sidecar symlink swaps without modifying their targets", async () => {
+		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-ledger-symlink-write-"));
+		const sdkDir = path.join(dir, "sdk");
+		const ledgerPath = path.join(sdkDir, "lifecycle-ledger.jsonl");
+		const outside = path.join(dir, "outside");
+		await new LifecycleLedger(dir).open();
+		await fs.writeFile(outside, "outside-ledger");
+		await fs.symlink(outside, ledgerPath);
+		await expect(new LifecycleLedger(dir).begin("swap", "request")).rejects.toThrow();
+		expect(await fs.readFile(outside, "utf8")).toBe("outside-ledger");
+
+		await fs.unlink(ledgerPath);
+		await fs.writeFile(ledgerPath, "not json\n");
+		const corruptOutside = path.join(dir, "outside-corrupt");
+		await fs.writeFile(corruptOutside, "outside-corrupt");
+		await fs.symlink(corruptOutside, `${ledgerPath}.corrupt`);
+		await expect(new LifecycleLedger(dir).open()).rejects.toThrow();
+		expect(await fs.readFile(corruptOutside, "utf8")).toBe("outside-corrupt");
+	});
 });
 
 describe("SDK lifecycle ledger bounded writer", () => {
@@ -273,6 +316,28 @@ describe("SDK lifecycle ledger bounded writer", () => {
 			.map(line => JSON.parse(line));
 		expect(rows).toHaveLength(2);
 		expect(rows.at(-1)).toMatchObject({ state: "terminal_ok", response });
+		expect(rows.at(0)).toMatchObject({ identity: "i", requestHash: "request", state: "accepted" });
+	});
+
+	it("compacts an accepted anchor with its latest nonterminal authority", async () => {
+		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-ledger-compact-effect-"));
+		const ledgerPath = path.join(dir, "sdk", "lifecycle-ledger.jsonl");
+		const ledger = await new LifecycleLedger(dir, { maxRows: 3 }).open();
+		await ledger.begin("first", "request");
+		await ledger.transition("first", "accepted");
+		await ledger.transition("first", "effect_started");
+		await ledger.begin("second", "request");
+
+		const rows = (await fs.readFile(ledgerPath, "utf8"))
+			.trimEnd()
+			.split("\n")
+			.map(line => JSON.parse(line));
+		expect(rows).toMatchObject([
+			{ identity: "first", requestHash: "request", state: "accepted" },
+			{ identity: "first", requestHash: "request", state: "effect_started" },
+			{ identity: "second", requestHash: "request", state: "accepted" },
+		]);
+		expect((await new LifecycleLedger(dir, { maxRows: 3 }).open()).get("first")?.state).toBe("terminal_uncertain");
 	});
 
 	it("rejects before writing when compaction cannot make room for the next identity transition", async () => {
@@ -284,7 +349,7 @@ describe("SDK lifecycle ledger bounded writer", () => {
 		const before = await fs.readFile(ledgerPath, "utf8");
 
 		await expect(ledger.transition("first", "terminal_ok", { response: { sessionId: "first" } })).rejects.toThrow(
-			"Lifecycle ledger append exceeds configured bounds.",
+			"Lifecycle ledger compaction exceeds configured bounds.",
 		);
 		expect(await fs.readFile(ledgerPath, "utf8")).toBe(before);
 	});
@@ -307,7 +372,7 @@ describe("SDK lifecycle ledger bounded writer", () => {
 
 it("serializes concurrent distinct-identity compactions and reopens both terminal responses", async () => {
 	const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-ledger-compact-fifo-"));
-	const ledger = await new LifecycleLedger(dir, { maxRows: 3 }).open();
+	const ledger = await new LifecycleLedger(dir, { maxRows: 4 }).open();
 	await Promise.all([ledger.begin("first", "first-request"), ledger.begin("second", "second-request")]);
 	await Promise.all([ledger.transition("first", "effect_started"), ledger.transition("second", "effect_started")]);
 	await Promise.all([
@@ -315,7 +380,7 @@ it("serializes concurrent distinct-identity compactions and reopens both termina
 		ledger.transition("second", "terminal_ok", { response: { sessionId: "second" } }),
 	]);
 
-	const reopened = await new LifecycleLedger(dir, { maxRows: 3 }).open();
+	const reopened = await new LifecycleLedger(dir, { maxRows: 4 }).open();
 	expect(await reopened.begin("first", "first-request")).toMatchObject({
 		kind: "replay",
 		entry: { response: { sessionId: "first" } },

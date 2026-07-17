@@ -1035,14 +1035,14 @@ describe("SDK broker identity and discovery", () => {
 		}
 	});
 
-	it("persists an identity-bound lifecycle cleanup plan before a failed exact metadata detach", async () => {
+	it("retries cleanup pending after restart, then reopens and exactly replays successful metadata cleanup", async () => {
 		const dir = await temp();
 		const cwd = path.join(dir, "workspace");
 		const stateRoot = path.join(cwd, ".gjc", "state");
 		const sessionId = "metadata-cleanup-pending";
 		const sessionPath = await managedSessionPath(dir, cwd, sessionId);
 		const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
-		const broker = new Broker({ agentDir: dir });
+		let broker = new Broker({ agentDir: dir });
 		const originalUnlink = native.exactUnlink;
 		let detachedQ1: string | undefined;
 		await fs.mkdir(path.dirname(sessionPath), { recursive: true });
@@ -1111,6 +1111,9 @@ describe("SDK broker identity and discovery", () => {
 			);
 			if (!detachedQ1) throw new Error("Missing persisted Q1 metadata path");
 			vi.restoreAllMocks();
+			await broker.stop();
+			broker = new Broker({ agentDir: dir });
+			await broker.start();
 			let plannedQ2: string | undefined;
 			const replay = vi.spyOn(native, "exactUnlink").mockImplementation((pathname, identity) => {
 				if (pathname === detachedQ1) {
@@ -1152,6 +1155,16 @@ describe("SDK broker identity and discovery", () => {
 			}
 			expect(plannedQ2).toEqual(expect.any(String));
 			expect(await fs.stat(detachedQ1).catch(() => undefined)).toBeUndefined();
+			await broker.stop();
+			broker = new Broker({ agentDir: dir });
+			await broker.start();
+			expect(
+				await broker.handleRequest(
+					"session.delete",
+					{ sessionId, sessionPath, cwd },
+					"metadata-cleanup-pending-key",
+				),
+			).toMatchObject({ ok: true, result: { sessionId } });
 		} finally {
 			vi.restoreAllMocks();
 			await broker.stop();

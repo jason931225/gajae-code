@@ -374,6 +374,8 @@ import {
 	getSessionMessageObservationId,
 	transferSessionMessageIdentity,
 } from "./session-manager";
+import { getEntriesForInternalRead, getSessionContextForInternalRead } from "./session-manager-internal";
+
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { pruneSupersededMaintenanceReminders, pruneSupersededVolatileProjectContext } from "./volatile-context-pruning";
 import { YieldQueue } from "./yield-queue";
@@ -469,7 +471,9 @@ export interface AgentSessionConfig {
 	/** Extension runner (created in main.ts with wrapped tools) */
 	extensionRunner?: ExtensionRunner;
 	/** Override first-party worker integration dispatch for embedded hosts and deterministic lifecycle tests. */
-	workerIntegrationRequest?: () => Promise<void>;
+	workerIntegrationRequest?: (signal: AbortSignal) => Promise<void>;
+	/** Bound terminal worker-integration settlement for embedded hosts and deterministic lifecycle tests. */
+	workerIntegrationTimeoutMs?: number;
 
 	/** Loaded skills (already discovered by SDK) */
 	skills?: Skill[];
@@ -1112,11 +1116,16 @@ export type BeforeAgentStartContributor = (event: {
 	sessionId: string | undefined;
 }) => Promise<BeforeAgentStartInternalMessage | undefined>;
 
+const AGENT_END_WORKER_INTEGRATION_TIMEOUT_MS = 5_000;
+
 export class WorkerIntegrationRequestScheduler {
 	#inFlight: Promise<void> | undefined = undefined;
 	#pending = false;
 
-	constructor(readonly request: () => Promise<void>) {}
+	constructor(
+		readonly request: (signal: AbortSignal) => Promise<void>,
+		readonly timeoutMs = AGENT_END_WORKER_INTEGRATION_TIMEOUT_MS,
+	) {}
 
 	enqueue(): void {
 		if (this.#inFlight) {
@@ -1134,20 +1143,26 @@ export class WorkerIntegrationRequestScheduler {
 
 	#start(): void {
 		this.#pending = false;
-		// Invoke synchronously so enqueue retains its existing single-flight timing,
-		// while converting a synchronous generic request throw into a settled promise.
+		const controller = new AbortController();
 		let request: Promise<void>;
 		try {
-			request = this.request();
+			request = this.request(controller.signal);
 		} catch {
 			request = Promise.resolve();
 		}
-		this.#inFlight = request
-			.catch(() => {})
-			.finally(() => {
-				this.#inFlight = undefined;
-				if (this.#pending) this.#start();
-			});
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<void>(resolve => {
+			timeout = setTimeout(() => {
+				controller.abort(new Error("Worker integration request timed out"));
+				resolve();
+			}, this.timeoutMs);
+		});
+		this.#inFlight = Promise.race([request.catch(() => {}), deadline]).finally(() => {
+			if (timeout) clearTimeout(timeout);
+			controller.abort();
+			this.#inFlight = undefined;
+			if (this.#pending) this.#start();
+		});
 	}
 }
 
@@ -1168,11 +1183,9 @@ export type StreamingEditParsedCacheEntry = {
 function stableStreamingEditArgsVersion(args: unknown): string | undefined {
 	if (typeof args === "string") return args;
 	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
-	try {
-		return JSON.stringify(args);
-	} catch {
-		return undefined;
-	}
+	const { diff, op, path } = args as Record<string, unknown>;
+	if (typeof diff !== "string") return undefined;
+	return `${path ?? ""}\u0000${op ?? ""}\u0000${diff.length}`;
 }
 
 export function getStreamingEditToolCallForEvent(
@@ -1196,7 +1209,13 @@ export function getStreamingEditToolCallForEvent(
 	if (version === undefined) return undefined;
 	const cacheKey = String(contentIndex);
 	const cached = cache.get(cacheKey);
-	if (cached?.version === version) return cached.parsed;
+	if (
+		cached?.version === version &&
+		(typeof toolCall.arguments === "string" ||
+			cached.parsed?.diff === (toolCall.arguments as Record<string, unknown>).diff)
+	) {
+		return cached.parsed;
+	}
 
 	let args: unknown = toolCall.arguments;
 	if (typeof args === "string") {
@@ -1936,11 +1955,14 @@ export class AgentSession {
 		this.settings = config.settings;
 		this.#workerIntegrationScheduler = new WorkerIntegrationRequestScheduler(
 			config.workerIntegrationRequest ??
-				(async () => {
-					await requestGjcWorkerIntegrationAttempt(this.sessionManager.getCwd(), process.env).catch(error => {
-						logger.warn("GJC team worker integration request failed", { error: String(error) });
-					});
+				(async signal => {
+					await requestGjcWorkerIntegrationAttempt(this.sessionManager.getCwd(), process.env, { signal }).catch(
+						error => {
+							logger.warn("GJC team worker integration request failed", { error: String(error) });
+						},
+					);
 				}),
+			config.workerIntegrationTimeoutMs,
 		);
 		this.notificationSessionController = config.notificationSessionController;
 		this.taskDepth = config.taskDepth ?? 0;
@@ -3227,7 +3249,7 @@ export class AgentSession {
 					);
 				}
 				if (toolName === "checkpoint" && !isError) {
-					const checkpointEntryId = this.sessionManager.getEntries().at(-1)?.id ?? null;
+					const checkpointEntryId = this.sessionManager.getLeafId();
 					this.#checkpointState = {
 						checkpointMessageCount: this.agent.state.messages.length,
 						checkpointEntryId,
@@ -6130,7 +6152,7 @@ export class AgentSession {
 	}
 
 	getTranscript(): Array<{ id: string; role: string; textSummary: string; ts: string; body: string }> {
-		return this.sessionManager.getEntries().flatMap(entry => {
+		return getEntriesForInternalRead(this.sessionManager).flatMap(entry => {
 			if (entry.type !== "message") return [];
 			const message = entry.message as unknown as { role?: unknown; content?: unknown };
 			const body =
@@ -8634,7 +8656,7 @@ export class AgentSession {
 
 	/** Return the persisted configured fallback selectors for a model role. */
 	getConfiguredModelChain(role: string): readonly string[] | undefined {
-		return this.sessionManager.buildSessionContext().configuredModelChains[role]?.entries;
+		return getSessionContextForInternalRead(this.sessionManager).configuredModelChains[role]?.entries;
 	}
 
 	/** Persist the configured fallback selectors for a model role. */
@@ -8686,7 +8708,7 @@ export class AgentSession {
 	 * instead of promoting a transient runtime model to the resume default.
 	 */
 	getSessionDefaultModelSelector(): string | undefined {
-		return this.sessionManager.buildSessionContext().models.default;
+		return getSessionContextForInternalRead(this.sessionManager).models.default;
 	}
 
 	/**
@@ -12039,7 +12061,8 @@ export class AgentSession {
 	 * intrinsic to controller construction and are never inferred at runtime.
 	 */
 	#defaultFallbackChain(): FallbackChainController {
-		const configuredChain = this.sessionManager.buildSessionContext().configuredModelChains.default;
+		const configuredChain = getSessionContextForInternalRead(this.sessionManager).configuredModelChains.default;
+
 		const settingsEntries = normalizeModelSelectorValue(
 			this.settings.getModelRole("default") ?? (this.model ? formatModelString(this.model) : undefined),
 		);
@@ -13879,7 +13902,7 @@ export class AgentSession {
 	 * Get all user messages from session for branch selector.
 	 */
 	getUserMessagesForBranching(): Array<{ entryId: string; text: string }> {
-		const entries = this.sessionManager.getEntries();
+		const entries = getEntriesForInternalRead(this.sessionManager);
 		const result: Array<{ entryId: string; text: string }> = [];
 
 		for (const entry of entries) {
@@ -14591,5 +14614,5 @@ export class AgentSession {
 }
 
 function cloneJsonValueForForkSeed<T>(value: T): T {
-	return JSON.parse(JSON.stringify(value)) as T;
+	return structuredClone(value);
 }

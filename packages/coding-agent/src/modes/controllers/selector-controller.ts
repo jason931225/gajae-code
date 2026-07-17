@@ -70,6 +70,8 @@ import {
 import { TelegramDaemonController } from "../../sdk/bus/telegram-daemon-control";
 import { runTelegramSetup, type TelegramSetupPreflight } from "../../sdk/bus/telegram-setup";
 import { type SessionInfo, SessionManager } from "../../session/session-manager";
+import { getTreeForInternalRead } from "../../session/session-manager-internal";
+
 import { FileSessionStorage } from "../../session/session-storage";
 import {
 	CREDENTIAL_AUTO_IMPORT_DISCOVERY_WARNING,
@@ -147,11 +149,11 @@ import { SessionObserverOverlayComponent } from "../components/session-observer-
 import { SessionSelectorComponent } from "../components/session-selector";
 import { dashboardSessions, SessionsDashboardComponent } from "../components/sessions-dashboard";
 import { SettingsSelectorComponent } from "../components/settings-selector";
-import type { StatusLineSettings } from "../components/status-line";
 import { TasksPaneComponent } from "../components/tasks-pane";
 import { ThemeSelectorComponent } from "../components/theme-selector";
 import { ThinkingSelectorComponent } from "../components/thinking-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
+import type { StatusLineSettings } from "../components/tool-status-header";
 import { TranscriptViewerOverlay, transcriptViewerEntries } from "../components/transcript-viewer-overlay";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
@@ -1048,6 +1050,7 @@ export class SelectorController {
 					await this.ctx.session.modelRegistry.refresh("offline");
 					await this.ctx.notifyConfigChanged?.();
 					this.ctx.showStatus(formatProviderSetupResult(result));
+					wizard.complete();
 					done();
 					this.ctx.ui.requestRender();
 				} catch (err) {
@@ -1866,7 +1869,7 @@ export class SelectorController {
 	}
 
 	showTreeSelector(): void {
-		const tree = this.ctx.sessionManager.getTree();
+		const tree = getTreeForInternalRead(this.ctx.sessionManager);
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
 		if (tree.length === 0) {
@@ -2364,7 +2367,10 @@ export class SelectorController {
 								if (handledCandidates || (secondCandidates.length === 0 && secondSourceFailures.length === 0)) {
 									let persisted = false;
 									try {
-										persisted = await stateStore.write({ initialImportResolution: "accepted" });
+										persisted = await stateStore.write({
+											initialImportResolution: "accepted",
+											lastImportVersion: VERSION,
+										});
 									} catch {
 										logger.warn("Credential auto-import state persistence failed", {
 											classification: "state-write-failed",

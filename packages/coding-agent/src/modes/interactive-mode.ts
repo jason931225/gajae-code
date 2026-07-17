@@ -104,8 +104,8 @@ import {
 	warnWhenPetCapabilitySettled,
 } from "./components/pet-capability";
 import { planSnapshotHash, serializePlanReviewComments } from "./components/plan-preview-overlay";
-import { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
+import { StatusLineComponent } from "./components/tool-status-header";
 import {
 	WelcomeComponent,
 	type WelcomeLogoMode,

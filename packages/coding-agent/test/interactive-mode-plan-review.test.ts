@@ -91,6 +91,18 @@ describe("InteractiveMode plan review rendering", () => {
 		mode = new InteractiveMode(session, "test");
 	});
 
+	it("routes SDK plan toggles through the complete interactive lifecycle", async () => {
+		const enabled = await session.setSdkPlanMode(true);
+		expect(enabled).toMatchObject({ enabled: true, planFilePath: "local://PLAN.md" });
+		expect(mode.planModeEnabled).toBe(true);
+		expect(session.getActiveToolNames()).toEqual(["test_read", "test_write", "resolve"]);
+		expect(session.peekStandingResolveHandler()).toBeDefined();
+
+		expect(await session.setSdkPlanMode(false)).toBeUndefined();
+		expect(mode.planModeEnabled).toBe(false);
+		expect(session.getActiveToolNames()).toEqual(["test_read", "test_write"]);
+		expect(session.peekStandingResolveHandler()).toBeUndefined();
+	});
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		mode?.stop();

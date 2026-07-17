@@ -472,6 +472,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
+		this.session.setSdkPlanModeHandler(async on => {
+			if (on) {
+				await this.#enterPlanMode();
+			} else {
+				await this.#exitPlanMode();
+			}
+			return this.session.getPlanModeState();
+		});
 		this.session.setRetainedMemorySampler(() => ({
 			tuiChatChildren: this.chatContainer.children.length,
 			tuiCachedRenderBytes: getRenderCacheRetainedBytes(),
@@ -2394,6 +2402,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#btwController.dispose();
 
 		// Emit shutdown event to hooks
+		this.session.setSdkPlanModeHandler(null);
 		await this.session.dispose();
 
 		if (this.isInitialized) {

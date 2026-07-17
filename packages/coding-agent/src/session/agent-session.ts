@@ -1615,6 +1615,8 @@ export class AgentSession {
 	#cancelAndSubmitInProgress = false;
 	/** Tracks whether the active cancel-and-submit preflight consumed hidden next-turn context. */
 	#cancelAndSubmitPendingNextTurnDrained = false;
+	/** Queue display already removed transactionally; suppress the matching message_start dequeue once. */
+	#displayDequeueAlreadyHandled: { role: "user"; text: string } | { role: "custom"; tag: string } | undefined;
 	/** Test-only abort outcome override for cancel-and-submit rollback coverage. */
 	#cancelAndSubmitAbortOutcomeProviderForTests: (() => Promise<AbortOutcome>) | undefined = undefined;
 	#postPromptTasks = new Set<Promise<void>>();
@@ -2242,6 +2244,12 @@ export class AgentSession {
 		this.#standingResolveHandler = handler ?? undefined;
 	}
 
+	#sdkPlanModeHandler: ((on: boolean) => Promise<PlanModeState | undefined>) | undefined;
+
+	setSdkPlanModeHandler(handler: ((on: boolean) => Promise<PlanModeState | undefined>) | null): void {
+		this.#sdkPlanModeHandler = handler ?? undefined;
+	}
+
 	/** Provider-scoped mutable state store for transport/session caches. */
 	get providerSessionState(): Map<string, ProviderSessionState> {
 		return this.#providerSessionState;
@@ -2862,8 +2870,18 @@ export class AgentSession {
 				this.#deepInterviewTurnOwnerEpoch = epoch;
 			}
 		}
-		if (event.type === "message_start" && event.message.role === "user") {
-			const messageText = this.#getUserMessageText(event.message);
+		const userMessageText =
+			event.type === "message_start" && event.message.role === "user"
+				? this.#getUserMessageText(event.message)
+				: undefined;
+		const userDisplayDequeueAlreadyHandled = Boolean(
+			userMessageText &&
+				this.#displayDequeueAlreadyHandled?.role === "user" &&
+				this.#displayDequeueAlreadyHandled.text === userMessageText,
+		);
+		if (userDisplayDequeueAlreadyHandled) this.#displayDequeueAlreadyHandled = undefined;
+		if (event.type === "message_start" && event.message.role === "user" && !userDisplayDequeueAlreadyHandled) {
+			const messageText = userMessageText;
 			if (messageText) {
 				// Check steering queue first (match by .text on tagged records)
 				const steeringIndex = this.#steeringMessages.findIndex(e => e.text === messageText);
@@ -2884,8 +2902,18 @@ export class AgentSession {
 		// registered the display chip; pull it back here to remove the matching entry
 		// from the pending bar atomically with the agent's queue consumption. Match by
 		// tag (not text) — two queued skills with identical args cannot collide.
-		if (event.type === "message_start" && event.message.role === "custom") {
-			const tag = readPendingDisplayTag(event.message.details);
+		const customDisplayTag =
+			event.type === "message_start" && event.message.role === "custom"
+				? readPendingDisplayTag(event.message.details)
+				: undefined;
+		const customDisplayDequeueAlreadyHandled = Boolean(
+			customDisplayTag &&
+				this.#displayDequeueAlreadyHandled?.role === "custom" &&
+				this.#displayDequeueAlreadyHandled.tag === customDisplayTag,
+		);
+		if (customDisplayDequeueAlreadyHandled) this.#displayDequeueAlreadyHandled = undefined;
+		if (event.type === "message_start" && event.message.role === "custom" && !customDisplayDequeueAlreadyHandled) {
+			const tag = customDisplayTag;
 			if (tag) {
 				const steerIdx = this.#steeringMessages.findIndex(e => e.tag === tag);
 				if (steerIdx !== -1) {
@@ -6116,16 +6144,15 @@ export class AgentSession {
 		};
 	}
 
-	setSdkPlanMode(on: boolean): PlanModeState | undefined {
+	async setSdkPlanMode(on: boolean): Promise<PlanModeState | undefined> {
 		if (typeof on !== "boolean")
 			throw Object.assign(new Error("mode.plan.set requires a boolean on value."), { code: "invalid_input" });
-		if (!on) {
-			this.setPlanModeState(undefined);
-			return undefined;
+		if (!this.#sdkPlanModeHandler) {
+			throw Object.assign(new Error("mode.plan.set requires an active host plan-mode lifecycle."), {
+				code: "unavailable",
+			});
 		}
-		const state: PlanModeState = { enabled: true, planFilePath: "local://PLAN.md", workflow: "parallel" };
-		this.setPlanModeState(state);
-		return state;
+		return this.#sdkPlanModeHandler(on);
 	}
 
 	async operateGoal(
@@ -8227,17 +8254,31 @@ export class AgentSession {
 					const steeringDisplaysDuringWindow = additionsSince(this.#steeringMessages, steeringDisplaySnapshot);
 					const followUpDisplaysDuringWindow = additionsSince(this.#followUpMessages, followUpDisplaySnapshot);
 					const selectedMessage = selected?.message;
+					const heldFollowUp = selected
+						? [
+								...queueSnapshot.steering.filter(
+									(_, index) => selected.mode !== "steer" || index !== selected.index,
+								),
+								...queueSnapshot.followUp.filter(
+									(_, index) => selected.mode !== "followUp" || index !== selected.index,
+								),
+							]
+						: [];
+					let heldQueueRestored = false;
+					const restoreHeldQueue = () => {
+						if (!selected || heldQueueRestored) return;
+						heldQueueRestored = true;
+						const current = this.agent.snapshotQueues();
+						this.agent.restoreQueues({
+							steering: current.steering,
+							followUp: [...heldFollowUp, ...current.followUp],
+						});
+					};
 					this.agent.restoreQueues({
 						steering: [...queuedDuringWindow.steering],
-						followUp: [
-							...queueSnapshot.steering.filter(
-								(_, index) => selected?.mode !== "steer" || index !== selected.index,
-							),
-							...queueSnapshot.followUp.filter(
-								(_, index) => selected?.mode !== "followUp" || index !== selected.index,
-							),
-							...queuedDuringWindow.followUp,
-						],
+						followUp: selected
+							? [...queuedDuringWindow.followUp]
+							: [...queueSnapshot.steering, ...queueSnapshot.followUp, ...queuedDuringWindow.followUp],
 					});
 					this.#steeringMessages = steeringDisplaysDuringWindow;
 					this.#followUpMessages = [
@@ -8259,6 +8300,12 @@ export class AgentSession {
 								: text;
 					await this.refreshGjcSubskillTools();
 					if (message.role === "custom") await this.#syncSkillPromptActiveStateSafely(message, true);
+					if (selected) {
+						const displayTag = message.role === "custom" ? readPendingDisplayTag(message.details) : undefined;
+						if (displayTag) this.#displayDequeueAlreadyHandled = { role: "custom", tag: displayTag };
+						else if (message.role === "user")
+							this.#displayDequeueAlreadyHandled = { role: "user", text: this.#getUserMessageText(message) };
+					}
 					try {
 						await this.#promptWithMessage(message, messageText, {
 							admissionLease: admission,
@@ -8272,11 +8319,16 @@ export class AgentSession {
 						});
 					} finally {
 						if (message.role === "custom") await this.#syncSkillPromptActiveStateSafely(message, false);
+						if (runAccepted) restoreHeldQueue();
 					}
+					restoreHeldQueue();
 					if (!runAccepted) throw new Error("Prompt was not accepted");
 					return { kind: "submitted" };
 				} catch (cause) {
-					if (runAccepted) return { kind: "submitted" };
+					if (runAccepted) {
+						return { kind: "submitted" };
+					}
+					this.#displayDequeueAlreadyHandled = undefined;
 					restore();
 					logger.error("Cancel-and-submit prompt failed before run acceptance", { cause });
 					this.emitNotice("error", `Unable to send immediately: ${String(cause)}`, "cancel-and-submit");

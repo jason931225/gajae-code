@@ -311,6 +311,19 @@ describe("AgentSession.cancelAndSubmit", () => {
 		expect(s.getQueuedMessageEntries().map(entry => entry.id)).not.toContain(head.id);
 	});
 
+	it("committed queue-head removes only the selected duplicate-text display", async () => {
+		const { session: s } = buildSession();
+		await s.steer("duplicate queued text");
+		await s.steer("duplicate queued text");
+		const [selected, remaining] = s.getQueuedMessageEntries();
+		if (!selected || !remaining) throw new Error("expected duplicate queued entries");
+
+		expect(await s.cancelAndSubmit(selected.text, { queuedEntryId: selected.id })).toEqual({ kind: "submitted" });
+		expect(s.getQueuedMessageEntries()).toEqual([
+			expect.objectContaining({ text: remaining.text, mode: "followUp" }),
+		]);
+	});
+
 	it("committed queue-head preserves the original image-bearing queued message", async () => {
 		const { agent, session: s } = buildSession();
 		await s.steer("rich queued content", [{ type: "image", data: "image-data", mimeType: "image/png" }]);

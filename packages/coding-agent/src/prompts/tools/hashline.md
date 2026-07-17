@@ -60,6 +60,21 @@ const TITLE = "Mrs";
 		"Mrs",
 		name?.trim() || "guest",
 	].join(" ");
+
+# Insert after / before a line
+`§mod.ts`
+`»{{hrefr 4}}`
+		"Dr",
+`«{{hrefr 5}}`
+		"Dr",
+
+# Delete a line
+`§mod.ts`
+`≔{{hrefr 5}}`
+
+# Replace with one blank line: the empty payload line follows the operation
+`§mod.ts`
+`≔{{hrefr 5}}`
 </examples>
 
 <critical>

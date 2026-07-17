@@ -18,8 +18,8 @@ export class TasksPaneComponent extends Container {
 		super();
 		this.#aggregator = aggregator;
 		this.#callbacks = callbacks;
-		this.#aggregator.acknowledgeFailures();
 		this.#render();
+		this.#aggregator.acknowledgeFailures();
 	}
 
 	getFocus(): SelectList {

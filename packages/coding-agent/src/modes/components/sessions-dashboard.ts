@@ -3,6 +3,38 @@ import { type Component, Container, matchesKey, truncateToWidth } from "@gajae-c
 import type { SessionInfo } from "../../session/session-manager";
 import { theme } from "../theme/theme";
 
+const PRESENCE_MAX_BYTES = 4096;
+const PRESENCE_MAX_FUTURE_MS = 5 * 60 * 1000;
+const PRESENCE_OPEN_FLAGS = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (fs.constants.O_NOFOLLOW ?? 0);
+
+function readPresenceFile(filePath: string): string {
+	if (!fs.constants.O_NOFOLLOW) throw new Error("No no-follow presence reads available");
+	const descriptor = fs.openSync(filePath, PRESENCE_OPEN_FLAGS);
+	try {
+		const stat = fs.fstatSync(descriptor);
+		if (!stat.isFile() || stat.size > PRESENCE_MAX_BYTES) throw new Error("Invalid presence sidecar");
+		const bytes = Buffer.alloc(stat.size);
+		const bytesRead = fs.readSync(descriptor, bytes, 0, bytes.length, 0);
+		if (bytesRead !== bytes.length) throw new Error("Incomplete presence sidecar");
+		return bytes.toString("utf8");
+	} finally {
+		fs.closeSync(descriptor);
+	}
+}
+
+function isPresenceRecord(value: unknown): value is PresenceRecord {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		typeof (value as { expiresAt?: unknown }).expiresAt === "string"
+	);
+}
+
+function fit(line: string, width: number): string {
+	return truncateToWidth(line, Math.max(0, width));
+}
+
 export type SessionLiveness = "active" | "stale" | "unknown";
 
 export interface DashboardSession {
@@ -11,6 +43,7 @@ export interface DashboardSession {
 	title: string;
 	modified: Date;
 	messageCount: number;
+	messageCountIsEstimate?: boolean;
 	liveness: SessionLiveness;
 }
 
@@ -25,13 +58,16 @@ interface PresenceRecord {
  */
 export function sessionLivenessFromPresence(
 	sessionPath: string,
-	readFile: (filePath: string) => string = filePath => fs.readFileSync(filePath, "utf8"),
+	readFile: (filePath: string) => string = readPresenceFile,
 	now = Date.now(),
 ): SessionLiveness {
 	try {
-		const record = JSON.parse(readFile(`${sessionPath}.presence.json`)) as PresenceRecord;
+		const content = readFile(`${sessionPath}.presence.json`);
+		if (Buffer.byteLength(content, "utf8") > PRESENCE_MAX_BYTES) return "unknown";
+		const record: unknown = JSON.parse(content);
+		if (!isPresenceRecord(record)) return "unknown";
 		const expiresAt = Date.parse(record.expiresAt);
-		if (!Number.isFinite(expiresAt)) return "unknown";
+		if (!Number.isFinite(expiresAt) || expiresAt > now + PRESENCE_MAX_FUTURE_MS) return "unknown";
 		return expiresAt > now ? "active" : "stale";
 	} catch {
 		return "unknown";
@@ -47,6 +83,7 @@ export function dashboardSessions(
 		cwd: session.cwd,
 		title: session.title ?? session.firstMessage,
 		modified: session.modified,
+		messageCountIsEstimate: session.messageCountIsEstimate,
 		messageCount: session.messageCount,
 		liveness: sessionLivenessFromPresence(session.path, options.readFile, options.now),
 	}));
@@ -74,13 +111,13 @@ export class SessionsDashboardComponent extends Container {
 				? "[0/0]"
 				: `[${this.#scrollOffset + 1}-${this.#scrollOffset + visible.length}/${this.sessions.length}]`;
 		return [
-			theme.bold("Sessions dashboard"),
-			theme.fg("dim", "Read-only — use /resume to open a session."),
+			fit(theme.bold("Sessions dashboard"), width),
+			fit(theme.fg("dim", "Read-only — use /resume to open a session."), width),
 			"",
 			...(visible.length === 0
-				? [theme.fg("dim", "No persisted sessions found.")]
+				? [fit(theme.fg("dim", "No persisted sessions found."), width)]
 				: visible.flatMap(session => new SessionDashboardRow(session).render(width))),
-			theme.fg("dim", `${position}  ↑/↓:scroll  PgUp/PgDn:page  Esc:close`),
+			fit(theme.fg("dim", `${position}  ↑/↓:scroll  PgUp/PgDn:page  Esc:close`), width),
 		];
 	}
 
@@ -118,14 +155,27 @@ class SessionDashboardRow implements Component {
 				: this.session.liveness === "stale"
 					? theme.fg("warning", "stale")
 					: theme.fg("dim", "unknown");
-		const modified = this.session.modified
-			.toISOString()
-			.replace("T", " ")
-			.replace(/\.\d{3}Z$/, "Z");
-		const title = truncateToWidth(this.session.title.replaceAll(/\s+/g, " ").trim(), Math.max(12, width - 50));
+		const modified = Number.isFinite(this.session.modified.getTime())
+			? this.session.modified
+					.toISOString()
+					.replace("T", " ")
+					.replace(/\.\d{3}Z$/, "Z")
+			: "unknown time";
+		const title = this.session.title.replaceAll(/\s+/g, " ").trim();
+		const cwd = this.session.cwd.replaceAll(/\s+/g, " ").trim();
+		const count = this.session.messageCountIsEstimate
+			? `~${this.session.messageCount} messages`
+			: `${this.session.messageCount} messages`;
+		const fullMetadata = `· ${count} · ${modified}`;
+		const compactMetadata = `· ${this.session.messageCountIsEstimate ? `~${this.session.messageCount}` : this.session.messageCount} msgs`;
+		const metadata = width >= 48 ? fullMetadata : width >= 24 ? compactMetadata : "";
+		const titleWidth = Math.max(0, width - 2 - metadata.length - (metadata ? 1 : 0));
 		return [
-			` ${status} ${title} ${theme.fg("dim", `· ${this.session.messageCount} messages · ${modified}`)}`,
-			`   ${theme.fg("dim", truncateToWidth(this.session.cwd, Math.max(1, width - 3)))}`,
+			fit(
+				` ${status} ${truncateToWidth(title, titleWidth)}${metadata ? ` ${theme.fg("dim", metadata)}` : ""}`,
+				width,
+			),
+			fit(`   ${theme.fg("dim", cwd)}`, width),
 		];
 	}
 }

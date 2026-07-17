@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@gajae-code/agent-core";
+import type { MouseEvent } from "@gajae-code/tui";
 import { SessionObserverOverlayComponent } from "../src/modes/components/session-observer-overlay";
 import { type TranscriptViewerEntry, TranscriptViewerOverlay } from "../src/modes/components/transcript-viewer-overlay";
 import { InputController } from "../src/modes/controllers/input-controller";
@@ -47,13 +48,14 @@ function message(id: string, value: object): object {
 
 function controller(messages: AgentMessage[], revealViewportAnchor = vi.fn((_id: string) => true)) {
 	const showTranscriptViewer = vi.fn();
+	const session = { messages };
 	const ctx = {
-		session: { messages },
+		session,
 		ui: { revealViewportAnchor },
 		showTranscriptViewer,
 		showError: vi.fn(),
 	} as unknown as InteractiveModeContext;
-	return { controller: new InputController(ctx), revealViewportAnchor, showTranscriptViewer };
+	return { controller: new InputController(ctx), revealViewportAnchor, showTranscriptViewer, session };
 }
 
 describe("G002 WS1 red-team: TranscriptViewerOverlay boundaries", () => {
@@ -179,6 +181,8 @@ describe("G002 WS1 red-team: observer adapter parity", () => {
 			expect(overlay.render(100).join("\n")).toContain("first response");
 			overlay.handleInput("]");
 			expect(overlay.render(100).join("\n")).toContain("second user");
+			overlay.handleInput("[");
+			expect(overlay.render(100).join("\n")).toContain("First [active]");
 			overlay.handleInput("\x1b");
 			expect(closed).toBe(1);
 		} finally {
@@ -312,11 +316,11 @@ describe("G002 WS1 red-team: turn jumps and browse action", () => {
 		expect(reveal.mock.calls.map(call => call[0])).toEqual(["anchor-2", "anchor-1", "anchor-0"]);
 		messages.splice(2, 1);
 		await h.controller.actionRegistry.execute("app.transcript.prevTurn");
-		expect(reveal.mock.calls.at(-1)?.[0]).toBe("anchor-1");
+		expect(reveal.mock.calls.at(-1)?.[0]).toBe("anchor-0");
 		reveal.mockReturnValueOnce(false);
 		await h.controller.actionRegistry.execute("app.transcript.prevTurn");
 		await h.controller.actionRegistry.execute("app.transcript.prevTurn");
-		expect(reveal.mock.calls.slice(-2).map(call => call[0])).toEqual(["anchor-0", "anchor-0"]);
+		expect(reveal.mock.calls.slice(-2).map(call => call[0])).toEqual(["anchor-1", "anchor-0"]);
 	});
 
 	it("makes browse unavailable for an empty session and executes without crashing for a nonempty session", async () => {
@@ -326,4 +330,54 @@ describe("G002 WS1 red-team: turn jumps and browse action", () => {
 		expect(await full.controller.actionRegistry.execute("app.transcript.browse")).toBe(true);
 		expect(full.showTranscriptViewer).toHaveBeenCalledTimes(1);
 	});
+});
+
+it("preserves the active turn when anchors append or reorder and keeps availability side-effect-free", async () => {
+	const messages = ["one", "two"].map(
+		(text, index) => ({ role: "user", content: text, timestamp: Date.now(), metadata: { index } }) as AgentMessage,
+	);
+	for (const [index, value] of messages.entries()) associateSessionMessageViewportAnchorId(value, `anchor-${index}`);
+	const reveal = vi.fn((_id: string) => true);
+	const h = controller(messages, reveal);
+	await h.controller.actionRegistry.execute("app.transcript.prevTurn");
+	expect(reveal.mock.calls.at(-1)?.[0]).toBe("anchor-1");
+	const appended = { role: "user", content: "three", timestamp: Date.now() } as AgentMessage;
+	associateSessionMessageViewportAnchorId(appended, "anchor-2");
+	messages.push(appended);
+	expect(h.controller.actionRegistry.isAvailable("app.transcript.nextTurn")).toBe(true);
+	await h.controller.actionRegistry.execute("app.transcript.nextTurn");
+	expect(reveal.mock.calls.at(-1)?.[0]).toBe("anchor-2");
+	messages.unshift(messages.pop() as AgentMessage);
+	await h.controller.actionRegistry.execute("app.transcript.prevTurn");
+	expect(reveal.mock.calls.at(-1)?.[0]).toBe("anchor-1");
+});
+
+it("keeps queue actions available during compaction and foreground tool work", () => {
+	const h = controller([]);
+	const session = h.session as { isCompacting?: boolean; isBashRunning?: boolean; isEvalRunning?: boolean };
+	session.isCompacting = true;
+	expect(h.controller.actionRegistry.isAvailable("app.message.queue")).toBe(true);
+	session.isCompacting = false;
+	session.isBashRunning = true;
+	expect(h.controller.actionRegistry.isAvailable("app.message.followUp")).toBe(true);
+	session.isBashRunning = false;
+	session.isEvalRunning = true;
+	expect(h.controller.actionRegistry.isAvailable("app.message.queue")).toBe(true);
+});
+
+it("maps mouse rows from rendered transcript chrome in main and observer-style views", () => {
+	const entries = () => [entry("first", "first"), entry("second", "second")];
+	const viewer = new TranscriptViewerOverlay({ getEntries: entries, onClose: () => {} });
+	viewer.render(100);
+	viewer.handleMouse({ kind: "click", localY: 6 } as unknown as MouseEvent);
+	expect(viewer.selectedEntryId).toBe("second");
+
+	const observerStyle = new TranscriptViewerOverlay({
+		getEntries: entries,
+		onClose: () => {},
+		getHeaderLines: () => ["Observed session"],
+	});
+	observerStyle.render(100);
+	observerStyle.handleMouse({ kind: "click", localY: 7 } as unknown as MouseEvent);
+	expect(observerStyle.selectedEntryId).toBe("second");
 });

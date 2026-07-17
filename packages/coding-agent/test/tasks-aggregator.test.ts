@@ -49,7 +49,7 @@ describe("TasksAggregator status contract", () => {
 		expect(mapCronStatus({ firing: true })).toBe("running");
 	});
 
-	test("uses registry lifecycle over a queued manager record and preserves resumability", () => {
+	test("uses the canonical record lifecycle with live registry metadata", () => {
 		const manager = {
 			onChange: noop,
 			getAllJobs: () => [],
@@ -67,8 +67,36 @@ describe("TasksAggregator status contract", () => {
 		};
 		const aggregator = new TasksAggregator(manager as never, observer as never, sessions as never);
 		expect(aggregator.getSnapshot().rows).toEqual([
-			{ id: "subagent:a", kind: "subagent", label: "Live", status: "running", startedAt: 1, resumable: true },
+			{ id: "subagent:a", kind: "subagent", label: "Live", status: "waiting", startedAt: 1, resumable: true },
 		]);
+		aggregator.dispose();
+	});
+
+	test("bounds terminal history without hiding active tasks", () => {
+		const manager = {
+			onChange: noop,
+			getAllJobs: () => [
+				{ id: "running", type: "bash", label: "running", status: "running", startTime: 1_000 },
+				...Array.from({ length: 101 }, (_, index) => ({
+					id: `done-${index}`,
+					type: "bash",
+					label: `done ${index}`,
+					status: "completed" as const,
+					startTime: index,
+				})),
+			],
+			getSubagentRecords: () => [],
+		};
+		const observer = {
+			onChange: noop,
+			getSnapshot: () => ({ monitors: [], crons: [], failedUnacknowledged: false }),
+			acknowledgeFailures: () => {},
+			getMonitorOutput: () => "",
+		};
+		const sessions = { onChange: noop, getSessions: () => [] };
+		const aggregator = new TasksAggregator(manager as never, observer as never, sessions as never);
+		expect(aggregator.getSnapshot().rows).toHaveLength(101);
+		expect(aggregator.getSnapshot().rows.map(row => row.id)).toContain("bash:running");
 		aggregator.dispose();
 	});
 });

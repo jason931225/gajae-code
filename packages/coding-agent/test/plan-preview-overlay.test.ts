@@ -39,15 +39,15 @@ describe("PlanPreviewOverlay", () => {
 		overlay.handleInput("\t");
 		expect(overlay.focusState).toBe("preview");
 	});
-	it("anchors comments to selected source lines instead of rendered Markdown rows", () => {
+	it("maps wrapped raw source rows back to their source line for mouse comments", () => {
 		const overlay = new PlanPreviewOverlay(
 			`# Heading\n${"a long source line that wraps at narrow viewport widths ".repeat(3)}\nthird`,
 			() => {},
 			() => {},
 		);
 		overlay.render(40);
-		overlay.handleInput("s");
-		overlay.handleInput("j");
+		overlay.handleMouse({ kind: "click", localY: 3 } as never);
+		expect(overlay.sourceLine).toBe(2);
 		overlay.handleInput("c");
 		overlay.handleInput("x");
 		overlay.handleInput("\r");

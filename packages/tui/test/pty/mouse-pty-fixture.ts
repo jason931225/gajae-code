@@ -25,7 +25,11 @@ editor.onSubmit = text => {
 tui.addChild(editor);
 tui.setFocus(editor);
 tui.start();
-process.stdout.write("\nPTY_FIXTURE_READY\n");
 
 process.once("SIGTERM", stop);
 process.once("SIGINT", stop);
+
+// node-pty may emit output before the parent has attached its onData listener.
+// Yield briefly so the readiness marker and terminal mode bytes are observable.
+await Bun.sleep(25);
+process.stdout.write("\nPTY_FIXTURE_READY\n");

@@ -49,6 +49,47 @@ describe("CommandPalette", () => {
 		expect(cancelled).toBe(1);
 	});
 
+	it("sanitizes untrusted palette text before filtering and rendering, and rejects malformed dispatch ids", () => {
+		let selected = 0;
+		const palette = new CommandPalette(
+			[
+				{
+					id: "slash:/safe-command",
+					label: "Safe\u001b]8;;https://example.test\u0007 label\nnext",
+					category: "Plugin\tcommands",
+					description: "Find\u001b[999m this\u001b[0m result",
+					bindingHint: "Ctrl\r+P",
+				},
+				{ id: "slash:/unsafe command", label: "Unsafe", category: "Plugin" },
+			],
+			() => selected++,
+			() => {},
+		);
+		for (const key of "find this result") palette.handleInput(key);
+		expect(palette.getEntries()[0]).toMatchObject({
+			label: "Safe label next",
+			category: "Plugin commands",
+			description: "Find this result",
+			bindingHint: "Ctrl +P",
+		});
+		const rendered = palette.render(120);
+		expect(Bun.stripANSI(rendered.join("\n"))).toContain("Safe label next");
+		expect(rendered.join("\n")).not.toContain("\u001b]8;;https://example.test\u0007");
+		expect(rendered.join("\n")).not.toContain("\u001b[999m");
+		expect(rendered.join("\n")).not.toContain("\u001b[0m result");
+		expect(rendered.every(line => !/[\r\n]/.test(line))).toBe(true);
+		palette.handleInput("\n");
+		expect(selected).toBe(1);
+
+		const invalid = new CommandPalette(
+			[{ id: "slash:/unsafe command", label: "Unsafe", category: "Plugin" }],
+			() => selected++,
+			() => {},
+		);
+		invalid.handleInput("\n");
+		expect(selected).toBe(1);
+	});
+
 	it("keeps the selected result visible while navigating beyond ten rows", () => {
 		const palette = new CommandPalette(
 			Array.from({ length: 12 }, (_, index) => ({

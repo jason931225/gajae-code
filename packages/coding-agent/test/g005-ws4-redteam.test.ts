@@ -48,12 +48,13 @@ describe("G005 WS4 red-team", () => {
 		);
 	});
 
-	it("clips an out-of-bounds line range instead of inventing blank quoted lines", () => {
+	it("clips a valid end past EOF but rejects invalid starts", () => {
 		const content = "one\ntwo";
 		const hash = planSnapshotHash(content);
 		expect(serializePlanReviewComments(content, hash, [comment(hash, 2, 99)])).toBe(
-			`Plan review comments (snapshot ${hash.slice(0, 8)}):\n- L2-L99: Review this\n> two`,
+			`Plan review comments (snapshot ${hash.slice(0, 8)}):\n- L2: Review this\n> two`,
 		);
+		expect(serializePlanReviewComments(content, hash, [comment(hash, 0, 1), comment(hash, 3, 3)])).toBe("");
 	});
 
 	it("serializes CRLF referenced lines as display lines, not embedded carriage-return bytes", () => {

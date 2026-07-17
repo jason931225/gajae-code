@@ -122,7 +122,7 @@ describe("G004 WS3 red-team: task aggregation and pane boundaries", () => {
 				id: "subagent:dual",
 				kind: "subagent",
 				label: "live registry",
-				status: "running",
+				status: "waiting",
 				startedAt: 10,
 				resumable: true,
 			},

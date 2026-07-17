@@ -57,6 +57,15 @@ export type MouseEvent = {
 	localY?: number;
 };
 
+type OverlayMouseBounds = {
+	row: number;
+	col: number;
+	width: number;
+	height: number;
+	termWidth: number;
+	termHeight: number;
+};
+
 /** Parse xterm SGR mouse reports. Drag and button-release reports are ignored. */
 export function parseSgrMouseEvent(data: string): MouseEvent | undefined {
 	const match = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
@@ -705,6 +714,7 @@ export class TUI extends Container {
 		options?: OverlayOptions;
 		preFocus: Component | null;
 		hidden: boolean;
+		mouseBounds?: OverlayMouseBounds;
 	}[] = [];
 
 	constructor(
@@ -958,7 +968,8 @@ export class TUI extends Container {
 	 * Returns a handle to control the overlay's visibility.
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
-		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false };
+		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false, mouseBounds: undefined };
+
 		this.overlayStack.push(entry);
 		// Only focus if overlay is actually visible
 		if (this.#isOverlayVisible(entry)) {
@@ -972,6 +983,8 @@ export class TUI extends Container {
 			hide: () => {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
+					entry.mouseBounds = undefined;
+
 					this.overlayStack.splice(index, 1);
 					// Restore focus if this overlay had focus
 					if (this.#focusedComponent === component) {
@@ -985,6 +998,8 @@ export class TUI extends Container {
 			setHidden: (hidden: boolean) => {
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
+				entry.mouseBounds = undefined;
+
 				// Update focus when hiding/showing
 				if (hidden) {
 					// If this overlay had focus, move focus to next visible or preFocus
@@ -1008,6 +1023,7 @@ export class TUI extends Container {
 	hideOverlay(): void {
 		const overlay = this.overlayStack.pop();
 		if (!overlay) return;
+		overlay.mouseBounds = undefined;
 		// Find topmost visible overlay, or fall back to preFocus
 		const topVisible = this.#getTopmostVisibleOverlay();
 		this.setFocus(topVisible?.component ?? overlay.preFocus);
@@ -1042,6 +1058,7 @@ export class TUI extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
+		for (const overlay of this.overlayStack) overlay.mouseBounds = undefined;
 	}
 
 	start(): void {
@@ -1460,7 +1477,15 @@ export class TUI extends Container {
 			else {
 				const focusedOverlay = this.overlayStack.find(o => o.component === this.#focusedComponent);
 				if (focusedOverlay) {
-					const bounds = this.#overlayMouseBounds(focusedOverlay);
+					if (!this.#isOverlayVisible(focusedOverlay)) {
+						focusedOverlay.mouseBounds = undefined;
+						return;
+					}
+					const bounds = focusedOverlay.mouseBounds;
+					if (bounds?.termWidth !== this.terminal.columns || bounds.termHeight !== this.terminal.rows) {
+						return;
+					}
+
 					if (
 						!bounds ||
 						mouse.x < bounds.col + 1 ||
@@ -1539,26 +1564,6 @@ export class TUI extends Container {
 		return true;
 	}
 
-	#overlayMouseBounds(
-		entry: (typeof this.overlayStack)[number],
-	): { row: number; col: number; width: number; height: number } | undefined {
-		if (!this.#isOverlayVisible(entry)) return undefined;
-		const { width, maxHeight } = this.#resolveOverlayLayout(
-			entry.options,
-			0,
-			this.terminal.columns,
-			this.terminal.rows,
-		);
-		let lines = safeRenderComponent(entry.component, width, "overlay");
-		if (maxHeight !== undefined) lines = lines.slice(0, maxHeight);
-		const { row, col } = this.#resolveOverlayLayout(
-			entry.options,
-			lines.length,
-			this.terminal.columns,
-			this.terminal.rows,
-		);
-		return { row, col, width, height: lines.length };
-	}
 	/**
 	 * Resolve overlay layout from options.
 	 * Returns { width, row, col, maxHeight } for rendering.
@@ -1701,6 +1706,7 @@ export class TUI extends Container {
 	#compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) return lines;
 		const result = [...lines];
+		for (const entry of this.overlayStack) entry.mouseBounds = undefined;
 
 		// Pre-render all visible overlays and calculate positions
 		const rendered: { overlayLines: string[]; row: number; col: number; w: number }[] = [];
@@ -1728,6 +1734,7 @@ export class TUI extends Container {
 			const { row, col } = this.#resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
 
 			rendered.push({ overlayLines, row, col, w: width });
+			entry.mouseBounds = { row, col, width, height: overlayLines.length, termWidth, termHeight };
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}
 

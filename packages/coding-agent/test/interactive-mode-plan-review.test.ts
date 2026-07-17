@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent, type AgentTool } from "@gajae-code/agent-core";
 import type { AssistantMessage } from "@gajae-code/ai";
@@ -610,6 +611,65 @@ describe("InteractiveMode plan review rendering", () => {
 		// turn doesn't double-inject the plan reference (it was just dispatched
 		// inside the synthetic prompt).
 		expect(markSentSpy).toHaveBeenCalledTimes(1);
+	});
+	it("finalizes the reviewed bytes when the draft changes during destination publication", async () => {
+		const planFilePath = "local://PLAN.md";
+		const finalPlanFilePath = "local://APPROVED.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		const resolvedFinalPath = resolveLocalUrlToPath(finalPlanFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		const reviewed = "# Plan\n\nReviewed bytes.";
+		await Bun.write(resolvedPlanPath, reviewed);
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(SelectorController.prototype, "showPlanPreview").mockResolvedValue({
+			action: "Approve and keep context",
+			comments: [],
+			notes: "",
+			snapshotHash: planSnapshotHash(reviewed),
+		});
+		const originalLink = fs.link;
+		vi.spyOn(fs, "link").mockImplementation(async (existingPath, newPath) => {
+			await Bun.write(resolvedPlanPath, "# Plan\n\nChanged after review.");
+			return originalLink(existingPath, newPath);
+		});
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN", finalPlanFilePath });
+
+		expect(await Bun.file(resolvedFinalPath).text()).toBe(reviewed);
+	});
+
+	it("marks the plan reference only after the approval prompt is accepted", async () => {
+		const planFilePath = "local://PLAN.md";
+		const finalPlanFilePath = "local://APPROVED.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		const reviewed = "# Plan\n\nDispatch ordering.";
+		await Bun.write(resolvedPlanPath, reviewed);
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(SelectorController.prototype, "showPlanPreview").mockResolvedValue({
+			action: "Approve and keep context",
+			comments: [],
+			notes: "",
+			snapshotHash: planSnapshotHash(reviewed),
+		});
+		const markSent = vi.spyOn(session, "markPlanReferenceSent");
+		vi.spyOn(session, "prompt").mockImplementation(async () => {
+			expect(markSent).not.toHaveBeenCalled();
+		});
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN", finalPlanFilePath });
+
+		expect(markSent).toHaveBeenCalledTimes(1);
 	});
 
 	it("Approve and compact context: cancelled outcome skips plan-approved dispatch", async () => {

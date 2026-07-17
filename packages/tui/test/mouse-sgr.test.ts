@@ -71,7 +71,7 @@ describe("SGR mouse input", () => {
 		expect(clicks).toEqual([]);
 	});
 
-	test("dispatches only inside a bottom-centered overlay using local coordinates", () => {
+	test("dispatches only inside a bottom-centered overlay using last-painted local coordinates", async () => {
 		let input: ((data: string) => void) | undefined;
 		const terminal = {
 			columns: 80,
@@ -97,14 +97,61 @@ describe("SGR mouse input", () => {
 		const clicks: unknown[] = [];
 		const overlay: Component = {
 			render: () => ["one", "two", "three"],
+
 			invalidate: () => {},
 			handleMouse: event => clicks.push(event),
 		};
 		tui.showOverlay(overlay, { anchor: "bottom-center", width: 20 });
 		tui.start();
+		await Bun.sleep(1);
+
 		input!("\x1b[<0;31;22M");
 		input!("\x1b[<0;31;1M");
 		expect(clicks).toEqual([{ kind: "click", button: 0, x: 31, y: 22, localX: 1, localY: 1 }]);
+	});
+
+	test("does not rerender an overlay to hit-test a click", async () => {
+		let input: ((data: string) => void) | undefined;
+		const terminal = {
+			columns: 80,
+			rows: 24,
+			available: true,
+			kittyProtocolActive: false,
+			start(handler: (data: string) => void) {
+				input = handler;
+			},
+			stop() {},
+			drainInput: async () => {},
+			write() {},
+			moveBy() {},
+			hideCursor() {},
+			showCursor() {},
+			clearLine() {},
+			clearFromCursor() {},
+			clearScreen() {},
+			setTitle() {},
+			setProgress() {},
+		} as unknown as import("../src/terminal").Terminal;
+		const tui = new TUI(terminal);
+		let renders = 0;
+		const clicks: unknown[] = [];
+		tui.showOverlay(
+			{
+				render: () => {
+					renders++;
+					return ["overlay"];
+				},
+				invalidate: () => {},
+				handleMouse: event => clicks.push(event),
+			},
+			{ anchor: "bottom-center", width: 20 },
+		);
+		tui.start();
+		await Bun.sleep(1);
+		const rendersBeforeClick = renders;
+		input!("\x1b[<0;31;24M");
+		expect(clicks).toEqual([{ kind: "click", button: 0, x: 31, y: 24, localX: 1, localY: 1 }]);
+		expect(renders).toBe(rendersBeforeClick);
 	});
 	test("dispatches clicks to the focused component without forwarding mouse text", () => {
 		let input: ((data: string) => void) | undefined;

@@ -93,6 +93,7 @@ export class TranscriptItemRegistry {
 
 	register(item: RegisterTranscriptItem): string {
 		const id = item.id ?? this.#idForKind(item.kind, item.source);
+		if (this.#items.has(id)) throw new Error(`Transcript item already registered: ${id}`);
 		this.#items.set(id, { ...item, id });
 		return id;
 	}
@@ -106,26 +107,29 @@ export class TranscriptItemRegistry {
 
 	startStream(options: StreamingItemOptions): string {
 		const id = transcriptItemId.stream(options.promptGeneration, options.messageOrdinal);
+		if (this.#items.has(id) || this.#aliases.has(id)) throw new Error(`Transcript stream already registered: ${id}`);
 		this.#items.set(id, { ...options, id, kind: options.kind ?? "assistant-text" });
 		return id;
 	}
 
-	/** Replaces a provisional stream with its persisted canonical item and retains its alias until rebuild. */
-	endStream(provisionalId: string, item: RegisterTranscriptItem): string | undefined {
-		const streamId = this.#resolveId(provisionalId);
-		if (!streamId || !this.#items.has(streamId)) return undefined;
-		const canonicalId = this.register(item);
-		if (canonicalId !== streamId) {
-			this.#items.delete(streamId);
-			this.#aliases.set(streamId, canonicalId);
+	/** Reconciles one exact live stream with its persisted canonical item. */
+	endStream(streamId: string, item: RegisterTranscriptItem): string | undefined {
+		if (!streamId.startsWith("stream:") || !this.#items.has(streamId)) return undefined;
+		const canonicalId = item.id ?? this.#idForKind(item.kind, item.source);
+		if (canonicalId !== streamId && this.#items.has(canonicalId)) return undefined;
+		if (canonicalId === streamId) {
+			this.#items.set(streamId, { ...item, id: streamId });
+			return streamId;
 		}
+		this.#items.set(canonicalId, { ...item, id: canonicalId });
+		this.#items.delete(streamId);
+		this.#aliases.set(streamId, canonicalId);
 		return canonicalId;
 	}
 
 	retireStream(id: string): boolean {
-		const streamId = this.#resolveId(id);
-		if (!streamId?.startsWith("stream:") || !this.#items.delete(streamId)) return false;
-		this.#aliases.delete(streamId);
+		if (!id.startsWith("stream:") || !this.#items.delete(id)) return false;
+		this.#aliases.delete(id);
 		return true;
 	}
 

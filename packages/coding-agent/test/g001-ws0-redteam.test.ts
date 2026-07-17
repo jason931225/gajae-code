@@ -139,6 +139,9 @@ describe("G001 WS0 red-team: ActionRegistry", () => {
 		expect(await registry.execute("app.suspend")).toBe(false);
 		expect(unavailableCalls).toBe(0);
 		expect(await registry.execute("app.interrupt")).toBe(false);
-		expect(errors).toEqual(["app.exit", "app.exit", "app.interrupt"]);
+		expect(errors).toEqual([
+			"Action app.exit availability failed: predicate failure",
+			"Action app.interrupt execution failed: rejection",
+		]);
 	});
 });

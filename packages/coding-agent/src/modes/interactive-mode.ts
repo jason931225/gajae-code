@@ -47,12 +47,7 @@ import { consumePendingGoalModeRequest } from "../gjc-runtime/goal-mode-request"
 import { type Goal, type GoalModeState, normalizeGoal } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { getLspStartupWarningMessage, LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
-import {
-	humanizePlanTitle,
-	type PlanApprovalDetails,
-	renameApprovedPlanFile,
-	resolvePlanTitle,
-} from "../plan-mode/approved-plan";
+import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
@@ -415,6 +410,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planModeProviderSessionScope: TemporaryProviderSessionScope | undefined;
 	#planModeHasEntered = false;
 	#planReviewContainer: Container | undefined;
+	#planApprovalDispatchPending = false;
 	readonly lspServers: LspStartupServerInfo[] | undefined = undefined;
 	mcpManager?: import("../runtime-mcp").MCPManager;
 	readonly #toolUiContextSetter: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
@@ -435,6 +431,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
 	#transcriptRegistry = new TranscriptItemRegistry();
+	#transcriptObjectIds = new WeakMap<object, string>();
+	#nextTranscriptObjectId = 0;
+
 	#jobsObserver?: JobsObserver;
 	#tasksAggregator?: TasksAggregator;
 	#eventBus?: EventBus;
@@ -515,7 +514,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hookWidgetContainerBelow = new Container();
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
-		this.statusLine = new StatusLineComponent(session, { version: this.#version });
+		this.statusLine = new StatusLineComponent(session, { version: this.#version, focusDomain: "composer" });
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
 
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
@@ -1715,6 +1714,41 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	async #finalizeApprovedPlan(planContent: string, planFilePath: string, finalPlanFilePath: string): Promise<void> {
+		if (!planFilePath.startsWith("local:") || !finalPlanFilePath.startsWith("local:")) {
+			throw new Error("Approved plan source and destination paths must use the local: scheme.");
+		}
+		const sourcePath = this.#resolvePlanFilePath(planFilePath);
+		const destinationPath = this.#resolvePlanFilePath(finalPlanFilePath);
+		const temporaryPath = `${destinationPath}.approval-${crypto.randomUUID()}`;
+		try {
+			await fs.writeFile(temporaryPath, planContent, { encoding: "utf8", flag: "wx" });
+			if (sourcePath === destinationPath) await fs.rename(temporaryPath, destinationPath);
+			else {
+				try {
+					await fs.link(temporaryPath, destinationPath);
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+						throw new Error(
+							`Plan destination already exists at ${finalPlanFilePath}. Choose a different title and submit the plan for approval again.`,
+						);
+					}
+					throw error;
+				}
+				await fs.unlink(temporaryPath);
+				await fs.unlink(sourcePath);
+			}
+			const destinationContent = await Bun.file(destinationPath).text();
+			if (planSnapshotHash(destinationContent) !== planSnapshotHash(planContent)) {
+				throw new Error(
+					`Approved plan destination hash did not match the reviewed snapshot at ${finalPlanFilePath}.`,
+				);
+			}
+		} finally {
+			await fs.unlink(temporaryPath).catch(() => {});
+		}
+	}
+
 	#renderPlanPreview(planContent: string, options?: { append?: boolean }): void {
 		const existingContainer = this.#planReviewContainer;
 		// Only reuse the existing preview when it is still attached to the chat container;
@@ -1790,7 +1824,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 			if (result !== null) {
 				await Bun.write(resolvedPath, result);
-				this.#renderPlanPreview(result);
 				this.showStatus("Plan updated in external editor.");
 				return result;
 			}
@@ -1818,12 +1851,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			reviewerComments?: string;
 		},
 	): Promise<void> {
-		await renameApprovedPlanFile({
-			planFilePath: options.planFilePath,
-			finalPlanFilePath: options.finalPlanFilePath,
-			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
-			getSessionId: () => this.sessionManager.getSessionId(),
-		});
+		await this.#finalizeApprovedPlan(planContent, options.planFilePath, options.finalPlanFilePath);
 		const previousTools = this.#planModePreviousTools ?? this.session.getActiveToolNames();
 
 		// Mark the pending abort caused by the plan-mode → compaction transition as
@@ -1862,14 +1890,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				const compactionPrompt = prompt.render(planModeCompactInstructionsPrompt, {
 					planFilePath: options.finalPlanFilePath,
 				});
-				// Pin the plan reference path BEFORE compaction so any user messages
-				// queued during the compaction await (which `handleCompactCommand`
-				// flushes via `flushCompactionQueue` before returning) see the
-				// approved plan in `#buildPlanReferenceMessage`. Reassignment after
-				// the try/finally is idempotent and kept for the !compactBeforeExecute
-				// branch.
 				this.session.setPlanReferencePath(options.finalPlanFilePath);
-				compactOutcome = await this.handleCompactCommand(compactionPrompt);
+				this.#planApprovalDispatchPending = true;
+				try {
+					compactOutcome = await this.handleCompactCommand(compactionPrompt);
+				} catch (error) {
+					this.#planApprovalDispatchPending = false;
+					await this.flushCompactionQueue({ willRetry: false });
+					throw error;
+				}
 			}
 		} finally {
 			// Unconditional clear. Idempotent: a no-op when the flag was never set
@@ -1891,13 +1920,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.setPlanReferencePath(options.finalPlanFilePath);
 
 		if (compactOutcome === "cancelled") {
-			// Explicit abort: honor it. `executeCompaction` already surfaced
-			// `showError("Compaction cancelled")` to the operator; we add the
-			// deferred-dispatch warning and exit. `markPlanReferenceSent` is
-			// intentionally skipped here: `#planReferenceSent` stays false, so
-			// `AgentSession.#buildPlanReferenceMessage` will inject the plan
-			// reference on the operator's next `prompt()` call. If we marked it
-			// sent here, the executor's first turn would have no plan context.
+			this.#planApprovalDispatchPending = false;
+			await this.flushCompactionQueue({ willRetry: false });
 			this.showWarning(
 				"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.",
 			);
@@ -1918,9 +1942,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		}
 
-		// markPlanReferenceSent fires only on the dispatch path so the synthetic
-		// plan-approved prompt is the source of the reference injection.
-		this.session.markPlanReferenceSent();
 		const planModePrompt = prompt.render(planModeApprovedPrompt, {
 			planContent,
 			finalPlanFilePath: options.finalPlanFilePath,
@@ -1928,8 +1949,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			tools: this.session.getActiveToolNames(),
 			reviewerComments: options.reviewerComments,
 		});
-
-		await this.session.prompt(planModePrompt, { synthetic: true });
+		try {
+			await this.session.prompt(planModePrompt, { synthetic: true });
+			this.session.markPlanReferenceSent();
+		} finally {
+			if (this.#planApprovalDispatchPending) {
+				this.#planApprovalDispatchPending = false;
+				await this.flushCompactionQueue({ willRetry: false });
+			}
+		}
 	}
 
 	async handlePlanModeCommand(initialPrompt?: string): Promise<void> {
@@ -2497,6 +2525,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
+		if (this.#planApprovalDispatchPending) return Promise.resolve();
 		return this.#uiHelpers.flushCompactionQueue(options);
 	}
 
@@ -2770,11 +2799,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const items: RegisterTranscriptItem[] = [];
 		const identityMap = new Map<string, string>();
-		for (const [messageIndex, message] of this.session.messages.entries()) {
+		for (const message of this.session.messages) {
+			const provisionalEntryId = this.#transcriptObjectId(message);
 			const durableEntryId = getSessionMessageEntryId(message);
-			const entryId = durableEntryId ?? `provisional:${messageIndex}`;
+			const entryId = durableEntryId ?? provisionalEntryId;
 			if (durableEntryId) {
-				const provisionalEntryId = `provisional:${messageIndex}`;
 				if (message.role === "user" || message.role === "developer") {
 					identityMap.set(transcriptItemId.entry(provisionalEntryId), transcriptItemId.entry(durableEntryId));
 				} else if (message.role === "assistant") {
@@ -2842,6 +2871,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#transcriptRegistry.rebuild(items);
 		return identityMap;
+	}
+
+	#transcriptObjectId(message: AgentMessage): string {
+		const existing = this.#transcriptObjectIds.get(message);
+		if (existing) return existing;
+		const id = transcriptItemId.stream("object", ++this.#nextTranscriptObjectId);
+		this.#transcriptObjectIds.set(message, id);
+		return id;
 	}
 
 	showJobsOverlay(): void {

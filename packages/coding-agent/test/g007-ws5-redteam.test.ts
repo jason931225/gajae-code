@@ -90,7 +90,7 @@ describe("G007 WS5 adversarial dashboard evidence", () => {
 				read(JSON.stringify({ expiresAt: "2099-01-01T00:00:00.000Z" })),
 				FIXTURE_NOW,
 			),
-		).toBe("active");
+		).toBe("unknown");
 		expect(
 			sessionLivenessFromPresence(
 				sessionPath,
@@ -127,6 +127,21 @@ describe("G007 WS5 adversarial dashboard evidence", () => {
 		fs.unlinkSync(`${transcript}.presence.json`);
 		fs.mkdirSync(`${transcript}.presence.json`);
 		expect(sessionLivenessFromPresence(transcript, undefined, FIXTURE_NOW)).toBe("unknown");
+		fs.rmdirSync(`${transcript}.presence.json`);
+		fs.writeFileSync(`${transcript}.target`, JSON.stringify({ expiresAt: "2026-01-01T12:01:00.000Z" }));
+		fs.symlinkSync(`${transcript}.target`, `${transcript}.presence.json`);
+		expect(sessionLivenessFromPresence(transcript, undefined, FIXTURE_NOW)).toBe("unknown");
+		fs.unlinkSync(`${transcript}.presence.json`);
+		fs.writeFileSync(`${transcript}.presence.json`, "x".repeat(4_097));
+		expect(sessionLivenessFromPresence(transcript, undefined, FIXTURE_NOW)).toBe("unknown");
+
+		if (fs.constants.O_NOFOLLOW) {
+			const openSync = vi.spyOn(fs, "openSync");
+			const lstatSync = vi.spyOn(fs, "lstatSync");
+			expect(sessionLivenessFromPresence("/device-like", undefined, FIXTURE_NOW)).toBe("unknown");
+			expect(lstatSync).not.toHaveBeenCalled();
+			expect(openSync).toHaveBeenCalledWith("/device-like.presence.json", expect.any(Number));
+		}
 	});
 
 	it("records full overlay open-close behavior and zero fixture writes without stacking reopen calls", async () => {

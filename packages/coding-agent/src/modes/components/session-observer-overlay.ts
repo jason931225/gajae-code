@@ -82,6 +82,7 @@ export class SessionObserverOverlayComponent extends TranscriptViewerOverlay {
 		const current = ids.indexOf(this.#selectedSessionId ?? "");
 		this.#selectedSessionId = ids[(current + direction + ids.length) % ids.length];
 		this.#cache = undefined;
+		this.resetSourceState();
 		this.refresh();
 	}
 	#entries(): readonly TranscriptViewerEntry[] {

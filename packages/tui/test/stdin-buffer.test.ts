@@ -85,6 +85,20 @@ describe("StdinBuffer", () => {
 
 			expect(emittedSequences).toEqual([]);
 		});
+
+		it("quarantines delayed SGR suffix chunks and preserves trailing text", async () => {
+			processInput("\x1b[<0;4");
+			await Bun.sleep(15);
+			processInput(";5Mtail");
+			expect(emittedSequences).toEqual(["t", "a", "i", "l"]);
+		});
+
+		it("resynchronizes after a bounded SGR quarantine", async () => {
+			processInput("\x1b[<0;");
+			await Bun.sleep(15);
+			processInput(`${"1".repeat(256)}tail`);
+			expect(emittedSequences).toEqual(["t", "a", "i", "l"]);
+		});
 	});
 
 	describe("Mixed Content", () => {
@@ -146,6 +160,11 @@ describe("StdinBuffer", () => {
 			processInput("5;");
 			processInput("10m");
 			expect(emittedSequences).toEqual(["\x1b[<35;15;10m"]);
+		});
+
+		it("keeps trailing text after a malformed SGR report", () => {
+			processInput("\x1b[<-1;4;5Mtail");
+			expect(emittedSequences).toEqual(["t", "a", "i", "l"]);
 		});
 
 		it("should handle multiple mouse events", () => {

@@ -12,7 +12,7 @@ import type { AgentSession } from "../../session/agent-session";
 import { readVisibleSkillActiveState, type SkillActiveEntry } from "../../skill-state/active-state";
 import * as git from "../../utils/git";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../utils/session-color";
-import type { ActionRegistry } from "../action-registry";
+import type { ActionRegistry, FocusDomain } from "../action-registry";
 import { EMPTY_JOBS_SNAPSHOT, type JobsSnapshot } from "../jobs-observer";
 import { sanitizeStatusText } from "../shared";
 import { renderSkillHudBar } from "./skill-hud/render";
@@ -54,6 +54,7 @@ export interface StatusLineComponentOptions {
 	version?: string;
 	actionRegistry?: ActionRegistry<void>;
 	getKeybindings?: () => KeybindingsManager;
+	focusDomain?: FocusDomain;
 }
 
 export interface StatusLineActionHint {
@@ -81,14 +82,8 @@ const ACTION_HINT_PRIORITY: readonly AppKeybinding[] = [
 	"app.tree.unfoldOrDown",
 ];
 
-function actionHintDomain(actions: readonly { domains: readonly string[] }[]): "selector" | "composer" | undefined {
-	if (actions.some(action => action.domains.includes("selector"))) return "selector";
-	if (actions.some(action => action.domains.includes("composer"))) return "composer";
-	return undefined;
-}
-
 /**
- * Produces whole, bound action hints in contextual priority order. The registry
+ * Produces whole, bound action hints for the current focus domain. The registry
  * remains the authority for availability; KEYBINDINGS remains the authority for
  * whether an action has a binding and the active manager supplies overrides.
  */
@@ -96,12 +91,11 @@ export function getAvailableActionHints(
 	actionRegistry: ActionRegistry<void> | undefined,
 	getKeybindings: (() => KeybindingsManager) | undefined,
 	width: number,
+	domain: FocusDomain = "composer",
 ): StatusLineActionHint[] {
 	if (!actionRegistry || !getKeybindings || width <= 0) return [];
 	const keybindings = getKeybindings();
 	const available = actionRegistry.all().filter(action => actionRegistry.isAvailable(action.id));
-	const domain = actionHintDomain(available);
-	if (!domain) return [];
 
 	const byId = new Map(available.map(action => [action.id, action]));
 	const candidates = ACTION_HINT_PRIORITY.map(id => byId.get(id))
@@ -165,6 +159,7 @@ export class StatusLineComponent implements Component {
 	#version: string | undefined;
 	#actionRegistry: ActionRegistry<void> | undefined;
 	#getKeybindings: (() => KeybindingsManager) | undefined;
+	#focusDomain: FocusDomain;
 
 	#resolvedSettingsCache:
 		| (Required<Pick<StatusLineSettings, "leftSegments" | "rightSegments" | "separator" | "segmentOptions">> &
@@ -211,6 +206,7 @@ export class StatusLineComponent implements Component {
 		this.#version = options.version?.trim() || undefined;
 		this.#actionRegistry = options.actionRegistry;
 		this.#getKeybindings = options.getKeybindings;
+		this.#focusDomain = options.focusDomain ?? "composer";
 	}
 
 	updateSettings(settings: StatusLineSettings): void {
@@ -220,6 +216,12 @@ export class StatusLineComponent implements Component {
 	setActionRegistry(actionRegistry: ActionRegistry<void>, getKeybindings: () => KeybindingsManager): void {
 		this.#actionRegistry = actionRegistry;
 		this.#getKeybindings = getKeybindings;
+		this.#renderedRowsCache = undefined;
+	}
+
+	setFocusDomain(domain: FocusDomain): void {
+		if (this.#focusDomain === domain) return;
+		this.#focusDomain = domain;
 		this.#renderedRowsCache = undefined;
 	}
 
@@ -789,14 +791,14 @@ export class StatusLineComponent implements Component {
 		}
 
 		const right: string[] = [];
-		const actionHints = getAvailableActionHints(this.#actionRegistry, this.#getKeybindings, width);
-		right.push(...actionHints.map(hint => hint.content));
+		const actionHints = getAvailableActionHints(this.#actionRegistry, this.#getKeybindings, width, this.#focusDomain);
 		for (const segId of effectiveSettings.rightSegments) {
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				right.push(highlightSegment(segId, rendered.content));
 			}
 		}
+		right.push(...actionHints.map(hint => hint.content));
 
 		const runningBackgroundJobs =
 			this.session.getAsyncJobSnapshot()?.running.filter(job => job.metadata?.monitor !== true).length ?? 0;

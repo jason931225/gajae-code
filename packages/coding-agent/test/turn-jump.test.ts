@@ -44,7 +44,7 @@ describe("transcript turn actions", () => {
 		]);
 	});
 
-	it("resets to the end when a new user turn is added", async () => {
+	it("preserves the active turn when a new user turn is added", async () => {
 		const messages = [userMessage("one"), userMessage("two")];
 		registerUserAnchors(messages);
 		const { controller, revealViewportAnchor } = createController(messages);
@@ -56,7 +56,7 @@ describe("transcript turn actions", () => {
 		associateSessionMessageViewportAnchorId(newMessage, "user-2");
 		await controller.actionRegistry.execute("app.transcript.prevTurn");
 
-		expect(revealViewportAnchor.mock.calls.at(-1)).toEqual(["user-2", "top"]);
+		expect(revealViewportAnchor.mock.calls.at(-1)).toEqual(["user-0", "top"]);
 	});
 
 	it("is unavailable when no user-message anchors are registered", () => {

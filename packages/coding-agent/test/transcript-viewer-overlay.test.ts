@@ -5,7 +5,11 @@ import type { AssistantMessage } from "@gajae-code/ai";
 import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
 import { TempDir } from "@gajae-code/utils";
 import { ModelRegistry } from "../src/config/model-registry";
-import { TranscriptViewerOverlay, transcriptViewerEntries } from "../src/modes/components/transcript-viewer-overlay";
+import {
+	type TranscriptViewerEntry,
+	TranscriptViewerOverlay,
+	transcriptViewerEntries,
+} from "../src/modes/components/transcript-viewer-overlay";
 import { SelectorController } from "../src/modes/controllers/selector-controller";
 import { InteractiveMode } from "../src/modes/interactive-mode";
 import { initTheme } from "../src/modes/theme/theme";
@@ -167,7 +171,7 @@ test("InteractiveMode preserves viewer selection when its provisional assistant 
 		if (!viewer) throw new Error("Transcript viewer was not shown");
 		// Move selection off index 0 so an index-0 fallback would pick a different logical entry.
 		viewer.handleInput("j");
-		expect(viewer.selectedEntryId).toBe("entry:provisional:1:content:0");
+		expect(viewer.selectedEntryId).toBe("entry:stream:object:2:content:0");
 
 		associateSessionMessageEntryId(assistant, "assistant-1");
 		mode.refreshTranscriptViewer();
@@ -183,3 +187,81 @@ test("InteractiveMode preserves viewer selection when its provisional assistant 
 		resetSettingsForTest();
 	}
 });
+
+test("sanitizes rendered transcript chrome while copying the original payload and reports copy failures", () => {
+	const payload = "safe\x1b]52;c;clipboard\x07\n\x1b[31mstyled";
+	const copied: string[] = [];
+	const errors: string[] = [];
+	const viewer = new TranscriptViewerOverlay({
+		title: "Title\x1b]0;owned\x07",
+		getEntries: () => [entryForOverlay("entry", payload, { label: "Label\x1b[2J" })],
+		onClose: () => {},
+		copyToClipboard: value => copied.push(value),
+		onError: message => errors.push(message),
+		getHeaderLines: () => ["Header\x1b]0;owned\x07"],
+		getFooterLines: () => ["Footer\x1b[2J"],
+	});
+	viewer.handleInput("y");
+	expect(copied).toEqual([payload]);
+	expect(viewer.render(100).join("\n")).not.toContain("\x1b]52;");
+	expect(viewer.render(100).join("\n")).not.toContain("\x1b[2J");
+	viewer.handleInput(" ");
+	expect(viewer.render(100).join("\n")).not.toContain("\x1b[31m");
+	viewer.handleInput("r");
+	expect(viewer.render(100).join("\n")).not.toContain("\x1b[31m");
+
+	const circular: Record<string, unknown> = {};
+	circular.self = circular;
+	const failing = new TranscriptViewerOverlay({
+		getEntries: () => [entryForOverlay("circular", "text", { metadata: circular })],
+		onClose: () => {},
+		copyToClipboard: () => {
+			throw new Error("clipboard unavailable");
+		},
+		onError: message => errors.push(message),
+	});
+	failing.handleInput("Y");
+	failing.handleInput("y");
+	expect(errors).toEqual([
+		"Failed to copy transcript entry to clipboard.",
+		"Failed to copy transcript entry to clipboard.",
+	]);
+});
+
+test("reconciles missing IDs by position and keeps followed tail content visible", () => {
+	let entries = Array.from({ length: 50 }, (_, index) => entryForOverlay(`entry-${index}`, `entry-${index}`));
+	const viewer = new TranscriptViewerOverlay({
+		getEntries: () => entries,
+		onClose: () => {},
+		initialSelection: "latest",
+		followTail: true,
+	});
+	viewer.render(100);
+	entries = [...entries, entryForOverlay("appended", "appended content")];
+	viewer.refresh();
+	expect(viewer.selectedEntryId).toBe("appended");
+	expect(viewer.render(100).join("\n")).toContain("appended content");
+
+	entries = [entryForOverlay("first", "first"), entryForOverlay("last", "last")];
+	const positioned = new TranscriptViewerOverlay({ getEntries: () => entries, onClose: () => {} });
+	positioned.handleInput("j");
+	entries = [entryForOverlay("first", "first"), entryForOverlay("replacement", "replacement")];
+	positioned.refresh();
+	expect(positioned.selectedEntryId).toBe("replacement");
+});
+
+function entryForOverlay(
+	id: string,
+	text: string,
+	overrides: Partial<TranscriptViewerEntry> & { metadata?: Readonly<Record<string, unknown>> } = {},
+): TranscriptViewerEntry {
+	const { metadata, ...entryOverrides } = overrides;
+	return {
+		id,
+		kind: "custom",
+		label: "Custom",
+		payload: { text, metadata: metadata ?? {}, source: text },
+		foldable: true,
+		...entryOverrides,
+	};
+}

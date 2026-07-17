@@ -43,14 +43,11 @@ async function probePtyCapability(): Promise<boolean> {
 }
 
 const ptyAvailable = enabled && process.platform !== "win32" ? await probePtyCapability() : false;
-if (enabled && process.platform !== "win32" && !ptyAvailable) {
-	console.warn(`Skipping mouse PTY matrix: ${capabilityReason}`);
-}
 
 function launchFixture(env: Record<string, string> = {}): { terminal: IPty; output: () => string } {
 	if (!pty) throw new Error(capabilityReason);
 	let captured = "";
-	const terminal = pty.spawn(process.execPath, [fixture], {
+	const terminal = pty.spawn("/bin/sh", ["-c", 'exec "$1" "$2"', "pty-fixture", process.execPath, fixture], {
 		name: "xterm-256color",
 		cols: 80,
 		rows: 24,
@@ -59,6 +56,9 @@ function launchFixture(env: Record<string, string> = {}): { terminal: IPty; outp
 	});
 	terminal.onData(data => {
 		captured += data;
+	});
+	terminal.onExit(event => {
+		captured += `\nPTY_FIXTURE_EXIT:${event.exitCode}:${event.signal}\n`;
 	});
 	return { terminal, output: () => captured };
 }
@@ -78,7 +78,10 @@ async function waitForOutput(output: () => string, marker: string): Promise<void
  * not require native PTY bindings.
  */
 describe.skipIf(!enabled || process.platform === "win32")("mouse PTY matrix", () => {
-	test.skipIf(!ptyAvailable)("emits SGR mouse enable bytes in a plain xterm PTY", async () => {
+	test("requires a usable PTY capability when explicitly enabled", () => {
+		expect(ptyAvailable, capabilityReason).toBe(true);
+	});
+	test("emits SGR mouse enable bytes in a plain xterm PTY", async () => {
 		const { terminal, output } = launchFixture({ PTY_FIXTURE_MOUSE: "1" });
 		try {
 			await waitForOutput(output, "PTY_FIXTURE_READY");
@@ -89,7 +92,7 @@ describe.skipIf(!enabled || process.platform === "win32")("mouse PTY matrix", ()
 		}
 	});
 
-	test.skipIf(!ptyAvailable)("emits SGR mouse disable bytes on graceful stop", async () => {
+	test("emits SGR mouse disable bytes on graceful stop", async () => {
 		const { terminal, output } = launchFixture({ PTY_FIXTURE_MOUSE: "1" });
 		try {
 			await waitForOutput(output, "PTY_FIXTURE_READY");
@@ -102,7 +105,7 @@ describe.skipIf(!enabled || process.platform === "win32")("mouse PTY matrix", ()
 		}
 	});
 
-	test.skipIf(!ptyAvailable)("restores SGR mouse modes when SIGTERM detaches the TUI", async () => {
+	test("restores SGR mouse modes when SIGTERM detaches the TUI", async () => {
 		const { terminal, output } = launchFixture({ PTY_FIXTURE_MOUSE: "1" });
 		try {
 			await waitForOutput(output, "PTY_FIXTURE_READY");
@@ -115,7 +118,7 @@ describe.skipIf(!enabled || process.platform === "win32")("mouse PTY matrix", ()
 		}
 	});
 
-	test.skipIf(!ptyAvailable)("emits no SGR mouse enable bytes under a multiplexer", async () => {
+	test("emits no SGR mouse enable bytes under a multiplexer", async () => {
 		const { terminal, output } = launchFixture({ PTY_FIXTURE_MOUSE: "1", TMUX: "1" });
 		try {
 			await waitForOutput(output, "PTY_FIXTURE_READY");
@@ -126,7 +129,7 @@ describe.skipIf(!enabled || process.platform === "win32")("mouse PTY matrix", ()
 		}
 	});
 
-	test.skipIf(!ptyAvailable)("does not leak SGR mouse reports into composer text", async () => {
+	test("does not leak SGR mouse reports into composer text", async () => {
 		const { terminal, output } = launchFixture({ PTY_FIXTURE_MOUSE: "1" });
 		const mouse = "\x1b[<0;3;4M";
 		try {

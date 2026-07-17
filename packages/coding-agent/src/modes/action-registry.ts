@@ -8,18 +8,26 @@ export interface ActionMetadata {
 	category: string;
 	bindingId?: AppKeybinding;
 	domains: readonly FocusDomain[];
+	exclusiveGroup?: string | false;
 }
 
-const action = (id: AppKeybinding, title: string, category: string, domains: FocusDomain[]): ActionMetadata => ({
+const action = (
+	id: AppKeybinding,
+	title: string,
+	category: string,
+	domains: FocusDomain[],
+	exclusiveGroup?: string | false,
+): ActionMetadata => ({
 	id,
 	title,
 	category,
 	bindingId: id,
 	domains,
+	exclusiveGroup,
 });
 
 export const APP_ACTION_METADATA: readonly ActionMetadata[] = [
-	action("app.interrupt", "Interrupt", "Session", ["global"]),
+	action("app.interrupt", "Interrupt", "Session", ["global"], false),
 	action("app.clear", "Clear", "Session", ["global"]),
 	action("app.exit", "Exit", "Session", ["global"]),
 	action("app.suspend", "Suspend", "Session", ["global"]),
@@ -73,12 +81,15 @@ export interface ActionDefinition<Context> extends ActionMetadata {
 
 export interface ActionRegistryOptions<Context> {
 	context: Context;
-	showError(actionId: AppKeybinding): void;
+	showError(error: string): void;
 }
 
 export class ActionRegistry<Context> {
 	readonly #actions = new Map<AppKeybinding, ActionDefinition<Context>>();
 	readonly #busy = new Set<AppKeybinding>();
+	readonly #busyGroups = new Set<string>();
+	readonly #availability = new Map<AppKeybinding, boolean>();
+	#availabilityResetQueued = false;
 
 	constructor(private readonly options: ActionRegistryOptions<Context>) {}
 
@@ -94,36 +105,61 @@ export class ActionRegistry<Context> {
 		return [...this.#actions.values()];
 	}
 
-	#reportError(id: AppKeybinding): void {
+	#reportError(id: AppKeybinding, phase: "availability" | "execution", error: unknown): void {
+		const cause = error instanceof Error ? error.message : String(error);
 		try {
-			this.options.showError(id);
+			this.options.showError(`Action ${id} ${phase} failed: ${cause}`);
 		} catch {
-			console.error(`Failed to report action error: ${id}`);
+			// Error reporting must not escape an action dispatch.
 		}
 	}
 
-	isAvailable(id: AppKeybinding): boolean {
+	#evaluateAvailability(id: AppKeybinding, action: ActionDefinition<Context>): boolean {
+		const cached = this.#availability.get(id);
+		if (cached !== undefined) return cached;
+		let available: boolean;
 		try {
-			return Boolean(this.#actions.get(id)?.availability(this.options.context));
-		} catch {
-			this.#reportError(id);
-			return false;
+			available = Boolean(action.availability(this.options.context));
+		} catch (error) {
+			this.#reportError(id, "availability", error);
+			available = false;
 		}
+		this.#availability.set(id, available);
+		if (!this.#availabilityResetQueued) {
+			this.#availabilityResetQueued = true;
+			queueMicrotask(() => {
+				this.#availability.clear();
+				this.#availabilityResetQueued = false;
+			});
+		}
+		return available;
+	}
+
+	#exclusiveGroup(action: ActionDefinition<Context>): string | undefined {
+		return action.exclusiveGroup === false ? undefined : (action.exclusiveGroup ?? "default");
+	}
+
+	isAvailable(id: AppKeybinding): boolean {
+		const action = this.#actions.get(id);
+		return action ? this.#evaluateAvailability(id, action) : false;
 	}
 
 	async execute(id: AppKeybinding): Promise<boolean> {
 		const current = this.#actions.get(id);
-		if (!current || this.#busy.has(id)) return false;
+		if (!current || this.#busy.has(id) || !this.#evaluateAvailability(id, current)) return false;
+		const group = this.#exclusiveGroup(current);
+		if (group && this.#busyGroups.has(group)) return false;
 		this.#busy.add(id);
+		if (group) this.#busyGroups.add(group);
 		try {
-			if (!current.availability(this.options.context)) return false;
 			await current.execute(this.options.context);
 			return true;
-		} catch {
-			this.#reportError(id);
+		} catch (error) {
+			this.#reportError(id, "execution", error);
 			return false;
 		} finally {
 			this.#busy.delete(id);
+			if (group) this.#busyGroups.delete(group);
 		}
 	}
 }

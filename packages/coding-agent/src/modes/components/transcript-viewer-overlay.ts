@@ -7,6 +7,7 @@ import {
 	truncateToWidth,
 	wrapTextWithAnsi,
 } from "@gajae-code/tui";
+import { sanitizeText } from "@gajae-code/utils";
 import { getMarkdownTheme, theme } from "../theme/theme";
 import type { TranscriptItemRegistry, TranscriptSourcePayload } from "../transcript-item-registry";
 import { DynamicBorder } from "./dynamic-border";
@@ -32,6 +33,7 @@ export type TranscriptViewerOverlayOptions = {
 	onClose: () => void;
 	requestRender?: () => void;
 	copyToClipboard?: (text: string) => void;
+	onError?: (message: string) => void;
 	enterExpands?: boolean;
 	initialSelection?: "first" | "latest";
 	followTail?: boolean;
@@ -59,6 +61,9 @@ export class TranscriptViewerOverlay extends Container {
 	#mdTheme: MarkdownTheme = getMarkdownTheme();
 	#width = 80;
 	#initialized = false;
+	#contentOrigin = 3;
+	#followTailPending = false;
+	#skipFollowTailOnce = false;
 
 	constructor(options: TranscriptViewerOverlayOptions) {
 		super();
@@ -74,19 +79,23 @@ export class TranscriptViewerOverlay extends Container {
 	}
 	refresh(identityMap?: ReadonlyMap<string, string>): void {
 		const previous = this.selectedEntryId;
+		const previousPosition = this.#selected;
 		const reconciledPrevious = previous ? (identityMap?.get(previous) ?? previous) : undefined;
 		const wasAtTail = this.#selected >= this.#entries.length - 1;
 		this.#entries = this.#options.getEntries();
-		if (this.#options.initialSelection === "latest" && (!this.#initialized || this.#entries.length === 0))
+		const reconciledIndex = reconciledPrevious
+			? this.#entries.findIndex(entry => entry.id === reconciledPrevious)
+			: -1;
+		if (this.#options.initialSelection === "latest" && !this.#initialized)
 			this.#selected = Math.max(0, this.#entries.length - 1);
-		else if (reconciledPrevious)
-			this.#selected = Math.max(
-				0,
-				this.#entries.findIndex(entry => entry.id === reconciledPrevious),
-			);
-		else this.#selected = Math.min(this.#selected, Math.max(0, this.#entries.length - 1));
-		if (this.#initialized && this.#options.followTail && wasAtTail)
+		else if (reconciledIndex >= 0) this.#selected = reconciledIndex;
+		else this.#selected = Math.min(previousPosition, Math.max(0, this.#entries.length - 1));
+		this.#followTailPending = Boolean(
+			this.#options.followTail && !this.#skipFollowTailOnce && (wasAtTail || !this.#initialized),
+		);
+		if (this.#initialized && this.#options.followTail && wasAtTail && !this.#skipFollowTailOnce)
 			this.#selected = Math.max(0, this.#entries.length - 1);
+		this.#skipFollowTailOnce = false;
 		this.#initialized = true;
 		this.#rebuild();
 	}
@@ -95,15 +104,19 @@ export class TranscriptViewerOverlay extends Container {
 		this.refresh();
 		const defaultHeader = this.#fullscreen
 			? [theme.fg("accent", "Transcript block")]
-			: [theme.fg("accent", this.#options.title ?? "Transcript")];
-		const header = this.#fullscreen ? defaultHeader : [...defaultHeader, ...(this.#options.getHeaderLines?.() ?? [])];
+			: [theme.fg("accent", sanitizeText(this.#options.title ?? "Transcript"))];
+		const header = this.#fullscreen
+			? defaultHeader
+			: [...defaultHeader, ...(this.#options.getHeaderLines?.() ?? []).map(sanitizeText)];
 		const defaultFooter = this.#fullscreen
 			? [theme.fg("dim", "Esc:back  j/k:scroll  PgUp/PgDn:page")]
 			: [
 					theme.fg(
 						"dim",
-						this.#options.footerControls ??
-							"j/k:select  Space:expand  Enter:fullscreen  y:copy  Y:metadata  r:raw  g/G:top/bottom  Esc:close",
+						sanitizeText(
+							this.#options.footerControls ??
+								"j/k:select  Space:expand  Enter:fullscreen  y:copy  Y:metadata  r:raw  g/G:top/bottom  Esc:close",
+						),
 					),
 				];
 		const scrollRange =
@@ -115,9 +128,13 @@ export class TranscriptViewerOverlay extends Container {
 				: "";
 		const footer = this.#fullscreen
 			? defaultFooter
-			: [...(this.#options.getFooterLines?.() ?? []), scrollRange, ...defaultFooter].filter(Boolean);
+			: [...(this.#options.getFooterLines?.() ?? []).map(sanitizeText), scrollRange, ...defaultFooter].filter(
+					Boolean,
+				);
 		this.#viewportHeight = Math.max(5, (process.stdout.rows || 40) - header.length - footer.length - 5);
+		this.#contentOrigin = header.length + 2;
 		const maxScroll = Math.max(0, this.#lines.length - this.#viewportHeight);
+		if (this.#followTailPending) this.#scrollOffset = maxScroll;
 		this.#scrollOffset = Math.max(0, Math.min(this.#scrollOffset, maxScroll));
 		const visible = this.#lines.slice(this.#scrollOffset, this.#scrollOffset + this.#viewportHeight);
 		const lines = [
@@ -134,7 +151,7 @@ export class TranscriptViewerOverlay extends Container {
 	handleMouse(event: MouseEvent): void {
 		if (event.kind !== "click" || this.#fullscreen) return;
 		// Render has a border, header, and border before the first viewport row.
-		const contentLine = this.#scrollOffset + (event.localY ?? event.y) - 4;
+		const contentLine = this.#scrollOffset + (event.localY ?? event.y) - this.#contentOrigin;
 		const index = this.#renderedEntries.findIndex(
 			entry => contentLine >= entry.lineStart && contentLine < entry.lineStart + entry.lineCount,
 		);
@@ -251,14 +268,36 @@ export class TranscriptViewerOverlay extends Container {
 	#toggleExpand(): void {
 		const entry = this.#entries[this.#selected];
 		if (!entry || entry.foldable === false) return;
-		this.#expanded.has(entry.id) ? this.#expanded.delete(entry.id) : this.#expanded.add(entry.id);
+		const expanding = !this.#expanded.has(entry.id);
+		if (expanding) this.#expanded.add(entry.id);
+		else this.#expanded.delete(entry.id);
 		this.#rebuild();
+		if (expanding) {
+			this.#scrollOffset = this.#renderedEntries[this.#selected]?.lineStart ?? 0;
+			this.#skipFollowTailOnce = true;
+		}
 		this.#requestRender();
 	}
+	resetSourceState(): void {
+		this.#expanded.clear();
+		this.#raw.clear();
+		this.#scrollOffset = 0;
+		this.#initialized = false;
+		this.#fullscreen = false;
+		this.#skipFollowTailOnce = false;
+		this.#followTailPending = false;
+	}
+
 	#copy(metadata: boolean): void {
 		const entry = this.#entries[this.#selected];
 		if (!entry || entry.copyable === false) return;
-		this.#options.copyToClipboard?.(metadata ? JSON.stringify(entry.payload.metadata, null, 2) : entry.payload.text);
+		try {
+			this.#options.copyToClipboard?.(
+				metadata ? JSON.stringify(entry.payload.metadata, null, 2) : entry.payload.text,
+			);
+		} catch {
+			this.#options.onError?.("Failed to copy transcript entry to clipboard.");
+		}
 	}
 	#requestRender(): void {
 		this.#options.requestRender?.();
@@ -275,15 +314,16 @@ export class TranscriptViewerOverlay extends Container {
 			const raw = this.#raw.has(entry.id);
 			lines.push("");
 			lines.push(
-				`${selected ? theme.fg("accent", "▶") : " "} ${theme.fg("muted", `[${entry.label ?? entry.kind}]`)}`,
+				`${selected ? theme.fg("accent", "▶") : " "} ${theme.fg("muted", `[${sanitizeText(entry.label ?? entry.kind)}]`)}`,
 			);
-			const text = (
-				raw
+			const text = sanitizeText(
+				(raw
 					? entry.payload.text
 					: (this.#options.getEntryText?.(entry, expanded) ??
 						entry.getDisplayText?.(expanded) ??
 						entry.payload.text)
-			).trim();
+				).trim(),
+			);
 			if (raw)
 				for (const line of text.split("\n"))
 					for (const wrapped of wrapTextWithAnsi(line, contentWidth)) lines.push(`${INDENT}${wrapped}`);

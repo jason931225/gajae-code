@@ -306,6 +306,7 @@ describe("InputController keybinding setup", () => {
 		session.model = { reasoning: true };
 		session.getRoleModelCycleCandidateCount.mockReturnValue(2);
 		session.isStreaming = true;
+		await Promise.resolve();
 		expect(controller.actionRegistry.isAvailable("app.thinking.cycle")).toBe(true);
 		expect(controller.actionRegistry.isAvailable("app.model.cycleForward")).toBe(true);
 
@@ -349,7 +350,9 @@ describe("InputController keybinding setup", () => {
 		expect(editor.onSelectModelTemporary).not.toBe(editor.onSelectModel);
 
 		editor.onSelectModelTemporary?.();
+		await Bun.sleep(0);
 		editor.onSelectModel?.();
+		await Bun.sleep(0);
 
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);

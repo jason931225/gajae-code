@@ -10,6 +10,7 @@ import {
 	visibleWidth,
 } from "@gajae-code/tui";
 import { fuzzyFilter } from "@gajae-code/tui/fuzzy";
+import { sanitizeStatusText } from "../shared";
 import { theme } from "../theme/theme";
 import { DynamicBorder } from "./dynamic-border";
 
@@ -21,6 +22,14 @@ export type CommandPaletteEntry = {
 	bindingHint?: string;
 	disabled?: boolean;
 };
+
+function sanitizePaletteText(text: string): string {
+	return sanitizeStatusText(text.toWellFormed());
+}
+
+function isExecutableEntry(entry: CommandPaletteEntry): boolean {
+	return /^(?:action:[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*|slash:\/[a-zA-Z0-9][a-zA-Z0-9:_.-]*)$/.test(entry.id);
+}
 
 class CommandPaletteResults {
 	#entries: readonly CommandPaletteEntry[] = [];
@@ -61,12 +70,25 @@ export class CommandPalette extends Container {
 	#selectedIndex = -1;
 	#viewportStart = 0;
 
+	readonly #entries: readonly CommandPaletteEntry[];
+	readonly #onSelect: (entry: CommandPaletteEntry) => void;
+	readonly #onCancel: () => void;
+
 	constructor(
-		private readonly entries: readonly CommandPaletteEntry[],
-		private readonly onSelect: (entry: CommandPaletteEntry) => void,
-		private readonly onCancel: () => void,
+		entries: readonly CommandPaletteEntry[],
+		onSelect: (entry: CommandPaletteEntry) => void,
+		onCancel: () => void,
 	) {
 		super();
+		this.#entries = entries.map(entry => ({
+			...entry,
+			label: sanitizePaletteText(entry.label),
+			category: sanitizePaletteText(entry.category),
+			description: entry.description === undefined ? undefined : sanitizePaletteText(entry.description),
+			bindingHint: entry.bindingHint === undefined ? undefined : sanitizePaletteText(entry.bindingHint),
+		}));
+		this.#onSelect = onSelect;
+		this.#onCancel = onCancel;
 		this.#input.onEscape = onCancel;
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -87,12 +109,12 @@ export class CommandPalette extends Container {
 	}
 
 	handleInput(keyData: string): void {
-		if (matchesKey(keyData, "escape")) return this.onCancel();
+		if (matchesKey(keyData, "escape")) return this.#onCancel();
 		if (matchesKey(keyData, "up")) return this.#move(-1);
 		if (matchesKey(keyData, "down")) return this.#move(1);
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			const entry = this.#filtered[this.#selectedIndex];
-			if (entry && !entry.disabled) this.onSelect(entry);
+			if (entry && !entry.disabled && isExecutableEntry(entry)) this.#onSelect(entry);
 			return;
 		}
 		this.#input.handleInput(keyData);
@@ -101,7 +123,7 @@ export class CommandPalette extends Container {
 
 	#updateResults(): void {
 		const query = this.#input.getValue();
-		this.#filtered = fuzzyFilter([...this.entries], query, entry =>
+		this.#filtered = fuzzyFilter([...this.#entries], query, entry =>
 			[entry.label, entry.category, entry.description, entry.bindingHint].filter(Boolean).join(" "),
 		);
 		this.#selectedIndex = this.#firstEnabledIndex();

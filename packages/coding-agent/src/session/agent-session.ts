@@ -27,7 +27,6 @@ import {
 	type AgentEvent,
 	type AgentLoopConfig,
 	type AgentMessage,
-	type AgentQueueSnapshot,
 	type AgentState,
 	type AgentTool,
 	assertImagePlaceholdersHavePayload,
@@ -6508,6 +6507,7 @@ export class AgentSession {
 			skipPostPromptRecoveryWait?: boolean;
 			predecessorAgentEndHold?: symbol;
 			admissionLease?: SessionAdmissionLease;
+			onRunAccepted?: () => void;
 		},
 	): Promise<void> {
 		this.#beginInFlight();
@@ -6695,7 +6695,14 @@ export class AgentSession {
 			const agentPromptOptions = {
 				...(options?.toolChoice ? { toolChoice: options.toolChoice } : undefined),
 				...this.#managedFallbackPromptOptions(),
-				...(options?.admissionLease ? { onRunAccepted: options.admissionLease.release } : undefined),
+				...(options?.admissionLease || options?.onRunAccepted
+					? {
+							onRunAccepted: () => {
+								options?.onRunAccepted?.();
+								options?.admissionLease?.release();
+							},
+						}
+					: undefined),
 			};
 			options?.onPreflightAccepted?.();
 			this.#throwIfPromptPreflightCancelled(generation, preflightSignal);
@@ -7710,135 +7717,143 @@ export class AgentSession {
 		if (this.isCompacting) return { kind: "refused", reason: "compaction" };
 
 		this.#cancelAndSubmitInProgress = true;
-		const queueSnapshot: AgentQueueSnapshot = this.agent.snapshotQueues();
-		const steeringDisplaySnapshot = [...this.#steeringMessages];
-		const followUpDisplaySnapshot = [...this.#followUpMessages];
-		const pendingNextTurnSnapshot = [...this.#pendingNextTurnMessages];
-		const additionsSince = <T>(current: readonly T[], baseline: readonly T[]): T[] => {
-			const remaining = new Map<T, number>();
-			for (const entry of baseline) remaining.set(entry, (remaining.get(entry) ?? 0) + 1);
-			return current.filter(entry => {
-				const count = remaining.get(entry) ?? 0;
-				if (count === 0) return true;
-				remaining.set(entry, count - 1);
-				return false;
-			});
-		};
-		const pendingNextTurnAdditionsSince = () =>
-			additionsSince(
-				this.#pendingNextTurnMessages,
-				this.#cancelAndSubmitPendingNextTurnDrained ? [] : pendingNextTurnSnapshot,
-			);
-		const queueAdditionsSince = (baseline: AgentQueueSnapshot): AgentQueueSnapshot => {
-			const current = this.agent.snapshotQueues();
-			return {
-				steering: additionsSince(current.steering, baseline.steering),
-				followUp: additionsSince(current.followUp, baseline.followUp),
-			};
-		};
-		const selected = (() => {
-			if (options?.queuedEntryId === undefined) return undefined;
-			const [mode, sequenceText] = options.queuedEntryId.split(":");
-			const sequence = Number(sequenceText);
-			if ((mode !== "steer" && mode !== "followUp") || !Number.isInteger(sequence)) return undefined;
-			const displays = mode === "steer" ? steeringDisplaySnapshot : followUpDisplaySnapshot;
-			const index = displays.findIndex(entry => entry.sequence === sequence);
-			if (index === -1) return undefined;
-			return {
-				display: displays[index]!,
-				message: (mode === "steer" ? queueSnapshot.steering : queueSnapshot.followUp)[index],
-			};
-		})();
 		try {
-			let outcome = this.#cancelAndSubmitAbortOutcomeProviderForTests
-				? await this.#cancelAndSubmitAbortOutcomeProviderForTests()
-				: await this.#abortWithOutcome({ cause: "user_interrupt", timeoutMs: 5_000 });
-			if (outcome.kind === "settled") {
-				const deadline = Date.now() + 5_000;
-				while (this.isStreaming && Date.now() < deadline) await Bun.sleep(1);
-				if (this.isStreaming) outcome = { kind: "error", cause: new Error("Interrupted prompt did not finalize") };
-			}
-			if (outcome.kind !== "settled") {
-				const queueAdditions = queueAdditionsSince(queueSnapshot);
-				this.agent.restoreQueues({
-					steering: [...queueSnapshot.steering, ...queueAdditions.steering],
-					followUp: [...queueSnapshot.followUp, ...queueAdditions.followUp],
-				});
-				this.#pendingNextTurnMessages = [...pendingNextTurnSnapshot, ...pendingNextTurnAdditionsSince()];
-				this.#steeringMessages = [
-					...steeringDisplaySnapshot,
-					...additionsSince(this.#steeringMessages, steeringDisplaySnapshot),
-				];
-				this.#followUpMessages = [
-					...followUpDisplaySnapshot,
-					...additionsSince(this.#followUpMessages, followUpDisplaySnapshot),
-				];
-				if (outcome.kind === "error") {
-					logger.error("Cancel-and-submit abort failed", { cause: outcome.cause });
-					this.emitNotice("error", `Unable to send immediately: ${String(outcome.cause)}`, "cancel-and-submit");
-				}
-				return { kind: "rolled_back", outcome };
-			}
-
-			const postAbortQueueAdditions = queueAdditionsSince(queueSnapshot);
-			const postAbortSteeringDisplayAdditions = additionsSince(this.#steeringMessages, steeringDisplaySnapshot);
-			const postAbortFollowUpDisplayAdditions = additionsSince(this.#followUpMessages, followUpDisplaySnapshot);
-			const selectedMessage = selected?.message;
-			const preflightQueueSnapshot: AgentQueueSnapshot = {
-				steering: postAbortQueueAdditions.steering,
-				followUp: [
-					...queueSnapshot.steering.filter(message => message !== selectedMessage),
-					...queueSnapshot.followUp.filter(message => message !== selectedMessage),
-					...postAbortQueueAdditions.followUp,
-				],
-			};
-			this.agent.restoreQueues(preflightQueueSnapshot);
-			this.#steeringMessages = postAbortSteeringDisplayAdditions;
-			this.#followUpMessages = [
-				...steeringDisplaySnapshot,
-				...followUpDisplaySnapshot,
-				...postAbortFollowUpDisplayAdditions,
-			];
-
-			let preflightAccepted = false;
-			try {
-				await this.prompt(text, {
-					onPreflightAccepted: () => {
-						preflightAccepted = true;
-						if (selected) {
-							this.#steeringMessages = this.#steeringMessages.filter(entry => entry !== selected.display);
-							this.#followUpMessages = this.#followUpMessages.filter(entry => entry !== selected.display);
+			return await this.#withSessionAdmission("prompt", async admission => {
+				const queueSnapshot = this.agent.snapshotQueues();
+				const steeringDisplaySnapshot = [...this.#steeringMessages];
+				const followUpDisplaySnapshot = [...this.#followUpMessages];
+				const pendingNextTurnSnapshot = [...this.#pendingNextTurnMessages];
+				const additionsSince = <T>(current: readonly T[], baseline: readonly T[]): T[] => {
+					const remaining = new Map<T, number>();
+					for (const entry of baseline) remaining.set(entry, (remaining.get(entry) ?? 0) + 1);
+					return current.filter(entry => {
+						const count = remaining.get(entry) ?? 0;
+						if (count === 0) return true;
+						remaining.set(entry, count - 1);
+						return false;
+					});
+				};
+				const selected = (() => {
+					if (options?.queuedEntryId === undefined) return undefined;
+					const [mode, sequenceText] = options.queuedEntryId.split(":");
+					const sequence = Number(sequenceText);
+					if ((mode !== "steer" && mode !== "followUp") || !Number.isInteger(sequence)) return undefined;
+					const displays = mode === "steer" ? steeringDisplaySnapshot : followUpDisplaySnapshot;
+					const index = displays.findIndex(entry => entry.sequence === sequence);
+					if (index === -1) return undefined;
+					return {
+						display: displays[index]!,
+						message: (mode === "steer" ? queueSnapshot.steering : queueSnapshot.followUp)[index],
+						mode,
+						index,
+					};
+				})();
+				let runAccepted = false;
+				const restore = () => {
+					const queues = this.agent.snapshotQueues();
+					const queueBaseline = [...queueSnapshot.steering, ...queueSnapshot.followUp];
+					const displayBaseline = [...steeringDisplaySnapshot, ...followUpDisplaySnapshot];
+					this.agent.restoreQueues({
+						steering: [...queueSnapshot.steering, ...additionsSince(queues.steering, queueBaseline)],
+						followUp: [...queueSnapshot.followUp, ...additionsSince(queues.followUp, queueBaseline)],
+					});
+					this.#pendingNextTurnMessages = [
+						...pendingNextTurnSnapshot,
+						...additionsSince(
+							this.#pendingNextTurnMessages,
+							this.#cancelAndSubmitPendingNextTurnDrained ? [] : pendingNextTurnSnapshot,
+						),
+					];
+					this.#steeringMessages = [
+						...steeringDisplaySnapshot,
+						...additionsSince(this.#steeringMessages, displayBaseline),
+					];
+					this.#followUpMessages = [
+						...followUpDisplaySnapshot,
+						...additionsSince(this.#followUpMessages, displayBaseline),
+					];
+				};
+				try {
+					const outcome = this.#cancelAndSubmitAbortOutcomeProviderForTests
+						? await this.#cancelAndSubmitAbortOutcomeProviderForTests()
+						: await this.#abortWithOutcome({ cause: "user_interrupt", timeoutMs: 5_000 });
+					if (outcome.kind !== "settled") {
+						restore();
+						if (outcome.kind === "error") {
+							logger.error("Cancel-and-submit abort failed", { cause: outcome.cause });
+							this.emitNotice(
+								"error",
+								`Unable to send immediately: ${String(outcome.cause)}`,
+								"cancel-and-submit",
+							);
 						}
-					},
-				});
-				if (!preflightAccepted) throw new Error("Prompt was not accepted");
-			} catch (cause) {
-				if (preflightAccepted) throw cause;
-				const queueAdditions = queueAdditionsSince(preflightQueueSnapshot);
-				this.agent.restoreQueues({
-					steering: [...queueSnapshot.steering, ...postAbortQueueAdditions.steering, ...queueAdditions.steering],
-					followUp: [...queueSnapshot.followUp, ...postAbortQueueAdditions.followUp, ...queueAdditions.followUp],
-				});
-				this.#pendingNextTurnMessages = [...pendingNextTurnSnapshot, ...pendingNextTurnAdditionsSince()];
-				this.#steeringMessages = [
-					...steeringDisplaySnapshot,
-					...postAbortSteeringDisplayAdditions,
-					...additionsSince(this.#steeringMessages, postAbortSteeringDisplayAdditions),
-				];
-				this.#followUpMessages = [
-					...followUpDisplaySnapshot,
-					...postAbortFollowUpDisplayAdditions,
-					...additionsSince(this.#followUpMessages, [
+						return { kind: "rolled_back", outcome };
+					}
+
+					const currentQueues = this.agent.snapshotQueues();
+					const queuedDuringWindow = {
+						steering: additionsSince(currentQueues.steering, queueSnapshot.steering),
+						followUp: additionsSince(currentQueues.followUp, queueSnapshot.followUp),
+					};
+					const steeringDisplaysDuringWindow = additionsSince(this.#steeringMessages, steeringDisplaySnapshot);
+					const followUpDisplaysDuringWindow = additionsSince(this.#followUpMessages, followUpDisplaySnapshot);
+					const selectedMessage = selected?.message;
+					this.agent.restoreQueues({
+						steering: [...queuedDuringWindow.steering],
+						followUp: [
+							...queueSnapshot.steering.filter(
+								(_, index) => selected?.mode !== "steer" || index !== selected.index,
+							),
+							...queueSnapshot.followUp.filter(
+								(_, index) => selected?.mode !== "followUp" || index !== selected.index,
+							),
+							...queuedDuringWindow.followUp,
+						],
+					});
+					this.#steeringMessages = steeringDisplaysDuringWindow;
+					this.#followUpMessages = [
 						...steeringDisplaySnapshot,
 						...followUpDisplaySnapshot,
-						...postAbortFollowUpDisplayAdditions,
-					]),
-				];
-				logger.error("Cancel-and-submit prompt preflight failed", { cause });
-				this.emitNotice("error", `Unable to send immediately: ${String(cause)}`, "cancel-and-submit");
-				return { kind: "rolled_back", outcome: { kind: "error", cause } };
-			}
-			return { kind: "submitted" };
+						...followUpDisplaysDuringWindow,
+					];
+					const message = selectedMessage ?? {
+						role: "user" as const,
+						content: [{ type: "text" as const, text }],
+						attribution: "user" as const,
+						timestamp: Date.now(),
+					};
+					const messageText =
+						message.role === "custom"
+							? this.#getCustomMessageTextContent(message)
+							: message.role === "user"
+								? this.#getUserMessageText(message)
+								: text;
+					await this.refreshGjcSubskillTools();
+					if (message.role === "custom") await this.#syncSkillPromptActiveStateSafely(message, true);
+					try {
+						await this.#promptWithMessage(message, messageText, {
+							admissionLease: admission,
+							onRunAccepted: () => {
+								runAccepted = true;
+								if (selected) {
+									this.#steeringMessages = this.#steeringMessages.filter(entry => entry !== selected.display);
+									this.#followUpMessages = this.#followUpMessages.filter(entry => entry !== selected.display);
+								}
+							},
+						});
+					} finally {
+						if (message.role === "custom") await this.#syncSkillPromptActiveStateSafely(message, false);
+					}
+					if (!runAccepted) throw new Error("Prompt was not accepted");
+					return { kind: "submitted" };
+				} catch (cause) {
+					if (runAccepted) return { kind: "submitted" };
+					restore();
+					logger.error("Cancel-and-submit prompt failed before run acceptance", { cause });
+					this.emitNotice("error", `Unable to send immediately: ${String(cause)}`, "cancel-and-submit");
+					return { kind: "rolled_back", outcome: { kind: "error", cause } };
+				}
+			});
 		} finally {
 			this.#cancelAndSubmitInProgress = false;
 			this.#cancelAndSubmitPendingNextTurnDrained = false;

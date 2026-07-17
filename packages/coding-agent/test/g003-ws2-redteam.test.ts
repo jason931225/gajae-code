@@ -189,7 +189,7 @@ describe("G003 WS2 red-team: command palette", () => {
 });
 
 describe("G003 WS2 red-team: status hints and mode availability", () => {
-	it("has no hint segment with zero available actions, never renders unbound actions, and reflects availability flips", () => {
+	it("has no hint segment with zero available actions, never renders unbound actions, and reflects availability flips", async () => {
 		let available = false;
 		const registry = new ActionRegistry<void>({ context: undefined, showError: () => {} });
 		registerHintAction(registry, "app.commandPalette.open", () => available);
@@ -197,6 +197,7 @@ describe("G003 WS2 red-team: status hints and mode availability", () => {
 		const keys = KeybindingsManager.inMemory();
 		expect(getAvailableActionHints(registry, () => keys, 80)).toEqual([]);
 		available = true;
+		await Promise.resolve();
 		expect(getAvailableActionHints(registry, () => keys, 80).map(hint => hint.id)).toEqual([
 			"app.commandPalette.open",
 		]);

@@ -311,6 +311,41 @@ describe("AgentSession.cancelAndSubmit", () => {
 		expect(s.getQueuedMessageEntries().map(entry => entry.id)).not.toContain(head.id);
 	});
 
+	it("committed queue-head preserves the original image-bearing queued message", async () => {
+		const { agent, session: s } = buildSession();
+		await s.steer("rich queued content", [{ type: "image", data: "image-data", mimeType: "image/png" }]);
+		const [head] = s.getQueuedMessageEntries();
+		if (!head) throw new Error("Expected a queue head");
+		const promptSpy = vi.spyOn(agent, "prompt");
+
+		expect(await s.cancelAndSubmit(head.text, { queuedEntryId: head.id })).toEqual({ kind: "submitted" });
+		const submittedMessages = promptSpy.mock.calls.flatMap(([messages]) => messages as unknown as AgentMessage[]);
+		expect(submittedMessages).toContainEqual(
+			expect.objectContaining({
+				role: "user",
+				attribution: "user",
+				content: [
+					{ type: "text", text: "rich queued content" },
+					{ type: "image", data: "image-data", mimeType: "image/png" },
+				],
+			}),
+		);
+	});
+
+	it("provider failure before run acceptance restores every queue without duplication", async () => {
+		const { agent, session: s } = buildSession();
+		await seedQueues(s, "mid-streaming");
+		const before = stores(s);
+		s.setCancelAndSubmitAbortOutcomeProviderForTests(async () => ({ kind: "settled" }));
+		vi.spyOn(agent, "prompt").mockRejectedValueOnce(new Error("provider unavailable"));
+
+		await expect(s.cancelAndSubmit("send now")).resolves.toMatchObject({
+			kind: "rolled_back",
+			outcome: { kind: "error" },
+		});
+		expect(stores(s)).toEqual(before);
+	});
+
 	it("holds the duplicate token through prompt preflight and rolls back a preflight failure", async () => {
 		const { session: s } = buildSession();
 		await seedQueues(s, "mid-streaming");
@@ -403,6 +438,8 @@ describe("AgentSession.cancelAndSubmit", () => {
 		vi.spyOn(agent, "waitForIdle").mockImplementationOnce(() => new Promise<void>(() => {}));
 		vi.useFakeTimers();
 		const cancelling = s.cancelAndSubmit("send now");
+		await Promise.resolve();
+		await Promise.resolve();
 		vi.advanceTimersByTime(5_000);
 		await Promise.resolve();
 		await expect(cancelling).resolves.toEqual({ kind: "rolled_back", outcome: { kind: "timeout" } });

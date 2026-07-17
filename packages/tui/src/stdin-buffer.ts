@@ -23,6 +23,8 @@ import { EventEmitter } from "events";
 const ESC = "\x1b";
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
+const SGR_QUARANTINE_MAX_BYTES = 256;
+const SGR_QUARANTINE_TIMEOUT_MS = 100;
 
 /** True for complete SGR mouse CSI reports. These remain control input, never text. */
 export function isSgrMouseSequence(sequence: string): boolean {
@@ -147,19 +149,9 @@ function isCompleteCsiSequence(data: string): "complete" | "incomplete" {
 		// Format: ESC[<B;X;Ym or ESC[<B;X;YM
 		if (payload.startsWith("<")) {
 			// Must have format: <digits;digits;digits[Mm]
-			const mouseMatch = /^<\d+;\d+;\d+[Mm]$/.test(payload);
-			if (mouseMatch) {
-				return "complete";
-			}
-			// If it ends with M or m but doesn't match the pattern, still incomplete
-			if (lastChar === "M" || lastChar === "m") {
-				// Check if we have the right structure
-				const parts = payload.slice(1, -1).split(";");
-				if (parts.length === 3 && parts.every(p => /^\d+$/.test(p))) {
-					return "complete";
-				}
-			}
-
+			// SGR-looking reports remain terminal control input even when malformed.
+			// Treat their final byte as complete so trailing user input is preserved.
+			if (lastChar === "M" || lastChar === "m") return "complete";
 			return "incomplete";
 		}
 
@@ -313,6 +305,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	#decoder = new StringDecoder("utf8");
 	#decoderHasPendingUtf8 = false;
 	#pendingSingleUtf8LeadByte: number | undefined;
+	#sgrQuarantine = false;
+	#sgrQuarantineBytes = 0;
 
 	constructor(options: StdinBufferOptions = {}) {
 		super();
@@ -320,8 +314,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	}
 
 	process(data: string | Buffer): void {
-		// Clear any pending timeout
-		if (this.#timeout) {
+		// Do not cancel a bounded SGR quarantine while waiting for its final byte.
+		if (this.#timeout && !this.#sgrQuarantine) {
 			clearTimeout(this.#timeout);
 			this.#timeout = undefined;
 		}
@@ -390,6 +384,11 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 
+		if (this.#sgrQuarantine) {
+			str = this.#consumeSgrQuarantine(str);
+			if (str.length === 0) return;
+		}
+
 		this.#buffer += str;
 
 		if (this.#pasteMode) {
@@ -455,18 +454,53 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#buffer = result.remainder;
 
 		for (const sequence of result.sequences) {
+			if (isSgrMousePrefix(sequence) && !isSgrMouseSequence(sequence)) continue;
 			this.#emitDataSequence(sequence);
 		}
 
 		if (this.#buffer.length > 0) {
 			this.#timeout = setTimeout(() => {
+				if (isSgrMousePrefix(this.#buffer)) {
+					this.#beginSgrQuarantine();
+					return;
+				}
 				const flushed = this.flush();
-
 				for (const sequence of flushed) {
 					this.#emitDataSequence(sequence);
 				}
 			}, this.#timeoutMs);
 		}
+	}
+
+	#beginSgrQuarantine(): void {
+		this.#buffer = "";
+		this.#pendingKittyPrintableCodepoint = undefined;
+		this.#sgrQuarantine = true;
+		this.#sgrQuarantineBytes = 0;
+		this.#timeout = setTimeout(() => this.#endSgrQuarantine(), SGR_QUARANTINE_TIMEOUT_MS);
+	}
+
+	#endSgrQuarantine(): void {
+		if (this.#timeout) clearTimeout(this.#timeout);
+		this.#timeout = undefined;
+		this.#sgrQuarantine = false;
+		this.#sgrQuarantineBytes = 0;
+	}
+
+	#consumeSgrQuarantine(data: string): string {
+		const remaining = SGR_QUARANTINE_MAX_BYTES - this.#sgrQuarantineBytes;
+		const quarantined = data.slice(0, Math.max(0, remaining));
+		const terminator = quarantined.search(/[Mm]/u);
+		if (terminator >= 0) {
+			this.#endSgrQuarantine();
+			return data.slice(terminator + 1);
+		}
+		this.#sgrQuarantineBytes += quarantined.length;
+		if (this.#sgrQuarantineBytes >= SGR_QUARANTINE_MAX_BYTES) {
+			this.#endSgrQuarantine();
+			return data.slice(quarantined.length);
+		}
+		return "";
 	}
 
 	#consumePendingSingleUtf8LeadAsMeta(): string | undefined {
@@ -492,6 +526,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			clearTimeout(this.#timeout);
 			this.#timeout = undefined;
 		}
+		if (this.#sgrQuarantine) this.#endSgrQuarantine();
 
 		const pendingMeta = this.#consumePendingSingleUtf8LeadAsMeta();
 
@@ -520,6 +555,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#pasteMode = false;
 		this.#pasteBuffer = "";
 		this.#pendingKittyPrintableCodepoint = undefined;
+		this.#sgrQuarantine = false;
+		this.#sgrQuarantineBytes = 0;
 		// Drop any incomplete multi-byte sequence the decoder is holding so a
 		// stale partial prefix cannot combine with future input. destroy()
 		// resets the decoder by calling clear().

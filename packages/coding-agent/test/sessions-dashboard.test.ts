@@ -85,9 +85,10 @@ describe("sessions dashboard", () => {
 
 		const sessions = await SessionManager.listForResumePickerReadOnly("/work", sessionDir, storage);
 		const presence = new Map([
-			[`${activePath}.presence.json`, JSON.stringify({ expiresAt: "2026-01-02T00:00:00.000Z" })],
+			[`${activePath}.presence.json`, JSON.stringify({ expiresAt: "2026-01-01T12:01:00.000Z" })],
 			[`${stalePath}.presence.json`, JSON.stringify({ expiresAt: "2025-12-31T00:00:00.000Z" })],
 		]);
+		const lstatSync = vi.spyOn(fs, "lstatSync");
 		const rows = dashboardSessions(sessions, {
 			now: Date.parse("2026-01-01T12:00:00.000Z"),
 			readFile: filePath => {
@@ -122,6 +123,7 @@ describe("sessions dashboard", () => {
 				}),
 			]),
 		);
+		expect(lstatSync).not.toHaveBeenCalled();
 		expect(storage.writes).toBe(0);
 	});
 
@@ -136,6 +138,33 @@ describe("sessions dashboard", () => {
 				0,
 			),
 		).toBe("unknown");
+	});
+
+	it("marks prefix-only message counts as estimates in the dashboard", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionDir = "/fixtures/large-sessions";
+		const transcript = `${sessionDir}/large.jsonl`;
+		storage.writeTextSync(transcript, `${sessionText("large", "/work/large", "Large title", "first").repeat(100)}`);
+		const [session] = await SessionManager.listForResumePickerReadOnly("/work", sessionDir, storage);
+		expect(session?.messageCountIsEstimate).toBe(true);
+		const rendered = new SessionsDashboardComponent(dashboardSessions([session!]), () => {}).render(80).join("\n");
+		expect(rendered).toContain(`~${session!.messageCount} messages`);
+	});
+
+	it("fits CJK titles and status variants within narrow visible widths", () => {
+		const rows = (["active", "stale", "unknown"] as const).map(liveness => ({
+			id: liveness,
+			cwd: "/工程/日本語/프로젝트/with\ttabs",
+			title: `漢字 café ${liveness} title`,
+			modified: new Date("2026-01-01T00:00:00.000Z"),
+			messageCount: 12,
+			liveness,
+		}));
+		for (const width of [1, 8, 24, 40]) {
+			for (const line of new SessionsDashboardComponent(rows, () => {}).render(width)) {
+				expect(Bun.stringWidth(line.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, ""))).toBeLessThanOrEqual(width);
+			}
+		}
 	});
 
 	it("keeps a 24-row dashboard bounded while paging to the last session", () => {

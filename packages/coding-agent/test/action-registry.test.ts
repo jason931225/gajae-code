@@ -52,7 +52,7 @@ describe("ActionRegistry", () => {
 		});
 		expect(await registry.execute("app.exit")).toBe(false);
 		expect(await registry.execute("app.suspend")).toBe(false);
-		expect(errors).toEqual(["app.suspend"]);
+		expect(errors).toEqual(["Action app.suspend execution failed: failure"]);
 	});
 	it("contains reporter failures when availability or execution fails", async () => {
 		const registry = new ActionRegistry({
@@ -84,5 +84,69 @@ describe("ActionRegistry", () => {
 		expect(registry.isAvailable("app.clear")).toBe(false);
 		expect(await registry.execute("app.clear")).toBe(false);
 		expect(await registry.execute("app.exit")).toBe(false);
+	});
+
+	it("serializes default actions while allowing an interrupt and deduplicating an availability probe", async () => {
+		let availabilityCalls = 0;
+		const release = Promise.withResolvers<void>();
+		let interrupted = false;
+		const registry = new ActionRegistry({ context: undefined, showError: () => {} });
+		registry.register({
+			id: "app.clear",
+			title: "Busy action",
+			category: "Test",
+			domains: ["global"],
+			availability: () => {
+				availabilityCalls++;
+				return true;
+			},
+			execute: () => release.promise,
+		});
+		registry.register({
+			id: "app.interrupt",
+			title: "Interrupt",
+			category: "Test",
+			domains: ["global"],
+			exclusiveGroup: false,
+			availability: () => true,
+			execute: () => {
+				interrupted = true;
+			},
+		});
+		registry.register({
+			id: "app.exit",
+			title: "Competing action",
+			category: "Test",
+			domains: ["global"],
+			availability: () => true,
+			execute: () => {},
+		});
+
+		expect(registry.isAvailable("app.clear")).toBe(true);
+		const busy = registry.execute("app.clear");
+		expect(availabilityCalls).toBe(1);
+		expect(await registry.execute("app.exit")).toBe(false);
+		expect(await registry.execute("app.interrupt")).toBe(true);
+		expect(interrupted).toBe(true);
+		release.resolve();
+		expect(await busy).toBe(true);
+	});
+
+	it("reports the original error with its action and phase", async () => {
+		const errors: string[] = [];
+		const registry = new ActionRegistry({ context: undefined, showError: error => errors.push(error) });
+		registry.register({
+			id: "app.exit",
+			title: "Exit",
+			category: "Test",
+			domains: ["global"],
+			availability: () => true,
+			execute: () => {
+				throw new Error("root cause");
+			},
+		});
+
+		expect(await registry.execute("app.exit")).toBe(false);
+		expect(errors).toEqual(["Action app.exit execution failed: root cause"]);
 	});
 });

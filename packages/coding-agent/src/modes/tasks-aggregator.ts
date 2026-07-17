@@ -46,6 +46,8 @@ const SUBAGENT_STATUS: Record<SubagentRecord["status"], TaskStatus> = {
 };
 const STATUS_RANK: Record<TaskStatus, number> = { done: 1, cancelled: 2, waiting: 3, running: 4, failed: 5 };
 
+const MAX_TERMINAL_HISTORY_ROWS = 100;
+
 export function mapAsyncJobStatus(status: AsyncJob["status"]): TaskStatus {
 	return ASYNC_STATUS[status];
 }
@@ -62,11 +64,9 @@ export function mapCronStatus(cron: Pick<CronJobView, "firing">): TaskStatus {
 	return cron.firing ? "running" : "waiting";
 }
 
-/**
- * Joins manager jobs, monitor/cron views, and the live session registry without
- * changing either source's retention policy. The registry is authoritative for
- * a subagent's displayed lifecycle; manager records add resumability only.
- */
+/** Joins manager jobs, monitor/cron views, and live session metadata. Stable
+ * subagent records are canonical for lifecycle state; the registry contributes
+ * only the current display label and timestamp. */
 export class TasksAggregator {
 	readonly #listeners = new Set<() => void>();
 	readonly #unsubscribers: Array<() => void> = [];
@@ -142,7 +142,7 @@ export class TasksAggregator {
 				id: `subagent:${session.id}`,
 				kind: "subagent",
 				label: session.label,
-				status: SESSION_STATUS[session.status],
+				status: record ? SUBAGENT_STATUS[record.status] : SESSION_STATUS[session.status],
 				startedAt: session.lastUpdate,
 				resumable: record?.resumable,
 			});
@@ -160,14 +160,20 @@ export class TasksAggregator {
 		}
 		for (const cron of this.jobsObserver.getSnapshot().crons) rows.push(cronRow(cron));
 		rows.sort((a, b) => b.startedAt - a.startedAt || a.id.localeCompare(b.id));
+		let terminalRows = 0;
+		const boundedRows = rows.filter(row => {
+			if (row.status !== "done" && row.status !== "failed" && row.status !== "cancelled") return true;
+			terminalRows++;
+			return terminalRows <= MAX_TERMINAL_HISTORY_ROWS;
+		});
 		const failedUnacknowledged = this.jobsObserver.getSnapshot().failedUnacknowledged;
 		const worstState = failedUnacknowledged
 			? "failed"
-			: rows.reduce<TasksSnapshot["worstState"]>(
+			: boundedRows.reduce<TasksSnapshot["worstState"]>(
 					(worst, row) => (worst === "none" || STATUS_RANK[row.status] > STATUS_RANK[worst] ? row.status : worst),
 					"none",
 				);
-		this.#snapshot = { rows, worstState, failedUnacknowledged };
+		this.#snapshot = { rows: boundedRows, worstState, failedUnacknowledged };
 	}
 
 	dispose(): void {

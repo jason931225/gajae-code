@@ -57,7 +57,7 @@ function registerAction(
 }
 
 describe("status line action hints", () => {
-	it("uses registry availability and bound KEYBINDINGS chords, truncating whole hints by width", () => {
+	it("uses registry availability and bound KEYBINDINGS chords, truncating whole hints by width", async () => {
 		let streaming = false;
 		const registry = new ActionRegistry<void>({ context: undefined, showError: () => {} });
 		registerAction(registry, "app.commandPalette.open", () => !streaming);
@@ -68,8 +68,8 @@ describe("status line action hints", () => {
 		registerAction(registry, "app.message.sendNow", () => streaming);
 		const keybindings = KeybindingsManager.inMemory({ "app.message.sendNow": "ctrl+enter" });
 
-		const idle80 = getAvailableActionHints(registry, () => keybindings, 80);
-		const idle120 = getAvailableActionHints(registry, () => keybindings, 120);
+		const idle80 = getAvailableActionHints(registry, () => keybindings, 80, "composer");
+		const idle120 = getAvailableActionHints(registry, () => keybindings, 120, "composer");
 		expect(idle80.length).toBeLessThan(idle120.length);
 		expect(idle120.map(hint => hint.id)).toEqual([
 			"app.commandPalette.open",
@@ -100,7 +100,8 @@ describe("status line action hints", () => {
 		expect(status120.join("\n")).toContain("Search history");
 
 		streaming = true;
-		const streamingHints = getAvailableActionHints(registry, () => keybindings, 120);
+		await Promise.resolve();
+		const streamingHints = getAvailableActionHints(registry, () => keybindings, 120, "composer");
 		expect(streamingHints.map(hint => hint.id)).toEqual(["app.message.sendNow", "app.message.queue"]);
 		expect(streamingHints[0]?.content).toContain(keybindings.getDisplayString("app.message.sendNow"));
 		expect(streamingHints.map(hint => hint.id)).not.toContain("app.commandPalette.open");
@@ -109,5 +110,55 @@ describe("status line action hints", () => {
 		expect(streamingStatus).toContain("Queue message");
 		expect(streamingStatus).not.toContain("Open command palette");
 		expect(visibleWidth(streamingStatus)).toBeLessThanOrEqual(120);
+	});
+
+	it("uses the supplied focus domain when production availability spans composer and selector actions", () => {
+		const registry = new ActionRegistry<void>({ context: undefined, showError: () => {} });
+		registry.register({
+			id: "app.commandPalette.open",
+			title: "Open command palette",
+			category: "Navigation",
+			bindingId: "app.commandPalette.open",
+			domains: ["composer"],
+			availability: () => true,
+			execute: () => {},
+		});
+		registry.register({
+			id: "app.session.togglePath",
+			title: "Toggle session path",
+			category: "Session",
+			bindingId: "app.session.togglePath",
+			domains: ["selector"],
+			availability: () => true,
+			execute: () => {},
+		});
+		const keybindings = KeybindingsManager.inMemory();
+		expect(getAvailableActionHints(registry, () => keybindings, 120, "composer").map(hint => hint.id)).toEqual([
+			"app.commandPalette.open",
+		]);
+		expect(getAvailableActionHints(registry, () => keybindings, 120, "selector").map(hint => hint.id)).toEqual([
+			"app.session.togglePath",
+		]);
+	});
+
+	it("preserves configured telemetry before action hints at narrow widths", () => {
+		const registry = new ActionRegistry<void>({ context: undefined, showError: () => {} });
+		registerAction(registry, "app.plan.toggle", () => true);
+		const component = new StatusLineComponent(createSession(), {
+			actionRegistry: registry,
+			getKeybindings: () => KeybindingsManager.inMemory(),
+			focusDomain: "composer",
+		});
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: ["model"],
+			separator: "pipe",
+			showSkillHud: false,
+		});
+		const narrow = component.render(30).join("\n");
+		expect(narrow).toContain("no-model");
+		expect(narrow).not.toContain("Toggle plan mode");
+		expect(visibleWidth(narrow)).toBeLessThanOrEqual(30);
 	});
 });

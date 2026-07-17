@@ -77,4 +77,41 @@ describe("TranscriptItemRegistry", () => {
 		expect(registry.resolveSourcePayload(id)).toBeUndefined();
 		expect(registry.retireStream(id)).toBe(false);
 	});
+
+	test("retires an aborted stream before its generation slot is reused", () => {
+		const registry = new TranscriptItemRegistry();
+		const first = registry.startStream({ promptGeneration: "generation-1", messageOrdinal: 0, source: "partial" });
+		expect(registry.retireStream(first)).toBe(true);
+
+		const replacement = registry.startStream({
+			promptGeneration: "generation-1",
+			messageOrdinal: 0,
+			source: "replacement",
+		});
+		expect(replacement).toBe(first);
+		expect(registry.resolveSourcePayload(replacement)?.text).toBe("replacement");
+	});
+
+	test("never reconciles a completed alias or overwrites a conflicting canonical item", () => {
+		const registry = new TranscriptItemRegistry();
+		const completed = registry.startStream({ promptGeneration: 1, messageOrdinal: 0, source: "draft" });
+		const canonical = registry.endStream(completed, {
+			kind: "assistant-text",
+			source: { entryId: "entry-a", contentIndex: 0, text: "final" },
+		});
+		expect(
+			registry.endStream(completed, { kind: "user", source: { entryId: "wrong", text: "wrong" } }),
+		).toBeUndefined();
+		expect(registry.resolveSourcePayload(canonical!)?.text).toBe("final");
+
+		const live = registry.startStream({ promptGeneration: 1, messageOrdinal: 1, source: "other draft" });
+		expect(
+			registry.endStream(live, {
+				kind: "assistant-text",
+				source: { entryId: "entry-a", contentIndex: 0, text: "collision" },
+			}),
+		).toBeUndefined();
+		expect(registry.resolveSourcePayload(live)?.text).toBe("other draft");
+		expect(registry.resolveSourcePayload(canonical!)?.text).toBe("final");
+	});
 });

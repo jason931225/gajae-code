@@ -133,7 +133,12 @@ export class InputController {
 				return Boolean(getEditorCommand());
 			case "app.message.followUp":
 			case "app.message.queue":
-				return this.ctx.session.isStreaming;
+				return (
+					this.ctx.session.isStreaming ||
+					this.ctx.session.isCompacting ||
+					this.ctx.session.isBashRunning ||
+					this.ctx.session.isEvalRunning
+				);
 			case "app.message.dequeue":
 				return this.ctx.session.queuedMessageCount > 0;
 			case "app.clipboard.copyPrompt":
@@ -151,7 +156,7 @@ export class InputController {
 				return this.ctx.session.messages.length > 0;
 			case "app.transcript.prevTurn":
 			case "app.transcript.nextTurn":
-				return this.#syncTranscriptTurnPosition().length > 0;
+				return getUserMessageViewportAnchorIds(this.ctx.session.messages).length > 0;
 			case "app.mode.cycle":
 				return (
 					Boolean(this.ctx.settings.get("plan.enabled")) && !this.ctx.goalModeEnabled && !this.ctx.goalModePaused
@@ -179,12 +184,24 @@ export class InputController {
 		const anchorIds = getUserMessageViewportAnchorIds(this.ctx.session.messages);
 		if (
 			anchorIds.length !== this.#transcriptTurnAnchorIds.length ||
-			anchorIds.some((id, index) => id !== this.#transcriptTurnAnchorIds[index])
+			anchorIds.some(id => !this.#transcriptTurnAnchorIds.includes(id))
 		) {
-			this.#transcriptTurnAnchorIds = anchorIds;
-			this.#transcriptTurnPosition = anchorIds.length;
+			const hadAnchors = this.#transcriptTurnAnchorIds.length > 0;
+			const currentAnchorId = this.#transcriptTurnAnchorIds[this.#transcriptTurnPosition];
+			const retainedAnchorIds = this.#transcriptTurnAnchorIds.filter(id => anchorIds.includes(id));
+			this.#transcriptTurnAnchorIds = [
+				...retainedAnchorIds,
+				...anchorIds.filter(id => !retainedAnchorIds.includes(id)),
+			];
+			const currentPosition = currentAnchorId ? this.#transcriptTurnAnchorIds.indexOf(currentAnchorId) : -1;
+			this.#transcriptTurnPosition =
+				currentPosition >= 0
+					? currentPosition
+					: currentAnchorId || hadAnchors
+						? Math.min(this.#transcriptTurnPosition, this.#transcriptTurnAnchorIds.length)
+						: this.#transcriptTurnAnchorIds.length;
 		}
-		return anchorIds;
+		return this.#transcriptTurnAnchorIds;
 	}
 
 	#jumpTranscriptTurn(direction: -1 | 1): void {

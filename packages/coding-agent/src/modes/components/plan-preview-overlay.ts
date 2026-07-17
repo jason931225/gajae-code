@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { Container, Input, type KeyId, Markdown, type MouseEvent, matchesKey, truncateToWidth } from "@gajae-code/tui";
+import { Container, Input, type KeyId, type MouseEvent, matchesKey, truncateToWidth } from "@gajae-code/tui";
 
-import { getMarkdownTheme, theme } from "../theme/theme";
+import { theme } from "../theme/theme";
 import { DynamicBorder } from "./dynamic-border";
 
 export const PLAN_REVIEW_ACTIONS = [
@@ -42,16 +42,24 @@ export function serializePlanReviewComments(
 	comments: readonly PlanComment[],
 	notes = "",
 ): string {
-	const valid = comments.filter(comment => comment.snapshotHash === hash && comment.text.trim());
-	if (!valid.length && !notes.trim()) return "";
 	const lines = content.split("\n").map(line => line.replace(/\r$/, ""));
+	const valid = comments.filter(
+		comment =>
+			comment.snapshotHash === hash &&
+			comment.text.trim() &&
+			Number.isInteger(comment.startLine) &&
+			Number.isInteger(comment.endLine) &&
+			comment.startLine >= 1 &&
+			comment.endLine >= comment.startLine &&
+			comment.startLine <= lines.length,
+	);
+	if (!valid.length && !notes.trim()) return "";
 	const block = [`Plan review comments (snapshot ${hash.slice(0, 8)}):`];
 	for (const comment of valid) {
-		const end = Math.max(comment.startLine, comment.endLine);
+		const end = Math.min(lines.length, Math.max(comment.startLine, comment.endLine));
 		block.push(`- L${comment.startLine}${end === comment.startLine ? "" : `-L${end}`}: ${comment.text.trim()}`);
-		const start = Math.max(1, Math.min(comment.startLine, lines.length));
-		const last = Math.max(start, Math.min(end, comment.startLine + 5, lines.length));
-		for (let line = start; line <= last; line++) block.push(`> ${lines[line - 1]}`);
+		for (let line = comment.startLine; line <= Math.min(end, comment.startLine + 5); line++)
+			block.push(`> ${lines[line - 1]}`);
 	}
 	if (notes.trim()) block.push(notes.trim());
 	return block.join("\n");
@@ -67,6 +75,9 @@ export class PlanPreviewOverlay extends Container {
 	#notes = "";
 	#input = new Input();
 	#inputKind: "comment" | "notes" = "comment";
+	#renderedSourceLines: number[] = [];
+	#renderedBody: string[] = [];
+	#renderedBodyWidth = 0;
 	content: string | null;
 
 	snapshotHash: string;
@@ -98,9 +109,8 @@ export class PlanPreviewOverlay extends Container {
 	}
 	override render(width: number): string[] {
 		const height = Math.max(5, (process.stdout.rows || 40) - 8);
-		const body = this.content
-			? new Markdown(this.content, 0, 0, getMarkdownTheme()).render(Math.max(1, width - 2))
-			: [theme.fg("warning", "Plan file is empty or missing.")];
+		const bodyWidth = Math.max(1, width - 2);
+		const body = this.#renderSourceRows(bodyWidth);
 		this.#scroll = Math.max(0, Math.min(this.#scroll, Math.max(0, body.length - height)));
 		const visible = body.slice(this.#scroll, this.#scroll + height);
 		const actions = PLAN_REVIEW_ACTIONS.map(
@@ -131,8 +141,9 @@ export class PlanPreviewOverlay extends Container {
 	}
 	handleMouse(event: MouseEvent): void {
 		if (event.kind !== "click" || this.#focus === "commentInput") return;
-		const sourceLine = this.#scroll + (event.localY ?? event.y) - 2;
-		if (sourceLine < 1 || sourceLine > this.lines.length) return;
+		const renderedRow = this.#scroll + (event.localY ?? event.y) - 2;
+		const sourceLine = this.#renderedSourceLines[renderedRow];
+		if (sourceLine === undefined) return;
 		this.#sourceLine = sourceLine;
 		this.#focus = "sourceSelect";
 		this.requestRender();
@@ -228,6 +239,38 @@ export class PlanPreviewOverlay extends Container {
 		this.#focus = "preview";
 		this.requestRender();
 	}
+	// Render numbered source rather than Markdown so every displayed row has an exact source-line owner.
+	#renderSourceRows(width: number): string[] {
+		if (!this.content) {
+			this.#renderedSourceLines = [];
+			this.#renderedBody = [theme.fg("warning", "Plan file is empty or missing.")];
+			this.#renderedBodyWidth = width;
+			return this.#renderedBody;
+		}
+		if (this.#renderedBodyWidth === width) return this.#renderedBody;
+
+		const lineNumberWidth = String(this.lines.length).length;
+		const prefixWidth = lineNumberWidth + 3;
+		const sourceWidth = Math.max(1, width - prefixWidth);
+		const body: string[] = [];
+		const sourceLines: number[] = [];
+		for (let index = 0; index < this.lines.length; index++) {
+			const prefix = `${String(index + 1).padStart(lineNumberWidth)} │ `;
+			const wrapped = Bun.wrapAnsi(this.lines[index]!.replace(/\r$/, ""), sourceWidth, {
+				hard: true,
+				trim: false,
+			});
+			const rows = wrapped ? wrapped.split("\n") : [""];
+			for (const row of rows) {
+				body.push(`${prefix}${row}`);
+				sourceLines.push(index + 1);
+			}
+		}
+		this.#renderedSourceLines = sourceLines;
+		this.#renderedBody = body;
+		this.#renderedBodyWidth = width;
+		return body;
+	}
 	#matchesExternalEditor(key: string): boolean {
 		return Boolean(
 			this.options.onExternalEditor && this.options.externalEditorKeys?.some(binding => matchesKey(key, binding)),
@@ -239,6 +282,9 @@ export class PlanPreviewOverlay extends Container {
 		this.content = updatedContent;
 		this.snapshotHash = planSnapshotHash(updatedContent);
 		this.lines = updatedContent.split("\n");
+		this.#renderedSourceLines = [];
+		this.#renderedBody = [];
+		this.#renderedBodyWidth = 0;
 		this.#comments = [];
 		this.#notes = "";
 		this.#scroll = 0;

@@ -497,6 +497,8 @@ export interface SessionInfo {
 	created: Date;
 	modified: Date;
 	messageCount: number;
+	/** True when messageCount was counted from only the bounded list prefix. */
+	messageCountIsEstimate?: boolean;
 	/** File size in bytes on disk; used for compact list rendering. */
 	size: number;
 	firstMessage: string;
@@ -3147,6 +3149,7 @@ async function collectSessionFromFile(
 			created: new Date(header.timestamp ?? ""),
 			modified: stats.mtime,
 			messageCount,
+			messageCountIsEstimate: stats.size > SESSION_LIST_PREFIX_BYTES,
 			size: stats.size,
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,

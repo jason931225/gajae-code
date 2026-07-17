@@ -110,6 +110,17 @@ export interface SettingsOptions {
 	overrides?: Partial<Record<SettingPath, unknown>>;
 }
 
+function summarizeSettingsOptions(options: SettingsOptions | null): {
+	optionKeys: string[];
+	overrideKeys: string[];
+} {
+	if (!options) return { optionKeys: [], overrideKeys: [] };
+	return {
+		optionKeys: Object.keys(options).sort(),
+		overrideKeys: Object.keys(options.overrides ?? {}).sort(),
+	};
+}
+
 /** Additional layer setup for {@link Settings.isolated}. */
 export interface IsolatedSettingsOptions {
 	/** Initial runtime overrides. Notification paths are rejected. */
@@ -400,8 +411,8 @@ export class Settings implements NotificationSettingsReader {
 		if (globalInstancePromise) {
 			if (JSON.stringify(options) !== JSON.stringify(globalInitOptions)) {
 				logger.warn("Settings.init called again with different options; reusing existing settings instance", {
-					initialOptions: globalInitOptions,
-					requestedOptions: options,
+					initialOptions: summarizeSettingsOptions(globalInitOptions),
+					requestedOptions: summarizeSettingsOptions(options),
 				});
 			}
 			return globalInstancePromise;

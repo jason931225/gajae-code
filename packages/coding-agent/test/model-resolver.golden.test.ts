@@ -110,6 +110,12 @@ describe("staged selector golden table", () => {
 		});
 		expect(preferred[0]?.model).toBe(openrouter);
 
+		const caseInsensitivePreferred = await resolveModelScope(["shared"], scopedRegistry, {
+			usageOrder: ["OPENROUTER/SHARED"],
+			deprioritizeProviders: ["OPENAI"],
+		});
+		expect(caseInsensitivePreferred[0]?.model).toBe(openrouter);
+
 		const route = await resolveModelScope(["openrouter/z-ai/glm-4.7-20251222:nitro"], scopedRegistry);
 		expect(route[0]?.model).toMatchObject({ provider: "openrouter", id: "z-ai/glm-4.7-20251222:nitro" });
 	});
@@ -131,5 +137,30 @@ describe("staged selector golden table", () => {
 			selector: "openrouter/qwen/model:route",
 			thinkingLevel: Effort.High,
 		});
+	});
+
+	test("fails closed for a provider-qualified miss", () => {
+		expect(resolveSelector("openai/missing", candidates).model).toBeUndefined();
+	});
+
+	test("keeps ordered scope variants that differ only by thinking suffix", async () => {
+		const scoped = await resolveModelScope(["openai/gpt:low", "openai/gpt:high"], registry);
+		expect(scoped.map(entry => entry.thinkingLevel)).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("indexes frozen and mutated candidate arrays without stale matches", () => {
+		const mutable = [model("openai", "first")];
+		expect(resolveSelector("openai/first", mutable).model?.id).toBe("first");
+		mutable.splice(0, 1, model("openai", "second"));
+		expect(resolveSelector("openai/first", mutable).model).toBeUndefined();
+		expect(resolveSelector("openai/second", mutable).model?.id).toBe("second");
+		const replacement = model("openai", "second");
+		mutable[0] = replacement;
+		expect(resolveSelector("openai/second", mutable).model).toBe(replacement);
+
+		const frozen = Object.freeze([model("openai", "frozen")]);
+		expect(resolveSelector("openai/frozen", frozen as unknown as Model<"anthropic-messages">[]).model?.id).toBe(
+			"frozen",
+		);
 	});
 });

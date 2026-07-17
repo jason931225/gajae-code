@@ -4,7 +4,7 @@
 
 import { ThinkingLevel } from "@gajae-code/agent-core";
 import { type Api, DEFAULT_MODEL_PER_PROVIDER, type KnownProvider, type Model, modelsAreEqual } from "@gajae-code/ai";
-import { fuzzyMatch } from "@gajae-code/tui";
+
 import { logger } from "@gajae-code/utils";
 import chalk from "chalk";
 import { parseThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
@@ -138,15 +138,22 @@ function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Mode
 	};
 }
 
-const kProviderModelIndex = Symbol("model-resolver.providerIndex");
-type ModelsWithProviderIndex = readonly Model<Api>[] & {
-	[kProviderModelIndex]?: Map<string, Model<Api> | null>;
-};
+const providerModelIndexes = new WeakMap<
+	readonly Model<Api>[],
+	{ fingerprint: string; models: readonly Model<Api>[]; index: Map<string, Model<Api> | null> }
+>();
+
+function modelFingerprint(availableModels: readonly Model<Api>[]): string {
+	return availableModels.map(model => `${model.provider}\u0000${model.id}`).join("\u0001");
+}
 
 function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
-	const tagged = availableModels as ModelsWithProviderIndex;
-	const cached = tagged[kProviderModelIndex];
-	if (cached) return cached;
+	const fingerprint = modelFingerprint(availableModels);
+	const cached = providerModelIndexes.get(availableModels);
+	if (cached?.fingerprint === fingerprint && cached.models.every((model, index) => model === availableModels[index])) {
+		return cached.index;
+	}
+
 	const index = new Map<string, Model<Api> | null>();
 	for (const m of availableModels) {
 		const key = `${m.provider.toLowerCase()}\u0000${m.id.toLowerCase()}`;
@@ -156,7 +163,8 @@ function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<stri
 			index.set(key, m);
 		}
 	}
-	tagged[kProviderModelIndex] = index;
+	providerModelIndexes.set(availableModels, { fingerprint, models: [...availableModels], index });
+
 	return index;
 }
 
@@ -211,8 +219,8 @@ export type CanonicalModelRegistry = Partial<
 >;
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable"> & Partial<CanonicalModelRegistry>;
 type CliModelRegistry = Pick<ModelRegistry, "getAll"> & Partial<CanonicalModelRegistry>;
-type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find">;
-type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey">;
+type InitialModelRegistry = Pick<ModelRegistry, "getAvailable">;
+type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey">;
 
 interface ModelPreferenceContext {
 	modelUsageRank: Map<string, number>;
@@ -221,7 +229,19 @@ interface ModelPreferenceContext {
 	modelOrder: Map<string, number>;
 }
 
-const preferenceContexts = new WeakMap<readonly Model<Api>[], Map<string, ModelPreferenceContext>>();
+const preferenceContexts = new WeakMap<
+	readonly Model<Api>[],
+	{
+		fingerprint: string;
+		models: readonly Model<Api>[];
+		cacheKey: string;
+		context: ModelPreferenceContext;
+	}
+>();
+
+function modelPreferenceKey(model: Pick<Model<Api>, "provider" | "id">): string {
+	return `${model.provider}/${model.id}`.toLowerCase();
+}
 
 function preferenceCacheKey(preferences: ModelMatchPreferences | undefined): string {
 	return JSON.stringify([preferences?.usageOrder ?? [], preferences?.deprioritizeProviders ?? ["openrouter"]]);
@@ -231,32 +251,45 @@ function buildPreferenceContext(
 	availableModels: Model<Api>[],
 	preferences: ModelMatchPreferences | undefined,
 ): ModelPreferenceContext {
+	const fingerprint = modelFingerprint(availableModels);
 	const cacheKey = preferenceCacheKey(preferences);
-	let cachedContexts = preferenceContexts.get(availableModels);
-	if (!cachedContexts) {
-		cachedContexts = new Map();
-		preferenceContexts.set(availableModels, cachedContexts);
+	const cached = preferenceContexts.get(availableModels);
+	if (
+		cached?.fingerprint === fingerprint &&
+		cached.cacheKey === cacheKey &&
+		cached.models.every((model, index) => model === availableModels[index])
+	) {
+		return cached.context;
 	}
-	const cached = cachedContexts.get(cacheKey);
-	if (cached) return cached;
 
 	const modelUsageRank = new Map<string, number>();
 	const providerUsageRank = new Map<string, number>();
 	const usageOrder = preferences?.usageOrder ?? [];
 	for (let i = 0; i < usageOrder.length; i += 1) {
 		const key = usageOrder[i];
-		if (!modelUsageRank.has(key)) modelUsageRank.set(key, i);
+		if (!modelUsageRank.has(key.toLowerCase())) modelUsageRank.set(key.toLowerCase(), i);
 		const parsed = parseModelString(key);
-		if (parsed && !providerUsageRank.has(parsed.provider)) providerUsageRank.set(parsed.provider, i);
+		if (parsed && !providerUsageRank.has(parsed.provider.toLowerCase())) {
+			providerUsageRank.set(parsed.provider.toLowerCase(), i);
+		}
 	}
 
-	const deprioritizedProviders = new Set(preferences?.deprioritizeProviders ?? ["openrouter"]);
+	const deprioritizedProviders = new Set(
+		(preferences?.deprioritizeProviders ?? ["openrouter"]).map(provider => provider.toLowerCase()),
+	);
+
 	const modelOrder = new Map<string, number>();
 	for (let i = 0; i < availableModels.length; i += 1) {
 		modelOrder.set(formatModelString(availableModels[i]), i);
 	}
 	const context = { modelUsageRank, providerUsageRank, deprioritizedProviders, modelOrder };
-	cachedContexts.set(cacheKey, context);
+	preferenceContexts.set(availableModels, {
+		fingerprint,
+		models: [...availableModels],
+		cacheKey,
+		context,
+	});
+
 	return context;
 }
 
@@ -265,14 +298,16 @@ function pickPreferredModel(candidates: Model<Api>[], context: ModelPreferenceCo
 	return [...candidates].sort((a, b) => {
 		const aKey = formatModelString(a);
 		const bKey = formatModelString(b);
-		const aUsage = context.modelUsageRank.get(aKey);
-		const bUsage = context.modelUsageRank.get(bKey);
+		const aUsage = context.modelUsageRank.get(modelPreferenceKey(a));
+		const bUsage = context.modelUsageRank.get(modelPreferenceKey(b));
+
 		if (aUsage !== undefined || bUsage !== undefined) {
 			return (aUsage ?? Number.POSITIVE_INFINITY) - (bUsage ?? Number.POSITIVE_INFINITY);
 		}
 
-		const aProviderUsage = context.providerUsageRank.get(a.provider);
-		const bProviderUsage = context.providerUsageRank.get(b.provider);
+		const aProviderUsage = context.providerUsageRank.get(a.provider.toLowerCase());
+		const bProviderUsage = context.providerUsageRank.get(b.provider.toLowerCase());
+
 		if (aProviderUsage !== undefined || bProviderUsage !== undefined) {
 			return (aProviderUsage ?? Number.POSITIVE_INFINITY) - (bProviderUsage ?? Number.POSITIVE_INFINITY);
 		}
@@ -286,8 +321,8 @@ function pickPreferredModel(candidates: Model<Api>[], context: ModelPreferenceCo
 			return aVision - bVision;
 		}
 
-		const aDeprioritized = context.deprioritizedProviders.has(a.provider);
-		const bDeprioritized = context.deprioritizedProviders.has(b.provider);
+		const aDeprioritized = context.deprioritizedProviders.has(a.provider.toLowerCase());
+		const bDeprioritized = context.deprioritizedProviders.has(b.provider.toLowerCase());
 		if (aDeprioritized !== bDeprioritized) {
 			return aDeprioritized ? 1 : -1;
 		}
@@ -383,41 +418,19 @@ function tryMatchModel(
 	if (exactMatches.length > 0) {
 		return pickPreferredModel(exactMatches, context);
 	}
-	// Check for provider/modelId format — fuzzy match within provider only.
+	// Provider-qualified selectors are exact-only. Case-only duplicate catalog
+	// entries still rank deterministically within the explicitly named provider.
 	const slashIndex = modelPattern.indexOf("/");
 	if (slashIndex !== -1) {
-		const provider = modelPattern.substring(0, slashIndex);
-		const modelId = modelPattern.substring(slashIndex + 1);
-		const providerModels = availableModels.filter(m => m.provider.toLowerCase() === provider.toLowerCase());
-		if (providerModels.length === 0) {
-			// The prefix is not a known provider in this candidate set, so treat the
-			// slash as part of the raw model ID and continue with generic matching.
-		} else {
-			const scored = providerModels
-				.map(model => ({ model, match: fuzzyMatch(modelId, model.id) }))
-				.filter(entry => entry.match.matches);
-			if (scored.length === 0) {
-				return undefined;
-			}
-
-			scored.sort((a, b) => {
-				if (a.match.score !== b.match.score) return a.match.score - b.match.score;
-				const aKey = formatModelString(a.model);
-				const bKey = formatModelString(b.model);
-				const aUsage = context.modelUsageRank.get(aKey) ?? Number.POSITIVE_INFINITY;
-				const bUsage = context.modelUsageRank.get(bKey) ?? Number.POSITIVE_INFINITY;
-				if (aUsage !== bUsage) return aUsage - bUsage;
-
-				const aProviderUsage = context.providerUsageRank.get(a.model.provider) ?? Number.POSITIVE_INFINITY;
-				const bProviderUsage = context.providerUsageRank.get(b.model.provider) ?? Number.POSITIVE_INFINITY;
-				if (aProviderUsage !== bProviderUsage) return aProviderUsage - bProviderUsage;
-
-				const aOrder = context.modelOrder.get(aKey) ?? 0;
-				const bOrder = context.modelOrder.get(bKey) ?? 0;
-				return aOrder - bOrder;
-			});
-			return scored[0]?.model;
-		}
+		const provider = modelPattern.slice(0, slashIndex).trim().toLowerCase();
+		const modelId = modelPattern
+			.slice(slashIndex + 1)
+			.trim()
+			.toLowerCase();
+		const providerExactMatches = availableModels.filter(
+			model => model.provider.toLowerCase() === provider && model.id.toLowerCase() === modelId,
+		);
+		return providerExactMatches.length > 0 ? pickPreferredModel(providerExactMatches, context) : undefined;
 	}
 
 	// No exact match - fall back to partial matching
@@ -966,6 +979,15 @@ export async function resolveModelScope(
 	const availableModels = modelRegistry.getAvailable();
 
 	const scopedModels: ScopedModel[] = [];
+	const addScopedModel = (selection: ScopedModel): void => {
+		const duplicate = scopedModels.some(
+			existing =>
+				modelsAreEqual(existing.model, selection.model) &&
+				existing.thinkingLevel === selection.thinkingLevel &&
+				existing.explicitThinkingLevel === selection.explicitThinkingLevel,
+		);
+		if (!duplicate) scopedModels.push(selection);
+	};
 
 	for (const pattern of patterns) {
 		// Check if pattern contains glob characters
@@ -990,33 +1012,30 @@ export async function resolveModelScope(
 			}
 
 			for (const model of matchingModels) {
-				if (!scopedModels.find(sm => modelsAreEqual(sm.model, model))) {
-					scopedModels.push({
-						model,
-						thinkingLevel: explicitThinkingLevel
-							? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
-							: thinkingLevel,
-						explicitThinkingLevel,
-					});
-				}
+				addScopedModel({
+					model,
+					thinkingLevel: explicitThinkingLevel
+						? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
+						: thinkingLevel,
+					explicitThinkingLevel,
+				});
 			}
+
 			continue;
 		}
 
 		const exactCanonical = resolveExactCanonicalScopePattern(pattern, modelRegistry, availableModels);
 		if (exactCanonical) {
 			for (const model of exactCanonical.models) {
-				if (!scopedModels.find(sm => modelsAreEqual(sm.model, model))) {
-					scopedModels.push({
-						model,
-						thinkingLevel: exactCanonical.explicitThinkingLevel
-							? (resolveThinkingLevelForModel(model, exactCanonical.thinkingLevel) ??
-								exactCanonical.thinkingLevel)
-							: exactCanonical.thinkingLevel,
-						explicitThinkingLevel: exactCanonical.explicitThinkingLevel,
-					});
-				}
+				addScopedModel({
+					model,
+					thinkingLevel: exactCanonical.explicitThinkingLevel
+						? (resolveThinkingLevelForModel(model, exactCanonical.thinkingLevel) ?? exactCanonical.thinkingLevel)
+						: exactCanonical.thinkingLevel,
+					explicitThinkingLevel: exactCanonical.explicitThinkingLevel,
+				});
 			}
+
 			continue;
 		}
 
@@ -1034,16 +1053,13 @@ export async function resolveModelScope(
 			continue;
 		}
 
-		// Avoid duplicates
-		if (!scopedModels.find(sm => modelsAreEqual(sm.model, model))) {
-			scopedModels.push({
-				model,
-				thinkingLevel: explicitThinkingLevel
-					? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
-					: thinkingLevel,
-				explicitThinkingLevel,
-			});
-		}
+		addScopedModel({
+			model,
+			thinkingLevel: explicitThinkingLevel
+				? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
+				: thinkingLevel,
+			explicitThinkingLevel,
+		});
 	}
 
 	return scopedModels;
@@ -1125,16 +1141,24 @@ export function resolveCliModel(options: {
 		provider && modelInput.toLowerCase().startsWith(providerPrefix.toLowerCase())
 			? modelInput.slice(providerPrefix.length)
 			: modelInput;
+	const candidates = provider
+		? availableModels.filter(model => model.provider.toLowerCase() === provider.toLowerCase())
+		: availableModels;
 	const selectorInput = provider ? `${provider}/${pattern}` : pattern;
-	const resolved = resolveSelector(
-		selectorInput,
-		provider ? availableModels.filter(model => model.provider === provider) : availableModels,
-		{
-			allowInvalidThinkingSelectorFallback: false,
-			modelRegistry,
-			preferences,
-		},
-	);
+	const exactProviderResolved = provider
+		? resolveSelector(selectorInput, candidates, {
+				allowInvalidThinkingSelectorFallback: false,
+				preferences,
+			})
+		: undefined;
+	const resolved = exactProviderResolved?.model
+		? exactProviderResolved
+		: resolveSelector(provider ? pattern : selectorInput, candidates, {
+				allowInvalidThinkingSelectorFallback: false,
+				modelRegistry: provider ? undefined : modelRegistry,
+				preferences,
+			});
+
 	if (!resolved.model) {
 		return {
 			model: undefined,
@@ -1204,7 +1228,8 @@ export async function findInitialModel(options: {
 
 	// 1. CLI args take priority
 	if (cliProvider && cliModel) {
-		const found = modelRegistry.find(cliProvider, cliModel);
+		const found = resolveProviderModelReference(cliProvider, cliModel, modelRegistry.getAvailable());
+
 		if (!found) {
 			console.error(chalk.red(`Model ${cliProvider}/${cliModel} not found`));
 			process.exit(1);
@@ -1228,7 +1253,8 @@ export async function findInitialModel(options: {
 
 	// 3. Try saved default from settings
 	if (defaultProvider && defaultModelId) {
-		const found = modelRegistry.find(defaultProvider, defaultModelId);
+		const found = resolveProviderModelReference(defaultProvider, defaultModelId, modelRegistry.getAvailable());
+
 		if (found) {
 			model = found;
 			thinkingLevel = resolveThinkingLevelForModel(found, defaultThinkingSelector);
@@ -1267,7 +1293,7 @@ export async function restoreModelFromSession(
 	shouldPrintMessages: boolean,
 	modelRegistry: RestorableModelRegistry,
 ): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
-	const restoredModel = modelRegistry.find(savedProvider, savedModelId);
+	const restoredModel = resolveProviderModelReference(savedProvider, savedModelId, modelRegistry.getAvailable());
 
 	// Check if restored model exists and has a valid API key
 	const hasApiKey = restoredModel ? !!(await modelRegistry.getApiKey(restoredModel)) : false;

@@ -13,13 +13,22 @@ import { fuzzyFilter } from "@gajae-code/tui/fuzzy";
 import { theme } from "../theme/theme";
 import { DynamicBorder } from "./dynamic-border";
 
+export type CommandPaletteAction = {
+	id: string;
+	label: string;
+	handler: () => void | Promise<void>;
+};
+
 export type CommandPaletteEntry = {
 	id: string;
 	label: string;
-	category: string;
+	category?: string;
 	description?: string;
 	bindingHint?: string;
+	keybinding?: string;
+	searchText?: string;
 	disabled?: boolean;
+	handler?: () => void | Promise<void>;
 };
 
 class CommandPaletteResults {
@@ -43,9 +52,9 @@ class CommandPaletteResults {
 				entryIndex === this.#selectedIndex
 					? theme.fg("accent", `${theme.nav.cursor} `)
 					: padding(visibleWidth(theme.nav.cursor) + 1);
-			const hint = entry.bindingHint ? theme.fg("muted", `  ${entry.bindingHint}`) : "";
-			const secondary = entry.description ?? entry.category;
-			const text = `${prefix}${entry.label}${theme.fg("muted", `  ${secondary}`)}${hint}`;
+			const hint = entry.bindingHint ?? entry.keybinding;
+			const secondary = entry.description ?? entry.category ?? "";
+			const text = `${prefix}${entry.label}${theme.fg("muted", `  ${secondary}`)}${hint ? theme.fg("muted", `  ${hint}`) : ""}`;
 			return entry.disabled
 				? theme.fg("muted", truncateToWidth(text, width, Ellipsis.Omit))
 				: truncateToWidth(text, width, Ellipsis.Omit);
@@ -102,7 +111,9 @@ export class CommandPalette extends Container {
 	#updateResults(): void {
 		const query = this.#input.getValue();
 		this.#filtered = fuzzyFilter([...this.entries], query, entry =>
-			[entry.label, entry.category, entry.description, entry.bindingHint].filter(Boolean).join(" "),
+			[entry.label, entry.category, entry.description, entry.bindingHint, entry.keybinding, entry.searchText]
+				.filter(Boolean)
+				.join(" "),
 		);
 		this.#selectedIndex = this.#firstEnabledIndex();
 		this.#viewportStart = 0;
@@ -112,13 +123,11 @@ export class CommandPalette extends Container {
 	#firstEnabledIndex(): number {
 		return this.#filtered.findIndex(entry => !entry.disabled);
 	}
-
 	#viewportStartFor(selectedIndex: number): number {
 		if (selectedIndex < this.#viewportStart) return selectedIndex;
 		if (selectedIndex >= this.#viewportStart + 10) return selectedIndex - 9;
 		return this.#viewportStart;
 	}
-
 	#move(direction: -1 | 1): void {
 		if (this.#filtered.length === 0) return;
 		for (let step = 1; step <= this.#filtered.length; step++) {
@@ -134,3 +143,5 @@ export class CommandPalette extends Container {
 		}
 	}
 }
+
+export class CommandPaletteComponent extends CommandPalette {}

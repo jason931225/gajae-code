@@ -49,6 +49,16 @@ function sessionText(id: string, cwd: string, title: string, message: string): s
 	].join("\n")}\n`;
 }
 
+function legacySessionDirectory(sessionsRoot: string, cwd: string): string {
+	return path.join(
+		sessionsRoot,
+		`--${path
+			.resolve(cwd)
+			.replace(/^[/\\]/, "")
+			.replace(/[/\\:]/g, "-")}--`,
+	);
+}
+
 function snapshotDirectory(root: string): Array<{ path: string; content: string; size: number; mtimeMs: number }> {
 	return fs
 		.readdirSync(root, { recursive: true, withFileTypes: true })
@@ -182,12 +192,16 @@ describe("sessions dashboard", () => {
 		setAgentDir(agentDir);
 		try {
 			const sessionsRoot = path.join(agentDir, "sessions");
-			const older = path.join(sessionsRoot, "project-a", "older.jsonl");
-			const newer = path.join(sessionsRoot, "project-b", "newer.jsonl");
+			const olderCwd = path.join(agentDir, "projects", "a");
+			const newerCwd = path.join(agentDir, "projects", "b");
+			fs.mkdirSync(olderCwd, { recursive: true });
+			fs.mkdirSync(newerCwd, { recursive: true });
+			const older = path.join(legacySessionDirectory(sessionsRoot, olderCwd), "older.jsonl");
+			const newer = path.join(legacySessionDirectory(sessionsRoot, newerCwd), "newer.jsonl");
 			fs.mkdirSync(path.dirname(older), { recursive: true });
 			fs.mkdirSync(path.dirname(newer), { recursive: true });
-			fs.writeFileSync(older, sessionText("older", "/projects/a", "Older", "first"));
-			fs.writeFileSync(newer, sessionText("newer", "/projects/b", "Newer", "second"));
+			fs.writeFileSync(older, sessionText("older", olderCwd, "Older", "first"));
+			fs.writeFileSync(newer, sessionText("newer", newerCwd, "Newer", "second"));
 			fs.writeFileSync(`${older}.presence.json`, "{");
 			fs.utimesSync(older, new Date("2026-01-01T00:00:00.000Z"), new Date("2026-01-01T00:00:00.000Z"));
 			fs.utimesSync(newer, new Date("2026-01-02T00:00:00.000Z"), new Date("2026-01-02T00:00:00.000Z"));

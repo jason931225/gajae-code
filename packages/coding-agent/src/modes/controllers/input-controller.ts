@@ -10,7 +10,11 @@ import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
 import { theme } from "../../modes/theme/theme";
 import { scrollTmuxToPreviousUserInput as scrollTmuxPaneToPreviousUserInput } from "../../modes/tmux-scroll";
-import type { InteractiveModeContext } from "../../modes/types";
+import {
+	type ComposerSubmissionOptions,
+	canApplyComposerSubmission,
+	type InteractiveModeContext,
+} from "../../modes/types";
 import type { AgentSessionEvent, QueuedMessageEditEntry } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../../session/messages";
 import { getUserMessageViewportAnchorIds } from "../../session/session-manager";
@@ -28,11 +32,13 @@ import { type QueuedMessageMoveDirection, QueuedMessageSelectorComponent } from 
 
 interface Expandable {
 	setExpanded(expanded: boolean): void;
+	setManuallyExpanded?(expanded: boolean): void;
 }
 
 const INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS = 5_000;
 export const BACKGROUND_FOLD_DOUBLE_PRESS_MS = 750;
-
+const DRAFT_CLEAR_DOUBLE_ESCAPE_WINDOW_MS = 800;
+const EMPTY_EDITOR_DOUBLE_ESCAPE_WINDOW_MS = 500;
 const IMAGE_PLACEHOLDER_PATTERN = /\[image ([1-9]\d*)\]/g;
 const IMAGE_PLACEHOLDER_PRESENT_PATTERN = /\[image [1-9]\d*\]/;
 
@@ -197,6 +203,7 @@ export class InputController {
 	}
 
 	#lastBackgroundFoldKeyTime = 0;
+	#slashCommands: SlashCommand[] = [];
 
 	/** Set after a first Esc silently consumes a queued steer. Kept until the
 	 *  queued steer is either cancelled by a second Esc or drained by continuation,
@@ -204,6 +211,29 @@ export class InputController {
 	#steerConsumePending = false;
 
 	#globalInterruptUnsubscribe: (() => void) | undefined;
+	#draftClearEscapeText: string | undefined;
+
+	#resetEscapeGestures(): void {
+		this.ctx.lastEscapeTime = 0;
+		this.ctx.lastComposerClearEscapeTime = 0;
+		this.#draftClearEscapeText = undefined;
+	}
+
+	#armDraftClearEscape(text: string, now: number): void {
+		this.ctx.lastEscapeTime = 0;
+		this.ctx.lastComposerClearEscapeTime = now;
+		this.#draftClearEscapeText = text;
+		this.ctx.showStatus("press Esc again to clear");
+	}
+
+	#resetDraftClearEscape(): void {
+		this.ctx.lastComposerClearEscapeTime = 0;
+		this.#draftClearEscapeText = undefined;
+	}
+
+	#resetEmptyEditorEscape(): void {
+		this.ctx.lastEscapeTime = 0;
+	}
 
 	#matchesInterruptKey(data: string): boolean {
 		return this.ctx.keybindings.getKeys("app.interrupt").some(key => matchesKey(data, key));
@@ -305,6 +335,7 @@ export class InputController {
 				return undefined;
 			}
 			if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
+				this.#resetEscapeGestures();
 				return { consume: true };
 			}
 			const hookDialogActive = this.#hasHookDialog();
@@ -312,6 +343,7 @@ export class InputController {
 				// Inline ask/custom-input editors use Esc to return to the option list.
 				// Let the focused selector see the key instead of converting a typo
 				// into a full workflow/session abort while the agent is streaming.
+				this.#resetEscapeGestures();
 				return undefined;
 			}
 			if (
@@ -324,6 +356,7 @@ export class InputController {
 					streaming: hookDialogActive,
 				})
 			) {
+				this.#resetEscapeGestures();
 				return { consume: true };
 			}
 			return undefined;
@@ -337,11 +370,18 @@ export class InputController {
 			silent: options?.silent,
 		});
 	}
+	#clearComposer(): void {
+		const text = this.ctx.editor.getText();
+		if (text.trim()) {
+			this.ctx.editor.addToHistory(text);
+		}
+		this.ctx.clearEditor();
+	}
 
 	setupKeyHandlers(): void {
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
-		this.ctx.editor.shouldBypassAutocompleteOnEscape = () =>
-			Boolean(
+		this.ctx.editor.shouldBypassAutocompleteOnEscape = () => {
+			const bypassAutocomplete = Boolean(
 				this.ctx.loadingAnimation ||
 					this.ctx.hasActiveBtw() ||
 					(this.#steerConsumePending && this.ctx.session.hasQueuedSteering) ||
@@ -356,18 +396,28 @@ export class InputController {
 					this.ctx.autoCompactionEscapeHandler ||
 					this.ctx.retryEscapeHandler,
 			);
+			if (!bypassAutocomplete) this.#resetEscapeGestures();
+			return bypassAutocomplete;
+		};
 		this.#installGlobalInterruptListener();
 
 		// An open btw panel must stay dismissable with Esc even while another
 		// controller (auto-compaction, auto-retry, manual compaction, etc.) has
 		// temporarily replaced editor.onEscape. This priority hook is never
 		// swapped out, so it always wins for the interrupt key.
-		this.ctx.editor.onInterruptPriority = () => (this.ctx.hasActiveBtw() ? this.ctx.handleBtwEscape() : false);
+		this.ctx.editor.onInterruptPriority = () => {
+			if (!this.ctx.hasActiveBtw()) return false;
+			const consumed = this.ctx.handleBtwEscape();
+			if (consumed) this.#resetEscapeGestures();
+			return consumed;
+		};
 		this.ctx.editor.onEscape = () => {
 			if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
+				this.#resetEscapeGestures();
 				return;
 			}
 			if (this.#steerConsumePending) {
+				this.#resetEscapeGestures();
 				if (this.ctx.session.hasQueuedSteering) {
 					// Second Esc before the scheduled steer continuation drains the
 					// queue: restore/drop the queued steer and perform a real abort,
@@ -379,20 +429,7 @@ export class InputController {
 				this.#steerConsumePending = false;
 			}
 			if (this.#handleCancellableWorkEscape({ maintenance: true, retry: true })) {
-				return;
-			}
-			// Normal input state with user-typed text: Esc must not interrupt a
-			// running task (streaming turn, bash/eval). A double Esc within the
-			// 500ms window clears the composer instead. Bash/Python input modes
-			// keep their own Esc handling in the chain below.
-			if (!this.ctx.isBashMode && !this.ctx.isPythonMode && this.ctx.editor.getText().trim()) {
-				const now = Date.now();
-				if (now - this.ctx.lastComposerClearEscapeTime < 500) {
-					this.ctx.clearEditor();
-					this.ctx.lastComposerClearEscapeTime = 0;
-				} else {
-					this.ctx.lastComposerClearEscapeTime = now;
-				}
+				this.#resetEscapeGestures();
 				return;
 			}
 			if (
@@ -405,23 +442,45 @@ export class InputController {
 					streaming: true,
 				})
 			) {
+				this.#resetEscapeGestures();
 				return;
 			}
-			if (!this.ctx.editor.getText().trim()) {
+
+			const text = this.ctx.editor.getText();
+			if (!this.ctx.isBashMode && !this.ctx.isPythonMode && text.trim()) {
+				this.#resetEmptyEditorEscape();
+				const now = Date.now();
+				if (
+					now - this.ctx.lastComposerClearEscapeTime < DRAFT_CLEAR_DOUBLE_ESCAPE_WINDOW_MS &&
+					this.#draftClearEscapeText === text
+				) {
+					this.#clearComposer();
+					this.#resetDraftClearEscape();
+				} else {
+					this.#armDraftClearEscape(text, now);
+				}
+				return;
+			}
+
+			if (!text.trim()) {
+				this.#resetDraftClearEscape();
 				// Double-interrupt with empty editor triggers /tree, /branch, or nothing based on setting
 				const action = settings.get("doubleEscapeAction");
-				if (action !== "none") {
-					const now = Date.now();
-					if (now - this.ctx.lastEscapeTime < 500) {
-						if (action === "tree") {
-							this.ctx.showTreeSelector();
-						} else {
-							this.ctx.showUserMessageSelector();
-						}
-						this.ctx.lastEscapeTime = 0;
+				if (action === "none") {
+					this.#resetEmptyEditorEscape();
+					return;
+				}
+
+				const now = Date.now();
+				if (now - this.ctx.lastEscapeTime < EMPTY_EDITOR_DOUBLE_ESCAPE_WINDOW_MS) {
+					if (action === "tree") {
+						this.ctx.showTreeSelector();
 					} else {
-						this.ctx.lastEscapeTime = now;
+						this.ctx.showUserMessageSelector();
 					}
+					this.#resetEmptyEditorEscape();
+				} else {
+					this.ctx.lastEscapeTime = now;
 				}
 			}
 		};
@@ -504,7 +563,6 @@ export class InputController {
 				return true;
 			});
 		}
-
 		for (const key of this.ctx.keybindings.getKeys("app.session.new")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => {
 				this.#executeAction("app.session.new");
@@ -569,6 +627,7 @@ export class InputController {
 		}
 
 		this.ctx.editor.onChange = (text: string) => {
+			this.#resetEscapeGestures();
 			const wasBashMode = this.ctx.isBashMode;
 			const wasBashNoContext = this.ctx.isBashNoContext;
 			const wasPythonMode = this.ctx.isPythonMode;
@@ -588,188 +647,205 @@ export class InputController {
 	}
 
 	setupEditorSubmitHandler(): void {
-		this.ctx.editor.onSubmit = async (text: string) => {
-			text = text.trim();
-			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
+		this.ctx.editor.onSubmit = text => this.submitText(text, { ownsComposer: true, editor: this.ctx.editor });
+	}
 
-			// Empty submit while streaming with queued messages: flush queues immediately
-			if (!text && this.ctx.session.isStreaming && this.ctx.session.queuedMessageCount > 0) {
-				// Abort current stream and let queued messages be processed
-				await this.#abortInteractive();
-				return;
+	async submitText(text: string, composer: ComposerSubmissionOptions): Promise<void> {
+		text = text.trim();
+		if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
+
+		// Empty submit while streaming with queued messages: flush queues immediately
+		if (!text && this.ctx.session.isStreaming && this.ctx.session.queuedMessageCount > 0) {
+			// Abort current stream and let queued messages be processed
+			await this.#abortInteractive();
+			return;
+		}
+
+		if (!text) return;
+
+		// Continue shortcuts: "." or "c" sends empty message (agent continues, no visible message)
+		if (text === "." || text === "c") {
+			if (this.ctx.onInputCallback) {
+				this.ctx.editor.setText("");
+				this.ctx.pendingImages = [];
+				this.ctx.onInputCallback({ text: "", cancelled: false, started: true });
 			}
+			return;
+		}
 
-			if (!text) return;
+		const runner = this.ctx.session.extensionRunner;
+		const pendingImages = this.ctx.pendingImages;
+		let inputImages = this.#visiblePendingImagesForText(text);
 
-			// Continue shortcuts: "." or "c" sends empty message (agent continues, no visible message)
-			if (text === "." || text === "c") {
-				if (this.ctx.onInputCallback) {
+		if (runner?.hasHandlers("input")) {
+			const result = await runner.emitInput(text, inputImages, "interactive");
+			if (result?.handled) {
+				if (this.#canModifyComposer(composer)) {
 					this.ctx.editor.setText("");
-					this.ctx.pendingImages = [];
-					this.ctx.onInputCallback({ text: "", cancelled: false, started: true });
 				}
+				this.#clearPendingImagesIfOwnedBy(pendingImages, composer);
 				return;
 			}
-
-			const runner = this.ctx.session.extensionRunner;
-			const pendingImages = this.ctx.pendingImages;
-			let inputImages = this.#visiblePendingImagesForText(text);
-
-			if (runner?.hasHandlers("input")) {
-				const result = await runner.emitInput(text, inputImages, "interactive");
-				if (result?.handled) {
-					this.ctx.editor.setText("");
-					this.#clearPendingImagesIfOwnedBy(pendingImages);
-					return;
-				}
-				if (result?.text !== undefined) {
-					text = result.text.trim();
-				}
-				if (result?.images !== undefined) {
-					inputImages = result.images;
-				}
+			if (result?.text !== undefined) {
+				text = result.text.trim();
 			}
-
-			if (!text) return;
-
-			// Handle built-in slash commands
-			const slashResult = await executeBuiltinSlashCommand(text, {
-				ctx: this.ctx,
-				handleBackgroundCommand: () => this.handleBackgroundCommand(),
-			});
-			if (slashResult === true) {
-				return;
+			if (result?.images !== undefined) {
+				inputImages = result.images;
 			}
-			if (typeof slashResult === "string") {
-				// Command handled but returned remaining text to use as prompt
-				text = slashResult;
-			}
+		}
 
-			// Handle skill commands (/skill:name [args]). While streaming, Enter
-			// honors `busyPromptMode`: "steer" interrupts the active turn, "queue"
-			// runs after it completes (matches the free-text Enter semantics applied
-			// a few lines below at the streaming branch). Explicit queue shortcuts
-			// route through `handleFollowUp` and dispatch as `followUp`.
-			if (await this.#invokeSkillCommand(text, this.#busyStreamingBehavior())) {
-				return;
-			}
+		if (!text) return;
 
-			// Handle bash command (! for normal, !! for excluded from context)
-			if (text.startsWith("!")) {
-				const isExcluded = text.startsWith("!!");
-				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
-				if (command) {
-					if (this.ctx.session.isBashRunning) {
-						this.ctx.showWarning("A bash command is already running. Press Esc to cancel it first.");
+		// Handle built-in slash commands
+		const slashResult = await executeBuiltinSlashCommand(text, {
+			ctx: this.ctx,
+			handleBackgroundCommand: () => this.handleBackgroundCommand(),
+			composer,
+		});
+		if (slashResult === true) {
+			return;
+		}
+		if (typeof slashResult === "string") {
+			// Command handled but returned remaining text to use as prompt
+			text = slashResult;
+		}
+
+		// Handle skill commands (/skill:name [args]). While streaming, Enter
+		// honors `busyPromptMode`: "steer" interrupts the active turn, "queue"
+		// runs after it completes (matches the free-text Enter semantics applied
+		// a few lines below at the streaming branch). Explicit queue shortcuts
+		// route through `handleFollowUp` and dispatch as `followUp`.
+		if (await this.#invokeSkillCommand(text, this.#busyStreamingBehavior(), composer)) {
+			return;
+		}
+
+		// Handle bash command (! for normal, !! for excluded from context)
+		if (text.startsWith("!")) {
+			const isExcluded = text.startsWith("!!");
+			const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
+			if (command) {
+				if (this.ctx.session.isBashRunning) {
+					this.ctx.showWarning("A bash command is already running. Press Esc to cancel it first.");
+					if (this.#canModifyComposer(composer)) {
 						this.ctx.editor.setText(text);
-						return;
 					}
+					return;
+				}
+				if (this.#canModifyComposer(composer)) {
 					this.ctx.editor.addToHistory(text);
-					await this.ctx.handleBashCommand(command, isExcluded);
-					this.ctx.isBashMode = false;
-					this.ctx.isBashNoContext = false;
-					this.ctx.updateEditorBorderColor();
-					return;
 				}
-			}
-
-			// Handle python command ($ for normal, $$ for excluded from context)
-			if (text.startsWith("$")) {
-				const isExcluded = text.startsWith("$$");
-				const code = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
-				if (code) {
-					if (this.ctx.session.isEvalRunning) {
-						this.ctx.showWarning("A Python execution is already running. Press Esc to cancel it first.");
-						this.ctx.editor.setText(text);
-						return;
-					}
-					this.ctx.editor.addToHistory(text);
-					await this.ctx.handlePythonCommand(code, isExcluded);
-					this.ctx.isPythonMode = false;
-					this.ctx.updateEditorBorderColor();
-					return;
-				}
-			}
-
-			// Queue input during compaction
-			if (this.ctx.session.isCompacting) {
-				if ((inputImages?.length ?? 0) > 0) {
-					this.ctx.showStatus("Compaction in progress. Retry after it completes to send images.");
-					return;
-				}
-				this.ctx.queueCompactionMessage(text, "steer");
+				await this.ctx.handleBashCommand(command, isExcluded);
+				this.ctx.isBashMode = false;
+				this.ctx.isBashNoContext = false;
+				this.ctx.updateEditorBorderColor();
 				return;
 			}
+		}
 
-			// If streaming, use prompt() with the busy-prompt behavior the user
-			// selected: "steer" interrupts the active turn, "queue" defers the
-			// prompt to run after the active turn completes (in submission order).
-			// This handles extension commands (execute immediately), prompt template expansion, and queueing
-			if (this.ctx.session.isStreaming) {
+		// Handle python command ($ for normal, $$ for excluded from context)
+		if (text.startsWith("$")) {
+			const isExcluded = text.startsWith("$$");
+			const code = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
+			if (code) {
+				if (this.ctx.session.isEvalRunning) {
+					this.ctx.showWarning("A Python execution is already running. Press Esc to cancel it first.");
+					if (this.#canModifyComposer(composer)) {
+						this.ctx.editor.setText(text);
+					}
+					return;
+				}
+				if (this.#canModifyComposer(composer)) {
+					this.ctx.editor.addToHistory(text);
+				}
+				await this.ctx.handlePythonCommand(code, isExcluded);
+				this.ctx.isPythonMode = false;
+				this.ctx.updateEditorBorderColor();
+				return;
+			}
+		}
+
+		// Queue input during compaction
+		if (this.ctx.session.isCompacting) {
+			if ((inputImages?.length ?? 0) > 0) {
+				this.ctx.showStatus("Compaction in progress. Retry after it completes to send images.");
+				return;
+			}
+			this.ctx.queueCompactionMessage(text, "steer", composer);
+			return;
+		}
+
+		// If streaming, use prompt() with the busy-prompt behavior the user
+		// selected: "steer" interrupts the active turn, "queue" defers the
+		// prompt to run after the active turn completes (in submission order).
+		// This handles extension commands (execute immediately), prompt template expansion, and queueing
+		if (this.ctx.session.isStreaming) {
+			if (this.#canModifyComposer(composer)) {
 				this.ctx.editor.addToHistory(text);
 				this.ctx.editor.setText("");
-				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.#clearPendingImagesIfOwnedBy(pendingImages);
-				// Record the signature so the queued message's eventual delivery
-				// (a user-role `message_start` event) leaves any draft the user has
-				// typed since queuing intact. Same protection as #783, applied to
-				// the streaming/queue path.
-				const streamingBehavior = this.#busyStreamingBehavior();
-				const promptOptions =
-					streamingBehavior === "followUp"
-						? { streamingBehavior, images, followUpQueuePolicy: "sequential" as const }
-						: { streamingBehavior, images };
-				await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, promptOptions), {
-					imageCount: images?.length ?? 0,
-				});
-				this.ctx.updatePendingMessagesDisplay();
-				this.ctx.ui.requestRender();
-				return;
 			}
+			const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+			this.#clearPendingImagesIfOwnedBy(pendingImages, composer);
+			// Record the signature so the queued message's eventual delivery
+			// (a user-role `message_start` event) leaves any draft the user has
+			// typed since queuing intact. Same protection as #783, applied to
+			// the streaming/queue path.
+			const streamingBehavior = this.#busyStreamingBehavior();
+			const promptOptions =
+				streamingBehavior === "followUp"
+					? { streamingBehavior, images, followUpQueuePolicy: "sequential" as const }
+					: { streamingBehavior, images };
+			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, promptOptions), {
+				imageCount: images?.length ?? 0,
+			});
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.ui.requestRender();
+			return;
+		}
 
-			// Normal message submission
-			// First, move any pending bash components to chat
-			this.ctx.flushPendingBashComponents();
+		// Normal message submission
+		// First, move any pending bash components to chat
+		this.ctx.flushPendingBashComponents();
 
-			// Generate session title on first message
-			const hasUserMessages = this.ctx.session.messages.some((m: AgentMessage) => m.role === "user");
-			if (!hasUserMessages && !this.ctx.sessionManager.getSessionName() && !$env.PI_NO_TITLE) {
-				const registry = this.ctx.session.modelRegistry;
-				generateSessionTitle(
-					text,
-					registry,
-					this.ctx.settings,
-					this.ctx.session.sessionId,
-					this.ctx.session.model,
-					provider => this.ctx.session.agent.metadataForProvider(provider),
-				)
-					.then(async title => {
-						if (title) {
-							const applied = await this.ctx.sessionManager.setSessionName(title, "auto");
-							if (applied) {
-								setSessionTerminalTitle(
-									this.ctx.sessionManager.getSessionName()!,
-									this.ctx.sessionManager.getCwd(),
-								);
-								this.ctx.updateEditorBorderColor();
-							}
+		// Generate session title on first message
+		const hasUserMessages = this.ctx.session.messages.some((m: AgentMessage) => m.role === "user");
+		if (!hasUserMessages && !this.ctx.sessionManager.getSessionName() && !$env.PI_NO_TITLE) {
+			const registry = this.ctx.session.modelRegistry;
+			generateSessionTitle(
+				text,
+				registry,
+				this.ctx.settings,
+				this.ctx.session.sessionId,
+				this.ctx.session.model,
+				provider => this.ctx.session.agent.metadataForProvider(provider),
+			)
+				.then(async title => {
+					if (title) {
+						const applied = await this.ctx.sessionManager.setSessionName(title, "auto");
+						if (applied) {
+							setSessionTerminalTitle(
+								this.ctx.sessionManager.getSessionName()!,
+								this.ctx.sessionManager.getCwd(),
+							);
+							this.ctx.updateEditorBorderColor();
 						}
-					})
-					.catch(() => {});
-			}
+					}
+				})
+				.catch(() => {});
+		}
 
-			if (this.ctx.onInputCallback) {
-				// Include any pending images from clipboard paste
-				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.#clearPendingImagesIfOwnedBy(pendingImages);
+		if (this.ctx.onInputCallback) {
+			// Include any pending images from clipboard paste
+			const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+			this.#clearPendingImagesIfOwnedBy(pendingImages, composer);
 
-				// Render user message immediately, then let session events catch up
-				const submission = this.ctx.startPendingSubmission({ text, images });
+			// Render user message immediately, then let session events catch up
+			const submission = this.ctx.startPendingSubmission({ text, images }, composer);
 
-				this.ctx.onInputCallback(submission);
-			}
+			this.ctx.onInputCallback(submission);
+		}
+		if (this.#canModifyComposer(composer)) {
 			this.ctx.editor.addToHistory(text);
-		};
+		}
 	}
 
 	handleCtrlC(): void {
@@ -1106,11 +1182,17 @@ export class InputController {
 	 * while the agent is streaming; the idle path of `promptCustomMessage`
 	 * ignores it.
 	 */
-	async #invokeSkillCommand(text: string, streamingBehavior: "steer" | "followUp"): Promise<boolean> {
+	async #invokeSkillCommand(
+		text: string,
+		streamingBehavior: "steer" | "followUp",
+		options?: ComposerSubmissionOptions,
+	): Promise<boolean> {
 		const invocations = parseSkillInvocations(text, this.ctx.skillCommands ?? new Map());
 		if (invocations.length === 0) return false;
-		this.ctx.editor.addToHistory(text);
-		this.ctx.editor.setText("");
+		if (!options || this.#canModifyComposer(options)) {
+			this.ctx.editor.addToHistory(text);
+			this.ctx.editor.setText("");
+		}
 		try {
 			for (let index = 0; index < invocations.length; index += 1) {
 				const invocation = invocations[index];
@@ -1424,8 +1506,15 @@ export class InputController {
 		return images.length > 0 ? images : undefined;
 	}
 
-	#clearPendingImagesIfOwnedBy(pendingImages: InteractiveModeContext["pendingImages"]): void {
-		if (this.ctx.pendingImages === pendingImages) {
+	#canModifyComposer(options: ComposerSubmissionOptions): boolean {
+		return canApplyComposerSubmission(options, this.ctx.editor);
+	}
+
+	#clearPendingImagesIfOwnedBy(
+		pendingImages: InteractiveModeContext["pendingImages"],
+		options: ComposerSubmissionOptions,
+	): void {
+		if (this.#canModifyComposer(options) && this.ctx.pendingImages === pendingImages) {
 			this.ctx.pendingImages = [];
 		}
 	}
@@ -1504,6 +1593,7 @@ export class InputController {
 	}
 
 	createAutocompleteProvider(commands: SlashCommand[], basePath: string): AutocompleteProvider {
+		this.#slashCommands = commands;
 		return createPromptActionAutocompleteProvider({
 			commands,
 			basePath,
@@ -1559,7 +1649,7 @@ export class InputController {
 
 	openCommandPalette(): void {
 		if (this.ctx.isTranscriptViewerOpen?.()) return;
-		if (this.ctx.editor.getText().trim().length > 0) {
+		if (this.ctx.editor.getText().trim().length > 0 || (this.ctx.pendingImages?.length ?? 0) > 0) {
 			this.ctx.showStatus("Command palette opens from an empty prompt. Type / for inline commands.");
 			return;
 		}
@@ -1579,8 +1669,9 @@ export class InputController {
 						entry.id.slice("action:".length) as (typeof APP_ACTION_METADATA)[number]["id"],
 					);
 				} else {
-					this.ctx.editor.setText(entry.id.slice("slash:".length));
-					void this.ctx.editor.onSubmit?.(entry.id.slice("slash:".length));
+					void Promise.resolve(this.ctx.editor.onSubmit?.(entry.id.slice("slash:".length))).catch(error => {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					});
 				}
 			},
 			close,
@@ -1607,7 +1698,7 @@ export class InputController {
 					? this.ctx.keybindings.getKeys(action.bindingId).join(", ") || undefined
 					: undefined,
 			}));
-		const slashCommands = (this.ctx.getSlashCommands?.() ?? []).map(command => ({
+		const slashCommands = (this.ctx.getSlashCommands?.() ?? this.#slashCommands).map(command => ({
 			id: `slash:/${command.name}`,
 			label: `/${command.name}`,
 			category: this.ctx.skillCommands.has(command.name) ? "Skill" : "Command",
@@ -1684,7 +1775,17 @@ export class InputController {
 		this.ctx.toolOutputExpanded = expanded;
 		for (const child of this.ctx.chatContainer.children) {
 			if (isExpandable(child)) {
-				child.setExpanded(expanded);
+				// Callable guard: setManuallyExpanded is optional on the exported
+				// contract, and hostile/legacy children may expose it as a
+				// non-function property or an unstable getter. Read once, then
+				// invoke only a real function; everything else falls back to the
+				// automatic path.
+				const setManuallyExpanded = child.setManuallyExpanded;
+				if (typeof setManuallyExpanded === "function") {
+					setManuallyExpanded.call(child, expanded);
+				} else {
+					child.setExpanded(expanded);
+				}
 			}
 		}
 		this.ctx.ui.requestRender();

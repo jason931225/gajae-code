@@ -233,6 +233,18 @@ describe("AgentSession /btw isolation", () => {
 		expect(harness.session.providerSessionState.size).toBe(0);
 	});
 
+	it("keeps the synchronously captured system prompt across credential delay", async () => {
+		const key = Promise.withResolvers<string>();
+		const harness = createHarness({ getApiKey: () => key.promise });
+
+		const turn = harness.session.runEphemeralTurn({ purpose: "btw", promptText: "snapshot prompt" });
+		harness.session.agent.setSystemPrompt(["mutated system"]);
+		key.resolve("test-key");
+		await turn;
+
+		expect(harness.model.calls[0]?.context.systemPrompt).toEqual(["system"]);
+	});
+
 	it("uses the main provider cache identity for credentials and account metadata", async () => {
 		const harness = createHarness({
 			providerSessionId: "logical-provider-session",

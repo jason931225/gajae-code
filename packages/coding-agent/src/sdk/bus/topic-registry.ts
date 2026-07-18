@@ -169,10 +169,17 @@ export class TopicRegistry {
 		const promise = (async () => {
 			const topicId = await create();
 			if (!isValidTopicId(topicId)) throw new Error("createForumTopic: invalid message_thread_id");
-			if ((this.epochs.get(sessionId) ?? 0) !== epoch)
-				throw new Error("topic authority was revoked during creation");
-			const record: TopicRecord = { topicId, name, identitySent: false, createdAt: now(), authorityEpoch: epoch };
+			const revoked = (this.epochs.get(sessionId) ?? 0) !== epoch;
+			const record: TopicRecord = {
+				topicId,
+				name,
+				identitySent: false,
+				createdAt: now(),
+				authorityEpoch: revoked ? (this.epochs.get(sessionId) ?? 0) : epoch,
+				...(revoked ? { authorityState: "delete_pending" as const } : {}),
+			};
 			this.topics.set(sessionId, record);
+			if (revoked) throw new Error("topic authority was revoked during creation");
 			if (this.#ambiguousTopicIds.has(topicId)) return record;
 			if (this.byTopic.has(topicId)) {
 				this.byTopic.delete(topicId);

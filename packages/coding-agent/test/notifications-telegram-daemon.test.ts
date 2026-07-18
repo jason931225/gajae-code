@@ -9357,4 +9357,75 @@ describe("telegram daemon /btw reservation and capability boundaries", () => {
 		pool.settle(second.itemId, "removed");
 		await expect(second.settled).resolves.toBe("removed");
 	});
+	test.each([
+		["accepted", async () => ({ ok: true, result: true }), false],
+		["rejected", async () => ({ ok: false, description: "TOPIC_ID_INVALID" }), false],
+		["ambiguous", async () => Promise.reject(new Error("network lost")), true],
+	])("close during an accepted create performs a compensating delete (%s)", async (_outcome, deleteResult, retained) => {
+		const agentDir = tempAgentDir();
+		const bot = new FakeBotApi();
+		const createStarted = Promise.withResolvers<void>();
+		const createGate = Promise.withResolvers<unknown>();
+		const call = bot.call.bind(bot);
+		bot.call = async (method, body, options) => {
+			if (method === "createForumTopic") {
+				bot.calls.push({ method, body, options });
+				createStarted.resolve();
+				return createGate.promise;
+			}
+			if (method === "deleteForumTopic") {
+				bot.calls.push({ method, body, options });
+				return deleteResult();
+			}
+			return call(method, body, options);
+		};
+		const daemon = new TelegramNotificationDaemon({
+			settings: settings(agentDir),
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+		});
+		const creating = (daemon as any).ensureTopic("S", "topic");
+		await createStarted.promise;
+		const closing = (daemon as any).deleteTopic("S");
+		createGate.resolve({ ok: true, result: { message_thread_id: 77 } });
+		await expect(creating).rejects.toThrow("topic authority was revoked during creation");
+		await closing;
+		expect(
+			bot.calls.filter(call => call.method === "deleteForumTopic").map(call => call.body.message_thread_id),
+		).toEqual([77]);
+		const persisted = JSON.parse(
+			fs.readFileSync(path.join(daemonPaths(agentDir).dir, "telegram-topics.json"), "utf8"),
+		);
+		if (retained) expect(persisted.topics.S).toMatchObject({ topicId: "77", authorityState: "delete_pending" });
+		else expect(persisted.topics.S).toBeUndefined();
+	});
+	test("shutdown retains ownership and returns when control persistence never settles", async () => {
+		const agentDir = tempAgentDir();
+		const s = settings(agentDir);
+		await acquireDaemonOwnership({
+			settings: s,
+			tokenFingerprint: tokenFingerprint("tok"),
+			chatId: "42",
+			pid: process.pid,
+			randomId: () => "owner",
+		});
+		const daemon = new TelegramNotificationDaemon({
+			settings: s,
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: new FakeBotApi(),
+			idleTimeoutMs: 0,
+			control: {
+				shouldStop: async () => true,
+				clear: async () => new Promise<void>(() => undefined),
+			},
+		});
+		await expect(
+			Promise.race([daemon.run(), Bun.sleep(2_000).then(() => Promise.reject(new Error("shutdown timed out")))]),
+		).resolves.toBeUndefined();
+		expect(fs.existsSync(daemonPaths(agentDir).lock)).toBe(true);
+	});
 });

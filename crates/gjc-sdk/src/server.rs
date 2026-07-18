@@ -1586,27 +1586,19 @@ where
 		},
 		ClientMessage::EphemeralTurn(turn) => {
 			if tokens_match(&turn.token, &state.token) {
-				let canonical = ClientMessage::EphemeralTurn(turn);
 				let _ = state.inbound_tx.send(InboundMessage {
 					connection_id: connection_id.to_owned(),
-					message:       canonical.clone(),
+					message:       ClientMessage::EphemeralTurn(turn),
 				});
-				if let Ok(frame) = serde_json::to_string(&canonical) {
-					let _ = state.frame_tx.send((connection_id.to_owned(), frame));
-				}
 			}
 			return true;
 		},
 		ClientMessage::EphemeralTurnCancel(cancel) => {
 			if tokens_match(&cancel.token, &state.token) {
-				let canonical = ClientMessage::EphemeralTurnCancel(cancel);
 				let _ = state.inbound_tx.send(InboundMessage {
 					connection_id: connection_id.to_owned(),
-					message:       canonical.clone(),
+					message:       ClientMessage::EphemeralTurnCancel(cancel),
 				});
-				if let Ok(frame) = serde_json::to_string(&canonical) {
-					let _ = state.frame_tx.send((connection_id.to_owned(), frame));
-				}
 			}
 			return true;
 		},
@@ -3092,7 +3084,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn authenticated_ephemeral_turn_forwards_to_inbound_and_correlated_frame_receivers() {
+	async fn authenticated_ephemeral_turn_forwards_only_to_typed_inbound_receiver() {
 		let handle = start(ServerConfig::new("s", "secret")).await.unwrap();
 		let mut inbound = handle.take_inbound_receiver().expect("inbound receiver");
 		let mut frames = handle.take_frame_receiver().expect("frame receiver");
@@ -3137,19 +3129,12 @@ mod tests {
 			other => panic!("expected ephemeral_turn, got {other:?}"),
 		}
 
-		let (source, raw) = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
-			.await
-			.expect("frame timed out")
-			.expect("frame channel closed");
-		assert_eq!(source, connection_id);
-		let frame: serde_json::Value = serde_json::from_str(&raw).expect("valid frame");
-		assert_eq!(frame["sessionId"], "s");
-		assert_eq!(frame["token"], "secret");
-		assert_eq!(frame["question"], "What changed?");
-		assert_eq!(frame["requestId"], "btw:123e4567-e89b-42d3-a456-426614174000");
-		assert_eq!(frame["updateId"], 7);
-		assert_eq!(frame["messageId"], 9);
-		assert_eq!(frame["threadId"], "11");
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(300), frames.recv())
+				.await
+				.is_err(),
+			"authenticated ephemeral turns must not be duplicated to the raw frame receiver"
+		);
 
 		for frame in [
 			serde_json::json!({
@@ -3193,8 +3178,9 @@ mod tests {
 		handle.stop();
 	}
 	#[tokio::test]
-	async fn authenticated_ephemeral_turn_cancel_forwards_full_tuple_as_v3_frame() {
+	async fn authenticated_ephemeral_turn_cancel_forwards_full_tuple_to_typed_inbound() {
 		let handle = start(ServerConfig::new("s", "secret")).await.unwrap();
+		let mut inbound = handle.take_inbound_receiver().expect("inbound rx");
 		let mut frames = handle.take_frame_receiver().expect("frame rx");
 		let mut ws = connect(&handle, "secret").await;
 		next_server_hello(&mut ws).await;
@@ -3216,14 +3202,24 @@ mod tests {
 		.await
 		.unwrap();
 
-		let (_, raw) = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
+		let inbound_cancel = tokio::time::timeout(std::time::Duration::from_secs(2), inbound.recv())
 			.await
 			.expect("cancel timed out")
-			.expect("frame channel closed");
-		let cancel: serde_json::Value = serde_json::from_str(&raw).expect("valid frame");
-		assert_eq!(cancel["updateId"], 7);
-		assert_eq!(cancel["messageId"], 9);
-		assert_eq!(cancel["threadId"], "11");
+			.expect("inbound channel closed");
+		match inbound_cancel.message {
+			ClientMessage::EphemeralTurnCancel(cancel) => {
+				assert_eq!(cancel.update_id, 7);
+				assert_eq!(cancel.message_id, 9);
+				assert_eq!(cancel.thread_id, "11");
+			},
+			other => panic!("expected ephemeral_turn_cancel, got {other:?}"),
+		}
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(300), frames.recv())
+				.await
+				.is_err(),
+			"authenticated ephemeral turn cancels must not be duplicated to the raw frame receiver"
+		);
 		ws.send(Message::Text(
 			serde_json::json!({
 				"type": "ephemeral_turn",

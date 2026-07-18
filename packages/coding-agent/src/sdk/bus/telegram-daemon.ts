@@ -3051,13 +3051,17 @@ export class TelegramNotificationDaemon {
 
 	/** Best-effort delete of a session topic once its local notification endpoint shuts down. */
 	private async deleteTopic(sessionId: string): Promise<void> {
-		const record = this.topics.beginDelete(sessionId);
+		let record = this.topics.beginDelete(sessionId);
 		// Persist even an absent-record fence: it revokes a create that was admitted
 		// before close but has not yet committed its topic record.
 		await this.persistTopics();
 		if (!record) {
 			await this.topics.awaitInflight(sessionId);
-			return;
+			record = this.topics.get(sessionId);
+			// A remotely accepted revoked create installs a delete_pending record while
+			// its caller rejects; durably retain it before compensating remotely.
+			await this.persistTopics();
+			if (!record) return;
 		}
 		const removed = this.pool.removeWhere(item => item.sessionId === sessionId);
 		for (const item of removed) {
@@ -4925,26 +4929,35 @@ export class TelegramNotificationDaemon {
 		} finally {
 			this.effects.beginShutdown();
 			let persisted = false;
-			await this.effects
-				.allowTerminal(async () => {
-					await this.#drainBtwTurns();
-					this.runtime.stop();
-					this.stopOwnershipHeartbeatTimer();
-					this.stopFlushTimer();
-					this.stopScanTimer();
-					this.stopTypingTimer();
-					this.stopLifecycleControl();
-					await this.cleanupAllAttachmentDirs();
-					await this.persistAliases();
-					await this.persistTopics();
-					await this.persistSeenUpdateIds();
-					await this.opts.control?.clear?.(this.opts.ownerId);
-					persisted = true;
-				})
-				.catch(error =>
-					logger.warn(`notifications: shutdown persistence failed: ${sanitizeDiagnostic(String(error))}`),
-				);
-			const quiesced = await this.effects.join(BTW_SHUTDOWN_JOIN_MS);
+			const shutdown = this.effects.allowTerminal(async () => {
+				await this.#drainBtwTurns();
+				this.runtime.stop();
+				this.stopOwnershipHeartbeatTimer();
+				this.stopFlushTimer();
+				this.stopScanTimer();
+				this.stopTypingTimer();
+				this.stopLifecycleControl();
+				await this.cleanupAllAttachmentDirs();
+				await this.persistAliases();
+				await this.persistTopics();
+				await this.persistSeenUpdateIds();
+				await this.opts.control?.clear?.(this.opts.ownerId);
+				persisted = true;
+			});
+			const deadline = Promise.withResolvers<boolean>();
+			const deadlineTimer = setTimeout(() => deadline.resolve(false), BTW_SHUTDOWN_JOIN_MS);
+			const completed = await Promise.race([
+				shutdown.then(
+					() => true,
+					error => {
+						logger.warn(`notifications: shutdown persistence failed: ${sanitizeDiagnostic(String(error))}`);
+						return false;
+					},
+				),
+				deadline.promise,
+			]);
+			clearTimeout(deadlineTimer);
+			const quiesced = completed && (await this.effects.join(BTW_SHUTDOWN_JOIN_MS));
 			if (!quiesced || !persisted) {
 				logger.warn("notifications: shutdown was not durably quiesced; retaining daemon ownership");
 			} else {

@@ -244,4 +244,15 @@ describe("TopicRegistry", () => {
 		);
 		expect(reg.get("bad")).toBeUndefined();
 	});
+	test("retains an accepted revoked create as a durable delete fence", async () => {
+		const reg = new TopicRegistry();
+		const created = Promise.withResolvers<string>();
+		const create = reg.getOrCreateTopic("s1", () => created.promise);
+		expect(reg.beginDelete("s1")).toBeUndefined();
+		created.resolve("42");
+		await expect(create).rejects.toThrow("topic authority was revoked during creation");
+		expect(reg.get("s1")).toMatchObject({ topicId: "42", authorityState: "delete_pending" });
+		expect(reg.sessionForTopic("42")).toBeUndefined();
+		expect(reg.serialize().topics.s1).toMatchObject({ topicId: "42", authorityState: "delete_pending" });
+	});
 });

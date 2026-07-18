@@ -126,19 +126,31 @@ describe("withFileLock stale owner liveness (#652)", () => {
 		expect(await fs.exists(lockDir)).toBe(true);
 	});
 
-	test("release refuses to remove a lock that no longer has this owner token", async () => {
+	test("rejects after successful protected work when ownership is lost during release", async () => {
 		const base = await makeTemp();
 		const lockedFile = path.join(base, "state.json");
 		const lockDir = `${lockedFile}.lock`;
 		const replacement = { pid: LIVE_PID, start_time: "test-start", timestamp: Date.now() + 1_000 };
 
-		await withFileLock(lockedFile, async () => {
-			await writeInfo(lockDir, replacement);
-		});
-
-		expect(await fs.exists(lockDir)).toBe(true);
+		await expect(
+			withFileLock(lockedFile, async () => {
+				await writeInfo(lockDir, replacement);
+			}),
+		).rejects.toThrow("Failed to release file lock: owner_changed.");
 		const onDisk = JSON.parse(await fs.readFile(path.join(lockDir, "info"), "utf8"));
 		expect(onDisk).toEqual(replacement);
+	});
+
+	test("rejects after successful protected work when the lock disappears during release", async () => {
+		const base = await makeTemp();
+		const lockedFile = path.join(base, "state.json");
+		const lockDir = `${lockedFile}.lock`;
+
+		await expect(
+			withFileLock(lockedFile, async () => {
+				await fs.rm(lockDir, { recursive: true });
+			}),
+		).rejects.toThrow("Failed to release file lock: missing.");
 	});
 });
 describe("file lock cleanup failure handling (#2478)", () => {
@@ -175,17 +187,17 @@ describe("file lock cleanup failure handling (#2478)", () => {
 		expect(await fs.exists(lockDir)).toBe(true);
 	});
 
-	test("preserves operation and release failures", async () => {
+	test("preserves operation and ownership-loss release failures", async () => {
 		const base = await makeTemp();
 		const lockedFile = path.join(base, "state.json");
+		const lockDir = `${lockedFile}.lock`;
 		const operationError = new Error("protected work failed");
-		const releaseError = Object.assign(new Error("lock removal denied"), { code: "EACCES" });
-
-		vi.spyOn(fs, "rm").mockRejectedValueOnce(releaseError);
+		const replacement = { pid: LIVE_PID, start_time: "test-start", timestamp: Date.now() + 1_000 };
 
 		let failure: unknown;
 		try {
 			await withFileLock(lockedFile, async () => {
+				await writeInfo(lockDir, replacement);
 				throw operationError;
 			});
 		} catch (error) {
@@ -193,7 +205,13 @@ describe("file lock cleanup failure handling (#2478)", () => {
 		}
 
 		expect(failure).toBeInstanceOf(AggregateError);
-		expect((failure as AggregateError).errors).toEqual([operationError, releaseError]);
+		const errors = (failure as AggregateError).errors;
+		expect(errors).toHaveLength(2);
+		expect(errors[0]).toBe(operationError);
+		expect(errors[1]).toBeInstanceOf(Error);
+		expect((errors[1] as Error).message).toBe("Failed to release file lock: owner_changed.");
+		const onDisk = JSON.parse(await fs.readFile(path.join(lockDir, "info"), "utf8"));
+		expect(onDisk).toEqual(replacement);
 	});
 });
 describe("file lock owner-token removal guard (#606)", () => {

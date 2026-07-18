@@ -121,6 +121,7 @@ describe("dev-ci canonical-plan workflow contract", () => {
 			{ ...valid[0]!, native: "cancelled" },
 			{ ...valid[0]!, shards: "failure" },
 			{ ...valid[0]!, shards: "cancelled" },
+			{ ...valid[0]!, shards: "skipped" },
 			{ ...valid[0]!, windowsDoctor: "failure" },
 			{ ...valid[0]!, windowsDoctor: "cancelled" },
 			{ ...valid[0]!, windowsDoctor: "skipped" },

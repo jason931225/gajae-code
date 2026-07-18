@@ -240,7 +240,8 @@ async function tryAcquireLock(lockPath: string): Promise<LockInfo | null> {
 }
 
 async function releaseLock(lockPath: string, owner: FileLockOwnerToken): Promise<void> {
-	await removeFileLockDirForGc(lockPath, owner);
+	const outcome = await removeFileLockDirForGc(lockPath, owner);
+	if (outcome !== "removed") throw new Error(`Failed to release file lock: ${outcome}.`);
 }
 async function acquireLock(filePath: string, options: FileLockOptions = {}): Promise<() => Promise<void>> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };

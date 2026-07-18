@@ -70,6 +70,51 @@ describe("EphemeralTurnHost", () => {
 		expect(() => host.handle("three", request({ requestId: "three" }))).toThrow("directed delivery failed");
 		host.dispose();
 	});
+	it("contains a rejected terminal delivery without disrupting later turns", async () => {
+		const pending = Promise.withResolvers<{ replyText: string }>();
+		const delivered: Array<{ connectionId: string; frame: Frame }> = [];
+		const unhandled: unknown[] = [];
+		const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+		let executions = 0;
+		const host = new EphemeralTurnHost(
+			(connectionId, frame) => {
+				if (connectionId === "disconnected") throw new Error("directed delivery failed");
+				delivered.push({ connectionId, frame });
+			},
+			async question => {
+				executions += 1;
+				return question === "first" ? await pending.promise : { replyText: "second answer" };
+			},
+		);
+		configure(host);
+		process.on("unhandledRejection", onUnhandledRejection);
+
+		try {
+			host.handle("disconnected", request({ requestId: "first", question: "first" }));
+			pending.resolve({ replyText: "first answer" });
+			await flush();
+			host.handle("reconnected", request({ requestId: "first", question: "first" }));
+
+			host.handle("healthy", request({ requestId: "second", question: "second" }));
+			await flush();
+
+			expect(unhandled).toEqual([]);
+			expect(executions).toBe(2);
+			expect(delivered).toEqual([
+				expect.objectContaining({
+					connectionId: "reconnected",
+					frame: expect.objectContaining({ requestId: "first", status: "ok", text: "first answer" }),
+				}),
+				expect.objectContaining({
+					connectionId: "healthy",
+					frame: expect.objectContaining({ requestId: "second", status: "ok", text: "second answer" }),
+				}),
+			]);
+		} finally {
+			process.off("unhandledRejection", onUnhandledRejection);
+			host.dispose();
+		}
+	});
 
 	it("suppresses terminal completion when the host is disposed or its delivery route is no longer authoritative", async () => {
 		const disposedPending = Promise.withResolvers<{ replyText: string }>();

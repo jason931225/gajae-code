@@ -4,7 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@gajae-code/ai";
 import { logger } from "@gajae-code/utils";
-import { NotificationSettingsOverrideError, resetSettingsForTest, Settings } from "../src/config/settings";
+import {
+	NotificationSettingsOverrideError,
+	resetSettingsForTest,
+	type SettingPath,
+	Settings,
+} from "../src/config/settings";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "../src/extensibility/extensions";
 import { createAgentSession } from "../src/sdk";
 import { brokerOwnerForTest } from "../src/sdk/broker/ensure";
@@ -180,10 +185,20 @@ describe("notifications config", () => {
 	});
 
 	test("full Settings and the lightweight daemon resolve the same global notification snapshot", () => {
+		const activationIdentity = telegramActivationIdentity("telegram-token", "telegram-chat");
 		const globalSettings = {
 			"notifications.enabled": true,
 			"notifications.telegram.botToken": "telegram-token",
 			"notifications.telegram.chatId": "telegram-chat",
+			"notifications.telegram.activation": {
+				[activationIdentity]: {
+					identity: activationIdentity,
+					state: "inactive" as const,
+					reason: "saved_inactive" as const,
+					updatedAt: "2026-01-01T00:00:00.000Z",
+				},
+				malformed: { identity: "different", state: "inactive" },
+			},
 			"notifications.telegram.btw.enabled": true,
 			"notifications.telegram.rich.enabled": false,
 			"notifications.telegram.richDraft.enabled": true,
@@ -211,6 +226,15 @@ describe("notifications config", () => {
 					telegram: {
 						botToken: "telegram-token",
 						chatId: "telegram-chat",
+						activation: {
+							[activationIdentity]: {
+								identity: activationIdentity,
+								state: "inactive",
+								reason: "saved_inactive",
+								updatedAt: "2026-01-01T00:00:00.000Z",
+							},
+							malformed: { identity: "different", state: "inactive" },
+						},
 						btw: { enabled: true },
 						rich: { enabled: false },
 						richDraft: { enabled: true },
@@ -239,6 +263,73 @@ describe("notifications config", () => {
 
 		expect(settings.getNotificationSettingsSnapshot()).toEqual(lightweight.getNotificationSettingsSnapshot());
 		expect(getNotificationConfig(settings)).toEqual(getNotificationConfig(lightweight));
+		const emptySettings = Settings.isolated({
+			"notifications.telegram.botToken": "",
+			"notifications.telegram.chatId": "",
+			"notifications.telegram.topics.nameTemplate": "",
+		});
+		const emptyLightweight = createLightweightDaemonSettings({
+			agentDir: "/tmp/gjc-notification-empty-parity",
+			rawConfig: {
+				notifications: {
+					telegram: {
+						botToken: "",
+						chatId: "",
+						topics: { nameTemplate: "" },
+					},
+				},
+			},
+		});
+		expect(emptySettings.getNotificationSettingsSnapshot()).toEqual(
+			emptyLightweight.getNotificationSettingsSnapshot(),
+		);
+	});
+	test("full Settings and lightweight daemon reject the same malformed notification leaves", () => {
+		const malformedLeaves: Array<[SettingPath, unknown]> = [
+			["notifications.enabled", "invalid"],
+			["notifications.telegram.botToken", 42],
+			["notifications.telegram.chatId", 42],
+			["notifications.telegram.activation", []],
+			["notifications.telegram.btw.enabled", "invalid"],
+			["notifications.telegram.rich.enabled", "invalid"],
+			["notifications.telegram.richDraft.enabled", "invalid"],
+			["notifications.telegram.topics.nameTemplate", 42],
+			["notifications.discord.botToken", 42],
+			["notifications.discord.applicationId", 42],
+			["notifications.discord.guildId", 42],
+			["notifications.discord.parentChannelId", 42],
+			["notifications.slack.botToken", 42],
+			["notifications.slack.appToken", 42],
+			["notifications.slack.workspaceId", 42],
+			["notifications.slack.channelId", 42],
+			["notifications.slack.authorizedUserId", 42],
+			["notifications.redact", "invalid"],
+			["notifications.verbosity", "invalid"],
+			["notifications.sessionScope", "invalid"],
+			["notifications.daemon.idleTimeoutMs", 0],
+		];
+
+		for (const [pathName, value] of malformedLeaves) {
+			const rawConfig: Record<string, unknown> = {};
+			const segments = pathName.split(".");
+			let cursor = rawConfig;
+			for (const segment of segments.slice(0, -1)) {
+				const child: Record<string, unknown> = {};
+				cursor[segment] = child;
+				cursor = child;
+			}
+			cursor[segments.at(-1)!] = value;
+
+			expect(() => Settings.isolated({ [pathName]: value }).getNotificationSettingsSnapshot()).toThrow(
+				"gjc_notify_daemon_invalid_configuration",
+			);
+			expect(() =>
+				createLightweightDaemonSettings({
+					agentDir: "/tmp/gjc-notification-malformed-parity",
+					rawConfig,
+				}).getNotificationSettingsSnapshot(),
+			).toThrow("gjc_notify_daemon_invalid_configuration");
+		}
 	});
 	test("full Settings loaded from config.yml fails closed for malformed notification settings", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-btw-settings-"));
@@ -247,6 +338,7 @@ describe("notifications config", () => {
 		for (const [index, [config, rawConfig]] of (
 			[
 				["true\n", true],
+				["null\n", null],
 				["notifications: true\n", { notifications: true }],
 				["notifications:\n  telegram: []\n", { notifications: { telegram: [] } }],
 				["notifications:\n  telegram:\n    btw: true\n", { notifications: { telegram: { btw: true } } }],
@@ -254,6 +346,15 @@ describe("notifications config", () => {
 					'notifications:\n  telegram:\n    btw:\n      enabled: "false"\n',
 					{ notifications: { telegram: { btw: { enabled: "false" } } } },
 				],
+				[
+					'notifications:\n  telegram:\n    rich:\n      enabled: "false"\n',
+					{ notifications: { telegram: { rich: { enabled: "false" } } } },
+				],
+				[
+					"notifications:\n  telegram:\n    topics:\n      nameTemplate: 42\n",
+					{ notifications: { telegram: { topics: { nameTemplate: 42 } } } },
+				],
+				["notifications:\n  daemon:\n    idleTimeoutMs: 0\n", { notifications: { daemon: { idleTimeoutMs: 0 } } }],
 			] as const
 		).entries()) {
 			const agentDir = path.join(root, `agent-${index}`);

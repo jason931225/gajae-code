@@ -1387,6 +1387,7 @@ interface PendingBtwTurn {
 	logicalSessionId: string;
 	endpointDigest: string;
 	generation: number;
+	question: string;
 	messageId: number;
 	threadId: string;
 	updateId: number;
@@ -1396,6 +1397,8 @@ interface PendingBtwDelivery {
 	pending: PendingBtwTurn;
 	/** The owning session changed while this terminal Bot API call was in flight. */
 	invalidated: boolean;
+	/** Whether a definitive authority loss should emit the session-unavailable reply. */
+	terminalizeOnInvalidation: boolean;
 	finished: Promise<void>;
 	finish: () => void;
 }
@@ -2163,12 +2166,18 @@ export class TelegramNotificationDaemon {
 					if (endpoint.stale || (endpoint.pid !== undefined && !pidAlive(endpoint.pid))) {
 						const connected = this.sessions.get(sessionId);
 						if (connected) this.dropSession(connected, "endpoint_owner_dead");
+						else this.#terminalizeBtwTurnsForTransportSession(sessionId);
 						await this.observeOrphanedTopic(sessionId);
 						continue;
 					}
 					if (this.topics.clearOrphaned(sessionId)) await this.persistTopics();
-					if (this.sessions.has(sessionId)) continue;
 					const endpointKey = endpointGenerationKey(endpoint.url, endpoint.token);
+					const connected = this.sessions.get(sessionId);
+					if (connected) {
+						if (connected.endpointKey !== endpointKey)
+							this.connectSession(sessionId, endpoint.url, endpoint.token);
+						continue;
+					}
 					if (this.closedEndpointKeys.get(sessionId) === endpointKey) continue;
 					this.closedEndpointKeys.delete(sessionId);
 					this.connectSession(sessionId, endpoint.url, endpoint.token);
@@ -2177,8 +2186,10 @@ export class TelegramNotificationDaemon {
 		}
 		if (allRootsReadable) {
 			for (const sessionId of this.topics.sessionIds()) {
-				if (!this.sessions.has(sessionId) && !endpointSessionIds.has(sessionId))
+				if (!this.sessions.has(sessionId) && !endpointSessionIds.has(sessionId)) {
+					this.#terminalizeBtwTurnsForTransportSession(sessionId);
 					await this.observeOrphanedTopic(sessionId);
+				}
 			}
 		}
 	}
@@ -2187,10 +2198,16 @@ export class TelegramNotificationDaemon {
 		const WS = this.opts.WebSocketImpl ?? WebSocket;
 		const ws = new WS(`${url}/?token=${encodeURIComponent(token)}`);
 		const endpointKey = endpointGenerationKey(url, token);
+		const endpointDigest = crypto.createHash("sha256").update(endpointKey, "utf8").digest("hex");
 		this.closedEndpointKeys.delete(sessionId);
 		const existing = this.sessions.get(sessionId);
 		if (existing) {
-			this.dropSession(existing, "authority_replaced");
+			this.dropSession(
+				existing,
+				existing.endpointDigest === endpointDigest ? "same_authority_replaced" : "authority_replaced",
+			);
+		} else {
+			this.#terminalizeBtwTurnsForEndpointReplacement(sessionId, endpointDigest);
 		}
 		this.#clearModelChoiceAliases(sessionId);
 
@@ -2200,7 +2217,7 @@ export class TelegramNotificationDaemon {
 
 			token,
 			endpointKey,
-			endpointDigest: crypto.createHash("sha256").update(endpointKey, "utf8").digest("hex"),
+			endpointDigest,
 			hostGeneration: 0,
 			ws,
 			pending: new Map(),
@@ -2310,7 +2327,11 @@ export class TelegramNotificationDaemon {
 			clearIntervalImpl(session.pingTimer);
 			session.pingTimer = undefined;
 		}
-		this.#terminalizeBtwTurnsForSession(session);
+		if (reason === "socket_closed" || reason === "same_authority_replaced") {
+			this.#invalidateBtwDeliveriesForSession(session);
+		} else {
+			this.#terminalizeBtwTurnsForSession(session);
+		}
 		const isCurrentSession = this.sessions.get(session.sessionId) === session;
 		if (isCurrentSession || reason === "session_closed") {
 			this.deleteMessageRoutes(session.sessionId);
@@ -2352,6 +2373,80 @@ export class TelegramNotificationDaemon {
 			this.#btwTerminalTombstones.delete(this.#btwTerminalTombstones.keys().next().value!);
 		return true;
 	}
+	#invalidateBtwDeliveriesForSession(session: SessionSocket): void {
+		for (const delivery of this.#btwTerminalDeliveries.values()) {
+			const pending = delivery.pending;
+			if (
+				pending.transportSessionId === session.sessionId &&
+				pending.logicalSessionId === this.#logicalSessionId(session) &&
+				pending.endpointDigest === session.endpointDigest &&
+				pending.generation === session.hostGeneration
+			)
+				delivery.invalidated = true;
+		}
+	}
+	#terminalizeBtwTurnsForEndpointReplacement(sessionId: string, endpointDigest: string): void {
+		for (const [requestId, pending] of this.#pendingBtwTurns) {
+			if (pending.transportSessionId !== sessionId || pending.endpointDigest === endpointDigest) continue;
+			void this.#terminalizeBtwTurn(requestId, pending).catch(() => undefined);
+		}
+	}
+	#terminalizeBtwTurnsForTransportSession(sessionId: string): void {
+		for (const [requestId, pending] of this.#pendingBtwTurns) {
+			if (pending.transportSessionId !== sessionId) continue;
+			void this.#terminalizeBtwTurn(requestId, pending).catch(() => undefined);
+		}
+	}
+	#terminalizeBtwTurnsForGenerationChange(session: SessionSocket): void {
+		for (const [requestId, pending] of this.#pendingBtwTurns) {
+			if (
+				pending.transportSessionId !== session.sessionId ||
+				pending.endpointDigest !== session.endpointDigest ||
+				pending.logicalSessionId !== this.#logicalSessionId(session) ||
+				pending.generation === session.hostGeneration
+			)
+				continue;
+			void this.#terminalizeBtwTurn(requestId, pending).catch(() => undefined);
+		}
+	}
+	#resumeBtwTurnsForSession(session: SessionSocket): void {
+		if (!session.ephemeralCapable || session.hostGeneration < 1 || session.ws.readyState !== WebSocket.OPEN) return;
+		const logicalSessionId = this.#logicalSessionId(session);
+		const now = this.opts.now?.() ?? Date.now();
+		for (const [requestId, pending] of this.#pendingBtwTurns) {
+			if (pending.expiresAt <= now) {
+				this.#pendingBtwTurns.delete(requestId);
+				continue;
+			}
+			if (
+				pending.transportSessionId !== session.sessionId ||
+				pending.logicalSessionId !== logicalSessionId ||
+				pending.endpointDigest !== session.endpointDigest ||
+				pending.generation !== session.hostGeneration
+			)
+				continue;
+			this.#sendPendingBtwTurn(session, requestId, pending);
+		}
+	}
+	#sendPendingBtwTurn(session: SessionSocket, requestId: string, pending: PendingBtwTurn): boolean {
+		try {
+			session.ws.send(
+				JSON.stringify({
+					type: "ephemeral_turn",
+					sessionId: pending.logicalSessionId,
+					question: pending.question,
+					token: session.token,
+					requestId,
+					updateId: pending.updateId,
+					threadId: pending.threadId,
+					messageId: pending.messageId,
+				}),
+			);
+			return true;
+		} catch {
+			return false;
+		}
+	}
 	#terminalizeBtwTurnsForSession(session: SessionSocket): void {
 		for (const [requestId, pending] of this.#pendingBtwTurns) {
 			if (
@@ -2368,6 +2463,7 @@ export class TelegramNotificationDaemon {
 		const delivery = this.#btwTerminalDeliveries.get(requestId);
 		if (delivery?.pending === pending) {
 			delivery.invalidated = true;
+			delivery.terminalizeOnInvalidation = true;
 			if (allowWhileStopping) await delivery.finished;
 			return;
 		}
@@ -3433,6 +3529,7 @@ export class TelegramNotificationDaemon {
 				Number.isSafeInteger(msg.lastSeq) &&
 				msg.lastSeq >= 0 &&
 				Array.isArray(msg.events);
+			if (replayValid) session.hostGeneration = msg.generation;
 			const replayed: Record<string, unknown>[] = replayValid
 				? (msg.events as unknown[]).flatMap((event: unknown): Record<string, unknown>[] => {
 						if (!event || typeof event !== "object" || Array.isArray(event)) return [];
@@ -3474,9 +3571,12 @@ export class TelegramNotificationDaemon {
 				}
 				await this.handleSessionMessage(session, frame);
 			}
-			if (replayValid) session.hostGeneration = msg.generation;
-			if (replayValid && this.topics.markReplayCursor(session.sessionId, msg.generation, msg.lastSeq))
-				await this.persistTopics();
+			if (replayValid) {
+				this.#terminalizeBtwTurnsForGenerationChange(session);
+				this.#resumeBtwTurnsForSession(session);
+				if (this.topics.markReplayCursor(session.sessionId, msg.generation, msg.lastSeq))
+					await this.persistTopics();
+			}
 			return;
 		}
 		if (msg?.type === "event_replay_result") return;
@@ -3532,6 +3632,7 @@ export class TelegramNotificationDaemon {
 			const terminalDelivery: PendingBtwDelivery = {
 				pending,
 				invalidated: false,
+				terminalizeOnInvalidation: false,
 				finished: finished.promise,
 				finish: finished.resolve,
 			};
@@ -3641,7 +3742,8 @@ export class TelegramNotificationDaemon {
 				try {
 					// Unknown transport outcomes stay single-attempt to avoid duplicate Telegram replies.
 					if (terminalDelivery.invalidated && deliveryOutcome === "not_delivered") {
-						await this.#terminalizeBtwTurn(requestId, pending, this.#stoppingBtw);
+						if (terminalDelivery.terminalizeOnInvalidation)
+							await this.#terminalizeBtwTurn(requestId, pending, this.#stoppingBtw);
 					} else {
 						this.#takeBtwTurn(requestId, pending);
 					}
@@ -4240,30 +4342,19 @@ export class TelegramNotificationDaemon {
 						const logicalSessionId = this.#logicalSessionId(session);
 						const requestId = `btw:${crypto.randomUUID()}`;
 						if (!(await this.reserveSeenUpdateId(inbound.updateId))) return;
-						this.#pendingBtwTurns.set(requestId, {
+						const pending: PendingBtwTurn = {
 							transportSessionId,
 							logicalSessionId,
 							endpointDigest: session.endpointDigest,
 							generation: session.hostGeneration,
+							question: btwQuestion,
 							messageId: inbound.messageId,
 							threadId: inbound.threadId,
 							updateId: inbound.updateId,
 							expiresAt: (this.opts.now?.() ?? Date.now()) + BTW_PENDING_TTL_MS,
-						});
-						try {
-							session.ws.send(
-								JSON.stringify({
-									type: "ephemeral_turn",
-									sessionId: logicalSessionId,
-									question: btwQuestion,
-									token: session.token,
-									requestId,
-									updateId: inbound.updateId,
-									threadId: inbound.threadId,
-									messageId: inbound.messageId,
-								}),
-							);
-						} catch {
+						};
+						this.#pendingBtwTurns.set(requestId, pending);
+						if (!this.#sendPendingBtwTurn(session, requestId, pending)) {
 							this.#pendingBtwTurns.delete(requestId);
 							await this.#sendBtwMessage({
 								threadId: inbound.threadId,

@@ -2613,8 +2613,13 @@ export class EphemeralTurnHost {
 			expiresAt: completedAt + EPHEMERAL_TURN_TTL_MS,
 		};
 		this.#finish(key, terminal);
-		for (const connectionId of active.subscribers)
-			this.#send(connectionId, terminal.tuple, terminal.status, terminal.text);
+		for (const connectionId of active.subscribers) {
+			try {
+				this.#send(connectionId, terminal.tuple, terminal.status, terminal.text);
+			} catch {
+				// Directed SDK delivery has already logged the disconnected route.
+			}
+		}
 	}
 
 	#finish(key: string, terminal: EphemeralTurnEvent): void {

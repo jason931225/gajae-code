@@ -8268,7 +8268,7 @@ describe("telegram daemon /btw reservation and capability boundaries", () => {
 			initialSocket.sent.map(frame => JSON.parse(frame)).some(frame => frame.type === "ephemeral_turn_cancel"),
 		).toBe(false);
 		expect(daemon.sessions.has("S")).toBe(false);
-		expect(dispatches()).toBe(before + 1);
+		expect(dispatches()).toBe(before);
 
 		daemon.connectSession("S", "ws://changed", "changed-token");
 		const changed = daemon.sessions.get("S")!;
@@ -8326,9 +8326,64 @@ describe("telegram daemon /btw reservation and capability boundaries", () => {
 		await daemon.handleSessionMessage(exact, terminal);
 		expect(dispatches()).toBe(before + 1);
 	});
+	test("delivers a /btw result once after a transient socket close and same-authority replacement", async () => {
+		const { bot, daemon, threadId } = await daemonWithTopic();
+		await daemon.handleTelegramUpdate({
+			update_id: 989,
+			message: { chat: { id: 42 }, message_thread_id: threadId, text: "/btw reconnect", message_id: 1989 },
+		});
+		const initial = daemon.sessions.get("S")!;
+		const request = JSON.parse((initial.ws as unknown as FakeWs).sent.at(-1)!) as {
+			requestId: string;
+			sessionId: string;
+			updateId: number;
+			messageId: number;
+			threadId: string;
+		};
+		(initial.ws as unknown as FakeWs).dispatchEvent(new Event("close"));
+		expect(
+			bot.calls.filter(
+				call =>
+					call.method === "sendMessage" &&
+					call.body.text ===
+						"This /btw question stopped because the GJC session closed or changed. Reopen it and try again.",
+			),
+		).toHaveLength(0);
+
+		daemon.connectSession("S", "ws://s", "ts");
+		const replacement = daemon.sessions.get("S")!;
+		await enableEphemeralTurns(daemon);
+		const replayedRequest = (replacement.ws as unknown as FakeWs).sent
+			.map(frame => JSON.parse(frame) as Record<string, unknown>)
+			.find(frame => frame.type === "ephemeral_turn");
+		expect(replayedRequest).toMatchObject({
+			...request,
+			type: "ephemeral_turn",
+			question: "reconnect",
+		});
+		await daemon.handleSessionMessage(replacement, {
+			...request,
+			type: "ephemeral_turn_result",
+			status: "ok",
+			text: "reconnected answer",
+		});
+		await daemon.handleSessionMessage(replacement, {
+			...request,
+			type: "ephemeral_turn_result",
+			status: "ok",
+			text: "reconnected answer",
+		});
+
+		expect(
+			bot.calls.filter(
+				call =>
+					(call.method === "sendMessage" && call.body.text === "reconnected answer") ||
+					(call.method === "sendRichMessage" && call.body.rich_message.markdown === "reconnected answer"),
+			),
+		).toHaveLength(1);
+	});
 	test.each([
 		"session_closed",
-		"socket_closed",
 		"liveness_timeout",
 		"authority_replaced",
 	] as const)("terminalizes a pending /btw exactly once when %s loses its transport session", async loss => {
@@ -8347,8 +8402,6 @@ describe("telegram daemon /btw reservation and capability boundaries", () => {
 		};
 		if (loss === "session_closed") {
 			await daemon.handleSessionMessage(session, { type: "session_closed", sessionId: "S" });
-		} else if (loss === "socket_closed") {
-			(session.ws as unknown as FakeWs).dispatchEvent(new Event("close"));
 		} else if (loss === "liveness_timeout") {
 			(daemon as unknown as { dropSession(session: unknown, reason: string): void }).dropSession(
 				session,
@@ -8469,6 +8522,7 @@ describe("telegram daemon /btw reservation and capability boundaries", () => {
 			}),
 		]);
 		(session.ws as unknown as FakeWs).dispatchEvent(new Event("close"));
+		daemon.connectSession("S", "ws://changed", "changed-token");
 		answerResponse.resolve({ ok: false, description: "delivery unavailable" });
 		await handling;
 

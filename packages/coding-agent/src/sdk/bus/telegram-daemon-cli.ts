@@ -8,8 +8,7 @@ import {
 	getNotificationConfig,
 	isTelegramConfigured,
 	type NotificationSettingsReader,
-	type NotificationSettingsSnapshot,
-	readTelegramActivationMarkers,
+	parseNotificationSettingsSnapshot,
 } from "./config";
 import { daemonPaths, HEARTBEAT_TTL_MS } from "./daemon-paths";
 import {
@@ -54,44 +53,8 @@ function argValue(argv: string[], name: string): string | undefined {
 	const i = argv.indexOf(name);
 	return i >= 0 ? argv[i + 1] : undefined;
 }
-
-function asObject(value: unknown): Record<string, unknown> {
-	if (value === undefined) return {};
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw configurationError();
-	return value as Record<string, unknown>;
-}
-
-function asString(value: unknown): string | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "string") return value;
-	throw configurationError();
-}
-
 const DAEMON_COMPATIBILITY_DIAGNOSTIC_LIMIT = 1;
 let daemonCompatibilityDiagnosticCount = 0;
-
-function configurationError(): Error {
-	return new Error("gjc_notify_daemon_invalid_configuration");
-}
-
-function asBoolean(value: unknown, fallback: boolean): boolean {
-	if (value === undefined) return fallback;
-	if (typeof value === "boolean") return value;
-	throw configurationError();
-}
-
-function asChoice<T extends string>(value: unknown, fallback: T, choices: readonly T[]): T {
-	if (value === undefined) return fallback;
-	if (typeof value === "string" && choices.includes(value as T)) return value as T;
-	throw configurationError();
-}
-
-function asIdleTimeoutMs(value: unknown): number {
-	if (value === undefined) return 60_000;
-	if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
-	throw configurationError();
-}
-
 function recordDaemonCompatibilityDiagnostic(message: string): void {
 	if (daemonCompatibilityDiagnosticCount >= DAEMON_COMPATIBILITY_DIAGNOSTIC_LIMIT) return;
 	daemonCompatibilityDiagnosticCount++;
@@ -102,56 +65,8 @@ export function createLightweightDaemonSettings(input: {
 	agentDir: string;
 	rawConfig?: unknown;
 }): LightweightDaemonSettings {
-	const rawConfig = asObject(input.rawConfig);
-	const getNotificationSettingsSnapshot = (): NotificationSettingsSnapshot => {
-		const notifications = asObject(rawConfig.notifications);
-		const telegram = asObject(notifications.telegram);
-		const btw = asObject(telegram.btw);
-		const rich = asObject(telegram.rich);
-		const richDraft = asObject(telegram.richDraft);
-		const topics = asObject(telegram.topics);
-		const activation = readTelegramActivationMarkers(asObject(telegram.activation));
-		const discord = asObject(notifications.discord);
-		const slack = asObject(notifications.slack);
-		const daemon = asObject(notifications.daemon);
-		return {
-			enabled: asBoolean(notifications.enabled, false),
-			telegram: {
-				botToken: asString(telegram.botToken),
-				chatId: asString(telegram.chatId),
-				...(Object.keys(activation).length === 0 ? {} : { activation }),
-				btw: {
-					enabled: asBoolean(btw.enabled, true),
-				},
-				rich: {
-					enabled: asBoolean(rich.enabled, true),
-				},
-				richDraft: {
-					enabled: asBoolean(richDraft.enabled, false),
-				},
-				topics: {
-					nameTemplate: asString(topics.nameTemplate),
-				},
-			},
-			discord: {
-				botToken: asString(discord.botToken),
-				applicationId: asString(discord.applicationId),
-				guildId: asString(discord.guildId),
-				parentChannelId: asString(discord.parentChannelId),
-			},
-			slack: {
-				botToken: asString(slack.botToken),
-				appToken: asString(slack.appToken),
-				workspaceId: asString(slack.workspaceId),
-				channelId: asString(slack.channelId),
-				authorizedUserId: asString(slack.authorizedUserId),
-			},
-			redact: asBoolean(notifications.redact, false),
-			verbosity: asChoice<"lean" | "verbose">(notifications.verbosity, "lean", ["lean", "verbose"]),
-			sessionScope: asChoice<"all" | "primary">(notifications.sessionScope, "all", ["all", "primary"]),
-			idleTimeoutMs: asIdleTimeoutMs(daemon.idleTimeoutMs),
-		};
-	};
+	const rawConfig = input.rawConfig === undefined ? {} : input.rawConfig;
+	const getNotificationSettingsSnapshot = () => parseNotificationSettingsSnapshot(rawConfig);
 	getNotificationSettingsSnapshot();
 
 	return {

@@ -28,7 +28,11 @@ import { type Settings as SettingsCapabilityItem, settingsCapability } from "../
 import type { ModelRole } from "../config/model-registry";
 import { loadCapability } from "../discovery";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
-import type { NotificationSettingsReader, NotificationSettingsSnapshot } from "../sdk/bus/config";
+import {
+	type NotificationSettingsReader,
+	type NotificationSettingsSnapshot,
+	parseNotificationSettingsSnapshot,
+} from "../sdk/bus/config";
 import { AgentStorage } from "../session/agent-storage";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import {
@@ -215,28 +219,6 @@ function normalizeSessionDirectoryMigration(raw: RawSettings): void {
 function rawSettingsRecord(value: unknown): RawSettings | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 	return value as RawSettings;
-}
-function notificationConfigurationError(): Error {
-	return new Error("gjc_notify_daemon_invalid_configuration");
-}
-
-function notificationSettingsRecord(value: unknown): RawSettings {
-	if (value === undefined) return {};
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw notificationConfigurationError();
-	return value as RawSettings;
-}
-
-function resolveBtwEnabled(value: unknown, malformedRoot = false): boolean {
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw notificationConfigurationError();
-	if (malformedRoot) throw notificationConfigurationError();
-
-	const notifications = notificationSettingsRecord((value as RawSettings).notifications);
-	const telegram = notificationSettingsRecord(notifications.telegram);
-	const btw = notificationSettingsRecord(telegram.btw);
-	const enabled = btw.enabled;
-	if (enabled === undefined) return getDefault("notifications.telegram.btw.enabled");
-	if (typeof enabled !== "boolean") throw notificationConfigurationError();
-	return enabled;
 }
 
 function shallowModelSelectorRecord(value: unknown): Record<string, ModelSelectorValue> {
@@ -504,109 +486,7 @@ export class Settings implements NotificationSettingsReader {
 	 * are deliberately excluded from this trust boundary.
 	 */
 	getNotificationSettingsSnapshot(): NotificationSettingsSnapshot {
-		const enabled = this.#getGlobalResolved("notifications.enabled");
-		const botToken = this.#getGlobalResolved("notifications.telegram.botToken");
-		const chatId = this.#getGlobalResolved("notifications.telegram.chatId");
-		const activation = this.#getGlobalResolved("notifications.telegram.activation");
-		const activationSnapshot =
-			activation && Object.keys(activation).length > 0 ? structuredClone(activation) : undefined;
-		const richEnabled = this.#getGlobalResolved("notifications.telegram.rich.enabled");
-		const btwEnabled = resolveBtwEnabled(this.#global, this.#hasMalformedConfigRoot);
-		const richDraftEnabled = this.#getGlobalResolved("notifications.telegram.richDraft.enabled");
-		const nameTemplate = this.#getGlobalResolved("notifications.telegram.topics.nameTemplate");
-		const discordBotToken = this.#getGlobalResolved("notifications.discord.botToken");
-		const discordApplicationId = this.#getGlobalResolved("notifications.discord.applicationId");
-		const discordGuildId = this.#getGlobalResolved("notifications.discord.guildId");
-		const discordParentChannelId = this.#getGlobalResolved("notifications.discord.parentChannelId");
-		const slackBotToken = this.#getGlobalResolved("notifications.slack.botToken");
-		const slackAppToken = this.#getGlobalResolved("notifications.slack.appToken");
-		const slackWorkspaceId = this.#getGlobalResolved("notifications.slack.workspaceId");
-		const slackChannelId = this.#getGlobalResolved("notifications.slack.channelId");
-		const slackAuthorizedUserId = this.#getGlobalResolved("notifications.slack.authorizedUserId");
-		const redact = this.#getGlobalResolved("notifications.redact");
-		const verbosity = this.#getGlobalResolved("notifications.verbosity");
-		const sessionScope = this.#getGlobalResolved("notifications.sessionScope");
-		const idleTimeoutMs = this.#getGlobalResolved("notifications.daemon.idleTimeoutMs");
-
-		return {
-			enabled: typeof enabled === "boolean" ? enabled : getDefault("notifications.enabled"),
-			telegram: {
-				botToken:
-					typeof botToken === "string" && botToken.length > 0
-						? botToken
-						: getDefault("notifications.telegram.botToken"),
-				chatId:
-					typeof chatId === "string" && chatId.length > 0 ? chatId : getDefault("notifications.telegram.chatId"),
-				...(activationSnapshot === undefined ? {} : { activation: activationSnapshot }),
-				btw: {
-					enabled: btwEnabled,
-				},
-				rich: {
-					enabled:
-						typeof richEnabled === "boolean" ? richEnabled : getDefault("notifications.telegram.rich.enabled"),
-				},
-				richDraft: {
-					enabled:
-						typeof richDraftEnabled === "boolean"
-							? richDraftEnabled
-							: getDefault("notifications.telegram.richDraft.enabled"),
-				},
-				topics: {
-					nameTemplate:
-						typeof nameTemplate === "string" && nameTemplate.length > 0
-							? nameTemplate
-							: getDefault("notifications.telegram.topics.nameTemplate"),
-				},
-			},
-			discord: {
-				botToken:
-					typeof discordBotToken === "string" && discordBotToken.length > 0
-						? discordBotToken
-						: getDefault("notifications.discord.botToken"),
-				applicationId:
-					typeof discordApplicationId === "string" && discordApplicationId.length > 0
-						? discordApplicationId
-						: getDefault("notifications.discord.applicationId"),
-				guildId:
-					typeof discordGuildId === "string" && discordGuildId.length > 0
-						? discordGuildId
-						: getDefault("notifications.discord.guildId"),
-				parentChannelId:
-					typeof discordParentChannelId === "string" && discordParentChannelId.length > 0
-						? discordParentChannelId
-						: getDefault("notifications.discord.parentChannelId"),
-			},
-			slack: {
-				botToken:
-					typeof slackBotToken === "string" && slackBotToken.length > 0
-						? slackBotToken
-						: getDefault("notifications.slack.botToken"),
-				appToken:
-					typeof slackAppToken === "string" && slackAppToken.length > 0
-						? slackAppToken
-						: getDefault("notifications.slack.appToken"),
-				workspaceId:
-					typeof slackWorkspaceId === "string" && slackWorkspaceId.length > 0
-						? slackWorkspaceId
-						: getDefault("notifications.slack.workspaceId"),
-				channelId:
-					typeof slackChannelId === "string" && slackChannelId.length > 0
-						? slackChannelId
-						: getDefault("notifications.slack.channelId"),
-				authorizedUserId:
-					typeof slackAuthorizedUserId === "string" && slackAuthorizedUserId.length > 0
-						? slackAuthorizedUserId
-						: getDefault("notifications.slack.authorizedUserId"),
-			},
-			redact: typeof redact === "boolean" ? redact : getDefault("notifications.redact"),
-			verbosity: verbosity === "verbose" || getDefault("notifications.verbosity") === "verbose" ? "verbose" : "lean",
-			sessionScope:
-				sessionScope === "primary" || getDefault("notifications.sessionScope") === "primary" ? "primary" : "all",
-			idleTimeoutMs:
-				typeof idleTimeoutMs === "number" && Number.isFinite(idleTimeoutMs) && idleTimeoutMs > 0
-					? idleTimeoutMs
-					: getDefault("notifications.daemon.idleTimeoutMs"),
-		};
+		return parseNotificationSettingsSnapshot(this.#hasMalformedConfigRoot ? null : this.#global);
 	}
 
 	/** Check whether a setting is present in loaded settings/overrides rather than coming from schema defaults. */
@@ -1752,11 +1632,6 @@ export class Settings implements NotificationSettingsReader {
 				hook(value, value);
 			}
 		}
-	}
-
-	#getGlobalResolved<P extends SettingPath>(path: P): SettingValue<P> {
-		const value = getByPath(this.#global, path.split("."));
-		return value === undefined ? getDefault(path) : (value as SettingValue<P>);
 	}
 
 	#stripProjectNotificationSettings(settings: RawSettings): {

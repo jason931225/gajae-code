@@ -607,7 +607,7 @@ export async function acquireDaemonOwnership(input: {
 		const ownershipIsPositivelyStale = async (state: DaemonState | undefined): Promise<boolean> => {
 			if (state?.stoppedAt !== undefined) return true;
 			if (state && validDaemonPid(state.pid)) return !pidAlive(state.pid);
-			return !state && (await lockIsPositivelyStale());
+			return await lockIsPositivelyStale();
 		};
 		const writeState = async (): Promise<void> => {
 			const timestamp = now();
@@ -666,9 +666,6 @@ export async function acquireDaemonOwnership(input: {
 		}
 		const afterLockDecision = attachDecision(afterLock);
 		if (afterLockDecision) return afterLockDecision;
-		if (afterLock && afterLock.stoppedAt === undefined && !validDaemonPid(afterLock.pid)) {
-			return { acquired: false, attached: true };
-		}
 		if (!afterLock && !(await lockIsPositivelyStale())) return { acquired: false, attached: true };
 		if (!(await tryOpenWx(fsImpl, paths.steal))) return { acquired: false, attached: true };
 		try {
@@ -687,9 +684,6 @@ export async function acquireDaemonOwnership(input: {
 				return { acquired: false, attached: true };
 			}
 			if (!rechecked && !(await lockIsPositivelyStale())) {
-				return { acquired: false, attached: true };
-			}
-			if (rechecked && rechecked.stoppedAt === undefined && !validDaemonPid(rechecked.pid)) {
 				return { acquired: false, attached: true };
 			}
 			if (!(await ownershipIsPositivelyStale(rechecked))) {
@@ -3843,7 +3837,6 @@ export class TelegramNotificationDaemon {
 				Array.isArray(msg.events);
 			if (replayValid) {
 				session.hostGeneration = msg.generation;
-				session.ephemeralCapable = true;
 			}
 			const replayed: Record<string, unknown>[] = replayValid
 				? (msg.events as unknown[]).flatMap((event: unknown): Record<string, unknown>[] => {

@@ -125,13 +125,29 @@ export class TopicRegistry {
 			this.epochs.set(sessionId, Math.max(this.epochs.get(sessionId) ?? 0, record.authorityEpoch ?? 0));
 
 			this.topics.set(sessionId, record);
-			if (this.#ambiguousTopicIds.has(record.topicId)) continue;
-			if (this.byTopic.has(record.topicId)) {
-				this.byTopic.delete(record.topicId);
+		}
+		this.rebuildInboundRoutes();
+	}
+
+	private rebuildInboundRoutes(): void {
+		this.byTopic.clear();
+		this.#ambiguousTopicIds.clear();
+		const activeByTopic = new Map<string, string>();
+
+		for (const [sessionId, record] of this.topics) {
+			if (record.authorityState === "delete_pending") {
 				this.#ambiguousTopicIds.add(record.topicId);
 				continue;
 			}
-			this.byTopic.set(record.topicId, sessionId);
+			if (activeByTopic.has(record.topicId)) {
+				this.#ambiguousTopicIds.add(record.topicId);
+				continue;
+			}
+			activeByTopic.set(record.topicId, sessionId);
+		}
+
+		for (const [topicId, sessionId] of activeByTopic) {
+			if (!this.#ambiguousTopicIds.has(topicId)) this.byTopic.set(topicId, sessionId);
 		}
 	}
 

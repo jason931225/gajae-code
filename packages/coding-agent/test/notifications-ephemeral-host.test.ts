@@ -173,6 +173,40 @@ describe("EphemeralTurnHost", () => {
 		await flush();
 		expect(sent.filter(item => item.frame.requestId === "request")).toHaveLength(1);
 	});
+	it("aborts disabled turns while admitting a later re-enabled turn", async () => {
+		const first = Promise.withResolvers<{ replyText: string }>();
+		const second = Promise.withResolvers<{ replyText: string }>();
+		const pending = [first, second];
+		let signal: AbortSignal | undefined;
+		let executions = 0;
+		const host = new EphemeralTurnHost(
+			(connectionId, frame) => sent.push({ connectionId, frame }),
+			async (_promptText, receivedSignal) => {
+				signal = receivedSignal;
+				return await pending[executions++]!.promise;
+			},
+		);
+		configure(host);
+
+		host.handle("owner", request({ requestId: "before-disable" }));
+		host.sessionUnavailable("session");
+		expect(signal?.aborted).toBe(true);
+		expect(sent.at(-1)?.frame).toMatchObject({ requestId: "before-disable", status: "session_unavailable" });
+
+		host.handle("owner", request({ requestId: "after-enable" }));
+		second.resolve({ replyText: "available again" });
+		await flush();
+
+		expect(executions).toBe(2);
+		expect(sent.at(-1)?.frame).toMatchObject({
+			requestId: "after-enable",
+			status: "ok",
+			text: "available again",
+		});
+		first.resolve({ replyText: "late" });
+		await flush();
+		host.dispose();
+	});
 	it("aborts the provider's real signal at the deterministic deadline", () => {
 		vi.useFakeTimers();
 		let signal: AbortSignal | undefined;

@@ -563,6 +563,47 @@ describe("telegram daemon", () => {
 		).resolves.toMatchObject({ acquired: true, ownerId: "successor" });
 		expect((await readDaemonState(s))?.pid).toBe(222);
 	});
+	test("recovers a malformed state only after its unusable lock is positively stale", async () => {
+		const agentDir = tempAgentDir();
+		const s = setPrivateAgentDir(settings(agentDir), agentDir);
+		const paths = daemonPaths(agentDir);
+		fs.mkdirSync(paths.dir, { recursive: true });
+		fs.writeFileSync(paths.lock, "{not json");
+		fs.writeFileSync(paths.state, JSON.stringify({ pid: "invalid", tokenFingerprint: "fp", chatId: "42" }));
+
+		await expect(
+			acquireDaemonOwnership({
+				settings: s,
+				tokenFingerprint: "fp",
+				chatId: "42",
+				pid: 222,
+				now: () => 30_000,
+				pidAlive: () => false,
+				randomId: () => "successor",
+			}),
+		).resolves.toMatchObject({ acquired: true, ownerId: "successor" });
+		expect((await readDaemonState(s))?.pid).toBe(222);
+	});
+	test("does not replace a live initializer when the concurrent state is malformed", async () => {
+		const agentDir = tempAgentDir();
+		const s = setPrivateAgentDir(settings(agentDir), agentDir);
+		const paths = daemonPaths(agentDir);
+		fs.mkdirSync(paths.dir, { recursive: true });
+		fs.writeFileSync(paths.lock, JSON.stringify({ pid: 111, startedAt: 29_999 }));
+		fs.writeFileSync(paths.state, JSON.stringify({ pid: "invalid", tokenFingerprint: "fp", chatId: "42" }));
+
+		await expect(
+			acquireDaemonOwnership({
+				settings: s,
+				tokenFingerprint: "fp",
+				chatId: "42",
+				pid: 222,
+				now: () => 30_000,
+				pidAlive: pid => pid === 111,
+			}),
+		).resolves.toMatchObject({ acquired: false, attached: true });
+		expect(((await readDaemonState(s)) as unknown as { pid?: unknown })?.pid).toBe("invalid");
+	});
 	test("stopped state with a retained lock is taken over even when its PID is live", async () => {
 		const agentDir = tempAgentDir();
 		const s = setPrivateAgentDir(settings(agentDir), agentDir);
@@ -8685,6 +8726,21 @@ describe("telegram daemon /btw reservation and capability boundaries", () => {
 		).toBe(false);
 
 		const unsupported = await daemonWithTopic({ capability: false });
+		const unsupportedSession = unsupported.daemon.sessions.get("S")!;
+		(unsupportedSession.ws as unknown as FakeWs).dispatchEvent(new Event("open"));
+		await unsupported.daemon.handleSessionMessage(unsupportedSession, {
+			type: "hello",
+			capabilities: ["event_replay_v1"],
+		});
+		await unsupported.daemon.handleSessionMessage(unsupportedSession, {
+			type: "event_replay_result",
+			id: unsupportedSession.replayId,
+			generation: 1,
+			lastSeq: 0,
+			events: [],
+		});
+		expect(unsupportedSession.hostGeneration).toBe(1);
+		expect(unsupportedSession.ephemeralCapable).toBe(false);
 		await unsupported.daemon.handleTelegramUpdate({
 			update_id: 805,
 			message: { chat: { id: 42 }, message_thread_id: unsupported.threadId, text: "/btw status?", message_id: 1805 },

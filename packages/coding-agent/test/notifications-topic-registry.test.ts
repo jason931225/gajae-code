@@ -255,4 +255,58 @@ describe("TopicRegistry", () => {
 		expect(reg.sessionForTopic("42")).toBeUndefined();
 		expect(reg.serialize().topics.s1).toMatchObject({ topicId: "42", authorityState: "delete_pending" });
 	});
+	test("retains a delete-pending record and epoch without restoring its inbound route", async () => {
+		const reg = new TopicRegistry();
+		await reg.getOrCreateTopic("s1", async () => "42");
+		reg.beginDelete("s1");
+
+		const reloaded = new TopicRegistry(reg.serialize());
+
+		expect(reloaded.get("s1")).toMatchObject({ topicId: "42", authorityState: "delete_pending" });
+		expect(reloaded.sessionForTopic("42")).toBeUndefined();
+		await expect(reloaded.getOrCreateTopic("s1", async () => "43")).rejects.toThrow(
+			"topic authority is deletion-fenced",
+		);
+	});
+	test("rebuilds inbound routes from merged records on repeated load", async () => {
+		const reg = new TopicRegistry();
+		await reg.getOrCreateTopic("s1", async () => "42");
+		expect(reg.sessionForTopic("42")).toBe("s1");
+
+		reg.load({
+			topics: {
+				s1: {
+					topicId: "42",
+					identitySent: false,
+					createdAt: 1,
+					authorityState: "delete_pending",
+				},
+			},
+		});
+
+		expect(reg.get("s1")).toMatchObject({ authorityState: "delete_pending" });
+		expect(reg.sessionForTopic("42")).toBeUndefined();
+	});
+	test.each([
+		["active then fenced", ["active", "fenced"]],
+		["fenced then active", ["fenced", "active"]],
+	] as const)("fails closed for an active and delete-pending topic collision (%s)", (_name, order) => {
+		const reg = new TopicRegistry();
+		for (const sessionId of order) {
+			reg.load({
+				topics: {
+					[sessionId]: {
+						topicId: "42",
+						identitySent: false,
+						createdAt: 1,
+						...(sessionId === "fenced" ? { authorityState: "delete_pending" as const } : {}),
+					},
+				},
+			});
+		}
+
+		expect(reg.get("active")?.authorityState).toBeUndefined();
+		expect(reg.get("fenced")).toMatchObject({ authorityState: "delete_pending" });
+		expect(reg.sessionForTopic("42")).toBeUndefined();
+	});
 });

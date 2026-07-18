@@ -928,8 +928,10 @@ interface SessionRuntime {
 	inFlightTools: Map<string, { toolName: string; args: unknown }>;
 	/** Cancels the postmortem cleanup that emits `session_closed` on process teardown. */
 	cancelPostmortemCleanup: () => void;
-	/** Aborts active side turns when their owning logical session becomes unavailable. */
+	/** Disposes side-turn resources when their owning logical session becomes unavailable. */
 	abortEphemeralTurns: () => void;
+	/** Aborts active side turns while keeping the host usable after notifications are re-enabled. */
+	cancelEphemeralTurns: () => void;
 }
 
 const SENSITIVE_MODEL_LABEL =
@@ -2820,6 +2822,7 @@ export function createNotificationsExtension(
 		}
 		if (reason === "notifications" && rt.host.started) {
 			rt.notificationsActive = false;
+			rt.cancelEphemeralTurns();
 			try {
 				rt.disposeAnswerSource();
 			} catch {}
@@ -3436,6 +3439,7 @@ export function createNotificationsExtension(
 			gatePresentations,
 			stopping: false,
 			abortEphemeralTurns: () => {},
+			cancelEphemeralTurns: () => {},
 			cancelPostmortemCleanup: () => {},
 
 			redact,
@@ -3490,6 +3494,7 @@ export function createNotificationsExtension(
 			return await options.runEphemeralTurn(prompt.render(btwUserPrompt, { question }), signal);
 		});
 		initializedRuntime.abortEphemeralTurns = () => ephemeralTurns.dispose();
+		initializedRuntime.cancelEphemeralTurns = () => ephemeralTurns.sessionUnavailable(id);
 		try {
 			server.onSdkFrame((err, inbound) => {
 				if (err || !inbound) return;
@@ -3751,7 +3756,10 @@ export function createNotificationsExtension(
 						return;
 					}
 				}
-				if (inbound.kind === "ephemeral_turn" || inbound.kind === "ephemeral_turn_cancel") {
+				if (
+					(inbound.kind === "ephemeral_turn" || inbound.kind === "ephemeral_turn_cancel") &&
+					runtime?.notificationsActive
+				) {
 					ephemeralTurns.handle(authenticatedInbound.connectionId, {
 						type: authenticatedInbound.kind,
 						sessionId: authenticatedInbound.sessionId,

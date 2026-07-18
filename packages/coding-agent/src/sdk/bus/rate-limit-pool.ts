@@ -128,7 +128,7 @@ export class RateLimitPool<T = unknown> {
 	 * while preserving FIFO position; identified items are always appended.
 	 */
 	submit(item: RateLimitItem<T>): RateLimitHandle {
-		const itemId = item.itemId ?? `rate-limit:${this.seqCounter}`;
+		const itemId = item.itemId ?? `rate-limit:${this.seqCounter++}`;
 		const identified = item.itemId === undefined ? { ...item, itemId } : item;
 		const queue = this.lanes.get(identified.lane);
 		if (!queue) throw new Error(`unknown rate-limit lane: ${identified.lane}`);
@@ -142,7 +142,7 @@ export class RateLimitPool<T = unknown> {
 				return this.handle(itemId);
 			}
 		}
-		queue.push({ item: identified, seq: this.seqCounter++ });
+		queue.push({ item: identified, seq: item.itemId === undefined ? this.seqCounter - 1 : this.seqCounter++ });
 		return this.handle(itemId);
 	}
 

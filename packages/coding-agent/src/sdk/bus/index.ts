@@ -3876,13 +3876,6 @@ export function createNotificationsExtension(
 				await cleanupAbandonedStartup();
 				return { status: "failed" };
 			}
-			const endpoint = await server.start();
-			ephemeralTurns.configureAuthority({
-				sessionId: id,
-				endpointDigest: endpointAuthorityDigest(endpoint.url, token),
-				eventGeneration: host.generation,
-			});
-			throwIfLifecycleStopped();
 			if (notificationsEnabledForSession && settingsAvailable && settings) {
 				try {
 					if (!(await ensureConfiguredDaemons(settings, cfg, ctx.cwd, id))) {
@@ -3910,6 +3903,13 @@ export function createNotificationsExtension(
 				...buildIdentity(ctx.cwd, ctx.sessionManager.getSessionName()),
 			};
 			host.emitEvent({ kind: identityHeader.type, payload: identityHeader });
+			const endpoint = await server.start();
+			ephemeralTurns.configureAuthority({
+				sessionId: id,
+				endpointDigest: endpointAuthorityDigest(endpoint.url, token),
+				eventGeneration: host.generation,
+			});
+			throwIfLifecycleStopped();
 			if (runtimes.get(id) !== runtime) {
 				finishStartup({ status: "failed" });
 				await cleanupAbandonedStartup();

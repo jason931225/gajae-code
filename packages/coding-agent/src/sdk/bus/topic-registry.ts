@@ -37,13 +37,21 @@ export interface TopicRecord {
 	replayGeneration?: number;
 	/** Last SDK event sequence durably consumed within replayGeneration. */
 	replaySeq?: number;
+	/** Serialized authority epoch; a late create may commit only in its starting epoch. */
+	authorityEpoch?: number;
+	/** An uncertain delete fences future creation and inbound routing. */
+	authorityState?: "active" | "delete_pending";
+
 }
 
 /** Serialisable shape persisted to disk. */
 export interface TopicRegistryState {
 	/** sessionId -> record. */
 	topics: Record<string, TopicRecord>;
+	/** Durable deletion epochs retained after a definite delete. */
+	fences?: Record<string, number>;
 }
+
 
 function isValidTopicId(value: unknown): value is string {
 	return (
@@ -68,6 +76,9 @@ export class TopicRegistry {
 	readonly #ambiguousTopicIds = new Set<string>();
 	/** In-flight create promises, keyed by session, to dedupe concurrent creates. */
 	private readonly inflight = new Map<string, Promise<TopicRecord>>();
+	/** Monotonic authority epochs, including deletion fences for absent records. */
+	private readonly epochs = new Map<string, number>();
+
 
 	constructor(state: TopicRegistryState = emptyTopicRegistryState()) {
 		this.topics = new Map();
@@ -76,6 +87,10 @@ export class TopicRegistry {
 
 	/** Merge serialized state and normalize authority fields from older releases. */
 	load(state: TopicRegistryState): void {
+		for (const [sessionId, epoch] of Object.entries(state.fences ?? {})) {
+			if (Number.isSafeInteger(epoch) && epoch >= 0) this.epochs.set(sessionId, epoch);
+		}
+
 		for (const [sessionId, raw] of Object.entries(state.topics ?? {})) {
 			if (!raw || !isValidTopicId(raw.topicId)) continue;
 			const hasValidUserAuthority =
@@ -105,7 +120,14 @@ export class TopicRegistry {
 				...(hasValidUserAuthority ? { userNameUpdateId: raw.userNameUpdateId } : {}),
 				...(typeof raw.identityKey === "string" ? { identityKey: raw.identityKey } : {}),
 				...(hasValidReplayCursor ? { replayGeneration: raw.replayGeneration, replaySeq: raw.replaySeq } : {}),
+				...(Number.isSafeInteger(raw.authorityEpoch) && raw.authorityEpoch! >= 0
+					? { authorityEpoch: raw.authorityEpoch }
+					: {}),
+				...(raw.authorityState === "delete_pending" ? { authorityState: "delete_pending" as const } : {}),
+
 			};
+			this.epochs.set(sessionId, Math.max(this.epochs.get(sessionId) ?? 0, record.authorityEpoch ?? 0));
+
 			this.topics.set(sessionId, record);
 			if (this.#ambiguousTopicIds.has(record.topicId)) continue;
 			if (this.byTopic.has(record.topicId)) {
@@ -143,17 +165,16 @@ export class TopicRegistry {
 		name?: string,
 	): Promise<TopicRecord> {
 		const existing = this.topics.get(sessionId);
+		if (existing?.authorityState === "delete_pending") throw new Error("topic authority is deletion-fenced");
 		if (existing) return existing;
-		// Concurrency guard: many session frames (identity/idle/turn/ask) can race
-		// to first-use the same session. Without this, each call passes the
-		// `existing` check before `create()` resolves and creates a DUPLICATE
-		// forum topic. Share a single in-flight create per session id.
 		const pending = this.inflight.get(sessionId);
 		if (pending) return pending;
+		const epoch = this.epochs.get(sessionId) ?? 0;
 		const promise = (async () => {
 			const topicId = await create();
 			if (!isValidTopicId(topicId)) throw new Error("createForumTopic: invalid message_thread_id");
-			const record: TopicRecord = { topicId, name, identitySent: false, createdAt: now() };
+			if ((this.epochs.get(sessionId) ?? 0) !== epoch) throw new Error("topic authority was revoked during creation");
+			const record: TopicRecord = { topicId, name, identitySent: false, createdAt: now(), authorityEpoch: epoch };
 			this.topics.set(sessionId, record);
 			if (this.#ambiguousTopicIds.has(topicId)) return record;
 			if (this.byTopic.has(topicId)) {
@@ -171,6 +192,7 @@ export class TopicRegistry {
 			this.inflight.delete(sessionId);
 		}
 	}
+
 
 	/** Mark the identity header as sent for a session. Idempotent. */
 	markIdentitySent(sessionId: string): void {
@@ -282,17 +304,29 @@ export class TopicRegistry {
 		record.nameReconcilePending = false;
 	}
 
-	/** Remove a session topic record after Telegram deletes the topic. */
-	delete(sessionId: string): boolean {
+	/** Fence new work before the remote delete starts. */
+	beginDelete(sessionId: string): TopicRecord | undefined {
 		const record = this.topics.get(sessionId);
-		if (!record) return false;
-		this.topics.delete(sessionId);
+		if (!record) return undefined;
+		const epoch = Math.max(this.epochs.get(sessionId) ?? 0, record.authorityEpoch ?? 0) + 1;
+		this.epochs.set(sessionId, epoch);
+		record.authorityEpoch = epoch;
+		record.authorityState = "delete_pending";
 		if (this.byTopic.get(record.topicId) === sessionId) this.byTopic.delete(record.topicId);
+		return record;
+	}
+
+	/** Remove only after a definite remote deletion; ambiguity deliberately retains its fence. */
+	settleDelete(sessionId: string, topicId: string): boolean {
+		const record = this.topics.get(sessionId);
+		if (!record || record.topicId !== topicId || record.authorityState !== "delete_pending") return false;
+		this.topics.delete(sessionId);
 		return true;
 	}
 
+
 	/** Serialise for atomic persistence beside the daemon state. */
 	serialize(): TopicRegistryState {
-		return { topics: Object.fromEntries(this.topics) };
+		return { topics: Object.fromEntries(this.topics), fences: Object.fromEntries(this.epochs) };
 	}
 }

@@ -268,8 +268,17 @@ function splitTelegramPlainText(text: string, max = TELEGRAM_MESSAGE_LIMIT): str
 	return chunks;
 }
 function endpointGenerationKey(url: string, token: string): string {
-	return `${url}\0${token}`;
+	// Discovery supplies the authenticated endpoint; normalize presentation-only
+	// URL differences before deriving authority, but never trust a client frame.
+	const parsed = new URL(url);
+	parsed.hash = "";
+	parsed.search = "";
+	parsed.hostname = parsed.hostname.toLowerCase();
+	if ((parsed.protocol === "http:" && parsed.port === "80") || (parsed.protocol === "https:" && parsed.port === "443"))
+		parsed.port = "";
+	return `${parsed.toString()}\0${token}`;
 }
+
 
 function topicRenameApplied(response: unknown): boolean {
 	return !!response && typeof response === "object" && (response as { ok?: unknown }).ok === true;
@@ -2718,22 +2727,12 @@ export class TelegramNotificationDaemon {
 		"reasoning_summary",
 	]);
 
-	/** Rekey model controls before a valid threaded frame can render or a silent config update can route output. */
-	#updateLogicalSessionForThreadedFrame(session: SessionSocket, msg: Record<string, unknown>): void {
-		if (
-			typeof msg.type !== "string" ||
-			!TelegramNotificationDaemon.THREADED_FRAMES.has(msg.type) ||
-			typeof msg.sessionId !== "string" ||
-			!msg.sessionId.trim() ||
-			msg.sessionId === this.#logicalSessionId(session) ||
-			(msg.type !== "config_update" && !renderThreadedFrame(msg))
-		)
-			return;
-		void this.#terminalizeBtwTurnsForSession(session).catch(() => undefined);
-		this.#clearModelChoiceAliasesForSocket(session);
-		this.#clearModelChoiceAliases(msg.sessionId);
-		session.logicalSessionId = msg.sessionId;
+	/** A frame cannot rebind a discovered transport to an arbitrary session id. */
+	#acceptsThreadedFrame(session: SessionSocket, msg: Record<string, unknown>): boolean {
+		if (typeof msg.type !== "string" || !TelegramNotificationDaemon.THREADED_FRAMES.has(msg.type)) return true;
+		return typeof msg.sessionId !== "string" || msg.sessionId === session.sessionId;
 	}
+
 
 	private topicNameFor(sessionId: string, msg: { title?: unknown; repo?: unknown; branch?: unknown }): string {
 		const repo = typeof msg?.repo === "string" && msg.repo ? msg.repo : undefined;
@@ -2888,6 +2887,7 @@ export class TelegramNotificationDaemon {
 	private async ensureTopic(sessionId: string, name: string): Promise<string | undefined> {
 		if (!(await this.pairedChatIsPrivate())) return undefined;
 		const existing = this.topics.get(sessionId);
+		if (existing?.authorityState === "delete_pending") return undefined;
 		if (existing) return existing.topicId;
 		try {
 			const rec = await this.topics.getOrCreateTopic(
@@ -2934,8 +2934,17 @@ export class TelegramNotificationDaemon {
 
 	/** Best-effort delete of a session topic once its local notification endpoint shuts down. */
 	private async deleteTopic(sessionId: string): Promise<void> {
-		const record = this.topics.get(sessionId);
+		const record = this.topics.beginDelete(sessionId);
 		if (!record) return;
+		// Persist the deletion epoch before the remote effect: a restart or a late
+		// create cannot regain authority while Telegram's outcome is unknown.
+		await this.persistTopics();
+		const removed = this.pool.removeWhere(item => item.sessionId === sessionId);
+		for (const item of removed) {
+			if (item.payload.selectedAck)
+				this.finishSelectedAck(item.payload.selectedAck, { status: "failed", reason: "cancelled" });
+		}
+
 		try {
 			// Drop queued sends for this session before deleting the topic; otherwise
 			// rate-limited frames can flush later into a deleted topic or across resume.
@@ -2951,7 +2960,7 @@ export class TelegramNotificationDaemon {
 				message_thread_id: Number(record.topicId),
 			})) as { ok?: boolean };
 			if (!topicDeleteSettled(res)) return;
-			this.topics.delete(sessionId);
+			this.topics.settleDelete(sessionId, record.topicId);
 			for (const k of [...this.liveMessages.keys()]) {
 				if (k.startsWith(`${sessionId}:`)) this.liveMessages.delete(k);
 			}
@@ -2961,7 +2970,7 @@ export class TelegramNotificationDaemon {
 			this.pendingThreadedFrames.delete(sessionId);
 			await this.persistTopics();
 		} catch {
-			// Best-effort: missing Telegram topic permissions must not stop teardown.
+			// Retain the persisted delete fence on transport ambiguity.
 		}
 	}
 
@@ -3729,7 +3738,7 @@ export class TelegramNotificationDaemon {
 			return;
 		}
 		if (msg?.type === "event_replay_result") return;
-		if (msg && typeof msg === "object") this.#updateLogicalSessionForThreadedFrame(session, msg);
+		if (msg && typeof msg === "object" && !this.#acceptsThreadedFrame(session, msg)) return;
 		if (await this.sessionRouter.dispatch(session, msg as Record<string, unknown>)) return;
 		if (await this.#renderModelChoices(session, msg as Record<string, unknown>)) return;
 
@@ -3854,7 +3863,6 @@ export class TelegramNotificationDaemon {
 				};
 				const html = markdownToTelegramHtml(markdown);
 				const fallback = async (): Promise<typeof deliveryOutcome> => {
-					let accepted = false;
 					for (const [index, text] of splitTelegramHtml(html).entries()) {
 						const outcome = await this.#queueBtwFallbackChunk({
 							requestId,
@@ -3870,14 +3878,12 @@ export class TelegramNotificationDaemon {
 								parse_mode: TELEGRAM_PARSE_MODE,
 							},
 						});
-						if (outcome === "accepted") {
-							accepted = true;
-							continue;
-						}
-						if (accepted) return "accepted";
+						// One terminal reply owns one chunk ledger: only every definite
+						// acceptance succeeds; an ambiguity stops the remaining sequence.
+						if (outcome === "accepted") continue;
 						return outcome === "uncertain" ? "uncertain" : "not_delivered";
 					}
-					return accepted ? "accepted" : "not_delivered";
+					return "accepted";
 				};
 				if (this.opts.rich?.enabled !== false && isBtwRichEligible(markdown)) {
 					const outcome = await deliver("sendRichMessage", {

@@ -85,7 +85,7 @@ describe("SDK operation inventory", () => {
 			],
 			[
 				"agent_session:awaitPendingContextTransformations",
-				"internal context-normalization synchronization, not a user-facing control seam",
+				"internal context-transformation lifecycle barrier, not a user-facing SDK control seam",
 			],
 		]);
 		for (const [sourceId, rationale] of expected) {

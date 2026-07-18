@@ -2601,8 +2601,11 @@ export class EphemeralTurnHost {
 		active.controller.signal.removeEventListener("abort", active.abortListener);
 		this.#active.delete(key);
 		if (this.#disposed) return;
-		const terminalStatus =
-			status === "ok" && Buffer.byteLength(text ?? "", "utf8") > EPHEMERAL_TURN_MAX_RESULT_BYTES ? "failed" : status;
+		const terminalTextIsValid =
+			typeof text === "string" &&
+			text.trim().length > 0 &&
+			Buffer.byteLength(text, "utf8") <= EPHEMERAL_TURN_MAX_RESULT_BYTES;
+		const terminalStatus = status === "ok" && !terminalTextIsValid ? "failed" : status;
 		const completedAt = this.#now();
 		const terminal: EphemeralTurnEvent = {
 			tuple: active.tuple,

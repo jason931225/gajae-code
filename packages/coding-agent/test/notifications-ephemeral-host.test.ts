@@ -286,6 +286,30 @@ describe("EphemeralTurnHost", () => {
 		expect(sent.at(-1)?.frame).toMatchObject({ requestId: "over", status: "failed" });
 		expect(sent.at(-1)?.frame.text).toBeUndefined();
 	});
+	it.each([
+		["empty", ""],
+		["whitespace-only", " \n\t"],
+	])("turns a %s successful reply into a cached failed terminal", async (_label, replyText) => {
+		let executions = 0;
+		const host = new EphemeralTurnHost(
+			(connectionId, frame) => sent.push({ connectionId, frame }),
+			async () => {
+				executions += 1;
+				return { replyText };
+			},
+		);
+		configure(host);
+
+		host.handle("owner", request());
+		await flush();
+		expect(sent.at(-1)).toMatchObject({ connectionId: "owner", frame: { status: "failed" } });
+		expect(sent.at(-1)?.frame.text).toBeUndefined();
+
+		host.handle("replay", request());
+		expect(executions).toBe(1);
+		expect(sent.at(-1)).toMatchObject({ connectionId: "replay", frame: { status: "failed" } });
+		expect(sent.at(-1)?.frame.text).toBeUndefined();
+	});
 
 	it("rejects stale cancellation while allowing the replacement connection to cancel", () => {
 		let signal: AbortSignal | undefined;

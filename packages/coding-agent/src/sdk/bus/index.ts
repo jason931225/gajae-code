@@ -3296,8 +3296,8 @@ export function createNotificationsExtension(
 				}
 				return;
 			}
-			if (connectionId.startsWith("notification:")) {
-				pushSessionFrame(runtime!, frame);
+			if (connectionId.startsWith("notification:") && typeof frame.type === "string") {
+				pushSessionFrame(runtime!, frame as Record<string, unknown> & { type: string });
 				return;
 			}
 			try {
@@ -3752,17 +3752,21 @@ export function createNotificationsExtension(
 					}
 				}
 				if (inbound.kind === "ephemeral_turn" || inbound.kind === "ephemeral_turn_cancel") {
+					const sideTurn = inbound as typeof inbound & {
+						messageId?: number;
+						reason?: string;
+					};
 					// Older native bridges expose authenticated side turns only through onInbound,
 					// which deliberately omits the transport connection id. Broadcast the strictly
 					// correlated terminal frame so a same-authority reconnect can receive it.
-					ephemeralTurns.handle(`notification:${inbound.sessionId}`, {
-						type: inbound.kind,
-						sessionId: inbound.sessionId,
-						requestId: inbound.requestId,
-						updateId: inbound.updateId,
-						messageId: inbound.messageId,
-						threadId: inbound.threadId,
-						...(inbound.kind === "ephemeral_turn" ? { question: inbound.text } : { reason: inbound.reason }),
+					ephemeralTurns.handle(`notification:${sideTurn.sessionId}`, {
+						type: sideTurn.kind,
+						sessionId: sideTurn.sessionId,
+						requestId: sideTurn.requestId,
+						updateId: sideTurn.updateId,
+						messageId: sideTurn.messageId,
+						threadId: sideTurn.threadId,
+						...(sideTurn.kind === "ephemeral_turn" ? { question: sideTurn.text } : { reason: sideTurn.reason }),
 					});
 					return;
 				}

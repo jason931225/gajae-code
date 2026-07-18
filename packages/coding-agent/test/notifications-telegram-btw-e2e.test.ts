@@ -89,12 +89,13 @@ function isolatedSettings(agentDir: string): Settings {
 		},
 	}) as Settings;
 }
-test("real notifications extension hosts /btw through EphemeralTurnHost without main-session injection", async () => {
+test("real notifications extension rebinds /btw without provider replay or main-session injection", async () => {
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-btw-extension-e2e-"));
 	const cwd = path.join(agentDir, "repo");
 	const sessionId = "btw-extension-e2e";
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
 	const providerCalls: Array<{ prompt: string; signal?: AbortSignal }> = [];
+	const providerResponse = Promise.withResolvers<{ replyText: string }>();
 	let mainSessionInjections = 0;
 	const settings = isolatedSettings(agentDir);
 	const ctx = {
@@ -135,7 +136,7 @@ test("real notifications extension hosts /btw through EphemeralTurnHost without 
 				runEphemeralTurn: async (prompt, signal) => {
 					providerCalls.push({ prompt, signal });
 					if (signal?.aborted) throw signal.reason;
-					return { replyText: "| Formula | Value |\n| --- | --- |\n| $x^2$ | 4 |" };
+					return await providerResponse.promise;
 				},
 				ensureTelegramDaemon: async input => {
 					await registerNotificationRoot(input);
@@ -165,6 +166,18 @@ test("real notifications extension hosts /btw through EphemeralTurnHost without 
 			},
 		});
 		await waitFor(() => providerCalls.length === 1, "EphemeralTurnHost provider invocation");
+		daemon.sessions.get(sessionId)!.ws.close();
+		await waitFor(() => !daemon.sessions.has(sessionId), "extension transient transport loss");
+		await daemon.scanRoots();
+		await waitFor(
+			() =>
+				daemon.sessions.get(sessionId)?.ephemeralCapable === true &&
+				(daemon.sessions.get(sessionId)?.hostGeneration ?? 0) >= 1,
+			"extension replacement capability replay",
+		);
+		await sleep(80);
+		expect(providerCalls).toHaveLength(1);
+		providerResponse.resolve({ replyText: "| Formula | Value |\n| --- | --- |\n| $x^2$ | 4 |" });
 		await waitFor(() => bot.count("sendRichMessage") === richBefore + 1, "correlated rich /btw delivery");
 		expect(providerCalls).toHaveLength(1);
 		expect(providerCalls[0]!.prompt).toBe(`<btw>
@@ -328,7 +341,7 @@ test("/btw travels through NotificationServer and a real WebSocket with one stri
 		throw err;
 	}
 }, 30_000);
-test("/btw survives transient WebSocket replacement without cancellation or provider replay", async () => {
+test("/btw reconnect rebinds the existing provider request without cancellation", async () => {
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-btw-reconnect-e2e-"));
 	try {
 		const settings = isolatedSettings(agentDir);
@@ -409,7 +422,8 @@ test("/btw survives transient WebSocket replacement without cancellation or prov
 			);
 			server.pushFrame(JSON.stringify({ type: "hello", protocolVersion: 3, capabilities: ["ephemeral_turn_v1"] }));
 			await waitFor(() => daemon.sessions.get(sessionId)?.hostGeneration === 4, "replacement generation-4 replay");
-			expect(inbound).toHaveLength(1);
+			expect(inbound).toHaveLength(2);
+			expect(inbound[1]!.requestId).toBe(turn.requestId);
 			expect(cancelFrames).toHaveLength(0);
 
 			const terminal = {
@@ -427,7 +441,7 @@ test("/btw survives transient WebSocket replacement without cancellation or prov
 			server.pushFrame(JSON.stringify(terminal));
 			await sleep(80);
 			expect(bot.count("sendMessage")).toBe(beforeTerminal + 1);
-			expect(inbound).toHaveLength(1);
+			expect(inbound).toHaveLength(2);
 			expect(cancelFrames).toHaveLength(0);
 		} finally {
 			daemon.requestStop();
@@ -440,7 +454,7 @@ test("/btw survives transient WebSocket replacement without cancellation or prov
 		throw err;
 	}
 }, 30_000);
-test("/btw crash replacement never cancels, replays, or delivers an old pending result", async () => {
+test("/btw generation replacement terminalizes an old pending request exactly once", async () => {
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-btw-crash-e2e-"));
 	try {
 		const settings = isolatedSettings(agentDir);
@@ -449,6 +463,7 @@ test("/btw crash replacement never cancels, replays, or delivers an old pending 
 		await registerNotificationRoot({ settings, cwd, sessionId });
 		const inbound: Array<Record<string, unknown>> = [];
 		const cancelFrames: Array<Record<string, unknown>> = [];
+		let replayGeneration = 4;
 		const installCallbacks = (server: NotificationServer): void => {
 			server.onSdkFrame((error, frame) => {
 				if (error || !frame) return;
@@ -461,7 +476,7 @@ test("/btw crash replacement never cancels, replays, or delivers an old pending 
 						type: "event_replay_result",
 						id: request.id,
 						ok: true,
-						generation: 4,
+						generation: replayGeneration,
 						lastSeq: 0,
 						events: [],
 					}),
@@ -518,6 +533,7 @@ test("/btw crash replacement never cancels, replays, or delivers an old pending 
 			await waitFor(() => !daemon.sessions.has(sessionId), "crashed transport loss");
 			expect(cancelFrames).toHaveLength(0);
 			expect(inbound).toHaveLength(1);
+			replayGeneration = 5;
 
 			server = new NotificationServer(sessionId, "token", path.join(cwd, ".gjc", "state"), true);
 			installCallbacks(server);
@@ -528,7 +544,7 @@ test("/btw crash replacement never cancels, replays, or delivers an old pending 
 				"post-crash daemon connection",
 			);
 			server.pushFrame(JSON.stringify({ type: "hello", protocolVersion: 3, capabilities: ["ephemeral_turn_v1"] }));
-			await waitFor(() => daemon.sessions.get(sessionId)?.hostGeneration === 4, "post-crash generation-4 replay");
+			await waitFor(() => daemon.sessions.get(sessionId)?.hostGeneration === 5, "post-crash generation-5 replay");
 			expect(inbound).toHaveLength(1);
 			expect(cancelFrames).toHaveLength(0);
 
@@ -545,7 +561,10 @@ test("/btw crash replacement never cancels, replays, or delivers an old pending 
 				}),
 			);
 			await sleep(120);
-			expect(dispatches()).toBe(beforeTerminal);
+			expect(dispatches()).toBe(beforeTerminal + 1);
+			expect(bot.calls.at(-1)!.body).toMatchObject({
+				text: "This /btw question stopped because the GJC session closed or changed. Reopen it and try again.",
+			});
 			expect(inbound).toHaveLength(1);
 			expect(cancelFrames).toHaveLength(0);
 		} finally {

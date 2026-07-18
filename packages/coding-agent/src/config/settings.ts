@@ -357,6 +357,7 @@ export class Settings implements NotificationSettingsReader {
 	/** A newer config schema must never be rewritten by legacy migrations. */
 	#futureSchemaVersion = false;
 	#hasMalformedConfigRoot = false;
+	#hasInvalidNotificationConfiguration = false;
 
 	/** Whether to persist changes */
 	#persist: boolean;
@@ -486,7 +487,9 @@ export class Settings implements NotificationSettingsReader {
 	 * are deliberately excluded from this trust boundary.
 	 */
 	getNotificationSettingsSnapshot(): NotificationSettingsSnapshot {
-		return parseNotificationSettingsSnapshot(this.#hasMalformedConfigRoot ? null : this.#global);
+		return parseNotificationSettingsSnapshot(
+			this.#hasMalformedConfigRoot || this.#hasInvalidNotificationConfiguration ? null : this.#global,
+		);
 	}
 
 	/** Check whether a setting is present in loaded settings/overrides rather than coming from schema defaults. */
@@ -1012,6 +1015,7 @@ export class Settings implements NotificationSettingsReader {
 
 	async #loadYaml(filePath: string): Promise<RawSettings> {
 		this.#hasMalformedConfigRoot = false;
+		this.#hasInvalidNotificationConfiguration = false;
 		try {
 			const content = await Bun.file(filePath).text();
 			const parsed = YAML.parse(content);
@@ -1021,6 +1025,15 @@ export class Settings implements NotificationSettingsReader {
 				return {};
 			}
 			const parsedRaw = parsed as RawSettings;
+			if (filePath === this.#configPath) {
+				try {
+					parseNotificationSettingsSnapshot(parsedRaw);
+				} catch (error) {
+					if (!(error instanceof Error) || error.message !== "gjc_notify_daemon_invalid_configuration")
+						throw error;
+					this.#hasInvalidNotificationConfiguration = true;
+				}
+			}
 			this.#futureSchemaVersion =
 				filePath === this.#configPath &&
 				typeof parsedRaw.configSchemaVersion === "number" &&

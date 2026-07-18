@@ -6497,6 +6497,135 @@ test("graceful stop cancels a pending /btw and suppresses delayed successful del
 		}),
 	]);
 });
+test("graceful stop drains active and idle /btw terminal deliveries concurrently under one deadline", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const s = setPrivateAgentDir(settings(agentDir), agentDir);
+	await acquireDaemonOwnership({
+		settings: s,
+		tokenFingerprint: tokenFingerprint("tok"),
+		chatId: "42",
+		pid: process.pid,
+		randomId: () => "owner",
+	});
+	const pollStarted = Promise.withResolvers<void>();
+	const activeDeliveryStarted = Promise.withResolvers<void>();
+	const idleDeliveryStarted = Promise.withResolvers<void>();
+	const bot = new FakeBotApi();
+	const call = bot.call.bind(bot);
+	let activeAttempts = 0;
+	let idleAttempts = 0;
+	let activeSignal: AbortSignal | undefined;
+	let idleSignal: AbortSignal | undefined;
+	let idleStartedAt = 0;
+	bot.call = async (method, body, options) => {
+		if (method === "getUpdates") {
+			pollStarted.resolve();
+			const pending = Promise.withResolvers<unknown>();
+			options?.signal?.addEventListener(
+				"abort",
+				() => pending.reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+				{ once: true },
+			);
+			return pending.promise;
+		}
+		const text = (body as { text?: unknown }).text;
+		if (method === "sendMessage" && text === "active answer") {
+			bot.calls.push({ method, body, options });
+			activeAttempts += 1;
+			activeSignal = options?.signal;
+			activeDeliveryStarted.resolve();
+			const pending = Promise.withResolvers<unknown>();
+			options?.signal?.addEventListener(
+				"abort",
+				() => pending.reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+				{ once: true },
+			);
+			return pending.promise;
+		}
+		if (
+			method === "sendMessage" &&
+			text === "This /btw question stopped because the GJC session closed or changed. Reopen it and try again."
+		) {
+			bot.calls.push({ method, body, options });
+			idleAttempts += 1;
+			idleSignal = options?.signal;
+			idleStartedAt = Date.now();
+			idleDeliveryStarted.resolve();
+			const pending = Promise.withResolvers<unknown>();
+			options?.signal?.addEventListener(
+				"abort",
+				() => pending.reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+				{ once: true },
+			);
+			return pending.promise;
+		}
+		return call(method, body, options);
+	};
+	class NoScan extends TelegramNotificationDaemon {
+		override async scanRoots(): Promise<void> {}
+	}
+	const daemon = new NoScan({
+		settings: s,
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		rich: { enabled: false },
+		WebSocketImpl: FakeWs as any,
+		createLifecycleControlServer: null,
+	});
+	daemon.connectSession("S", "ws://s", "t");
+	await enableEphemeralTurns(daemon);
+	await daemon.handleSessionMessage(daemon.sessions.get("S")!, {
+		type: "identity_header",
+		sessionId: "S",
+		repo: "repo",
+		branch: "main",
+	});
+	const threadId = bot.createdTopicThreadIds.at(-1)!;
+	await daemon.handleTelegramUpdate({
+		update_id: 902,
+		message: { chat: { id: 42 }, message_thread_id: threadId, text: "/btw active", message_id: 1902 },
+	});
+	await daemon.handleTelegramUpdate({
+		update_id: 903,
+		message: { chat: { id: 42 }, message_thread_id: threadId, text: "/btw idle", message_id: 1903 },
+	});
+	const requests = FakeWs.instances[0]!.sent.map(frame => JSON.parse(frame)).filter(
+		frame => frame.type === "ephemeral_turn",
+	);
+	expect(requests).toHaveLength(2);
+	const activeHandling = daemon.handleSessionMessage(daemon.sessions.get("S")!, {
+		...requests[0],
+		type: "ephemeral_turn_result",
+		status: "ok",
+		text: "active answer",
+	});
+	await activeDeliveryStarted.promise;
+
+	const runPromise = daemon.run();
+	await pollStarted.promise;
+	const stopStartedAt = Date.now();
+	daemon.requestStop("signal");
+	await idleDeliveryStarted.promise;
+	await Promise.all([activeHandling, runPromise]);
+
+	expect(idleStartedAt - stopStartedAt).toBeLessThan(500);
+	expect(activeSignal?.aborted).toBe(true);
+	expect(idleSignal?.aborted).toBe(true);
+	expect(activeAttempts).toBe(1);
+	expect(idleAttempts).toBe(1);
+	const terminalCalls = bot.calls.filter(
+		call =>
+			call.method === "sendMessage" &&
+			(call.body.text === "active answer" ||
+				call.body.text ===
+					"This /btw question stopped because the GJC session closed or changed. Reopen it and try again."),
+	);
+	expect(terminalCalls).toHaveLength(2);
+	expect(terminalCalls.every(call => call.options?.noRetry === true)).toBe(true);
+}, 5_000);
 
 test("run() loop exits when an owner-scoped control request asks it to stop", async () => {
 	const agentDir = tempAgentDir();
@@ -8478,7 +8607,7 @@ describe("telegram daemon /btw reservation and capability boundaries", () => {
 		);
 	});
 
-	test("joins an in-flight rejected result delivery before sending one session-loss terminal reply", async () => {
+	test("joins a rejected result and sends session loss before deleting the topic", async () => {
 		const { bot, daemon, threadId } = await daemonWithTopic();
 		await daemon.handleTelegramUpdate({
 			update_id: 992,
@@ -8521,10 +8650,11 @@ describe("telegram daemon /btw reservation and capability boundaries", () => {
 				);
 			}),
 		]);
-		(session.ws as unknown as FakeWs).dispatchEvent(new Event("close"));
-		daemon.connectSession("S", "ws://changed", "changed-token");
+		const closing = daemon.handleSessionMessage(session, { type: "session_closed", sessionId: "S" });
+		await Bun.sleep(0);
+		expect(bot.calls.some(call => call.method === "deleteForumTopic")).toBe(false);
 		answerResponse.resolve({ ok: false, description: "delivery unavailable" });
-		await handling;
+		await Promise.all([handling, closing]);
 
 		expect(
 			bot.calls.filter(
@@ -8541,5 +8671,14 @@ describe("telegram daemon /btw reservation and capability boundaries", () => {
 						"This /btw question stopped because the GJC session closed or changed. Reopen it and try again.",
 			),
 		).toHaveLength(1);
+		const unavailableIndex = bot.calls.findIndex(
+			call =>
+				call.method === "sendMessage" &&
+				call.body.text ===
+					"This /btw question stopped because the GJC session closed or changed. Reopen it and try again.",
+		);
+		const deleteIndex = bot.calls.findIndex(call => call.method === "deleteForumTopic");
+		expect(unavailableIndex).toBeGreaterThanOrEqual(0);
+		expect(deleteIndex).toBeGreaterThan(unavailableIndex);
 	});
 });

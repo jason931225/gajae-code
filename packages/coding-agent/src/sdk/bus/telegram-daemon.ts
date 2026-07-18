@@ -194,6 +194,7 @@ const MODEL_CALLBACK_PREFIX = "m:";
 const MODEL_CHOICE_TTL_MS = 10 * 60 * 1_000;
 const BTW_PENDING_TTL_MS = 300_000;
 const BTW_MAX_PENDING = 256;
+const BTW_SHUTDOWN_JOIN_MS = 1_000;
 const BTW_USAGE_TEXT = "Usage: /btw <question>";
 type ParsedBtwCommand = { kind: "question"; question: string } | { kind: "ignored" };
 class ThreadedModeCapabilityRefusal extends Error {}
@@ -1399,6 +1400,7 @@ interface PendingBtwDelivery {
 	invalidated: boolean;
 	/** Whether a definitive authority loss should emit the session-unavailable reply. */
 	terminalizeOnInvalidation: boolean;
+	controller: AbortController;
 	finished: Promise<void>;
 	finish: () => void;
 }
@@ -1522,6 +1524,10 @@ export class TelegramNotificationDaemon {
 			this.finishSelectedAck(item, { status: "unknown", reason: "shutdown" });
 		}
 		this.#stoppingBtw = true;
+		for (const delivery of this.#btwTerminalDeliveries.values()) {
+			delivery.invalidated = true;
+			delivery.controller.abort("daemon_shutdown");
+		}
 		this.#deliveryAbort.abort();
 		this.runtime.requestStop();
 		this.running = false;
@@ -2057,6 +2063,7 @@ export class TelegramNotificationDaemon {
 				handle: async session => {
 					this.busy.delete(session.sessionId);
 					this.closedEndpointKeys.set(session.sessionId, session.endpointKey);
+					await this.#terminalizeBtwTurnsForSession(session, true);
 					await this.deleteTopic(session.sessionId);
 					this.dropSession(session, "session_closed");
 				},
@@ -2330,7 +2337,7 @@ export class TelegramNotificationDaemon {
 		if (reason === "socket_closed" || reason === "same_authority_replaced") {
 			this.#invalidateBtwDeliveriesForSession(session);
 		} else {
-			this.#terminalizeBtwTurnsForSession(session);
+			void this.#terminalizeBtwTurnsForSession(session).catch(() => undefined);
 		}
 		const isCurrentSession = this.sessions.get(session.sessionId) === session;
 		if (isCurrentSession || reason === "session_closed") {
@@ -2447,7 +2454,8 @@ export class TelegramNotificationDaemon {
 			return false;
 		}
 	}
-	#terminalizeBtwTurnsForSession(session: SessionSocket): void {
+	async #terminalizeBtwTurnsForSession(session: SessionSocket, waitForInFlight = false): Promise<void> {
+		const terminalizations: Promise<void>[] = [];
 		for (const [requestId, pending] of this.#pendingBtwTurns) {
 			if (
 				pending.transportSessionId !== session.sessionId ||
@@ -2456,15 +2464,24 @@ export class TelegramNotificationDaemon {
 				pending.generation !== session.hostGeneration
 			)
 				continue;
-			void this.#terminalizeBtwTurn(requestId, pending).catch(() => undefined);
+			const terminalization = this.#terminalizeBtwTurn(requestId, pending, false, waitForInFlight);
+			if (waitForInFlight) terminalizations.push(terminalization);
+			else void terminalization.catch(() => undefined);
 		}
+		if (waitForInFlight) await Promise.all(terminalizations);
 	}
-	async #terminalizeBtwTurn(requestId: string, pending: PendingBtwTurn, allowWhileStopping = false): Promise<void> {
+	async #terminalizeBtwTurn(
+		requestId: string,
+		pending: PendingBtwTurn,
+		allowWhileStopping = false,
+		waitForInFlight = false,
+		signal?: AbortSignal,
+	): Promise<void> {
 		const delivery = this.#btwTerminalDeliveries.get(requestId);
 		if (delivery?.pending === pending) {
 			delivery.invalidated = true;
 			delivery.terminalizeOnInvalidation = true;
-			if (allowWhileStopping) await delivery.finished;
+			if (allowWhileStopping || waitForInFlight) await delivery.finished;
 			return;
 		}
 		if (this.#stoppingBtw && !allowWhileStopping) return;
@@ -2475,6 +2492,7 @@ export class TelegramNotificationDaemon {
 				messageId: pending.messageId,
 				text: "This /btw question stopped because the GJC session closed or changed. Reopen it and try again.",
 				allowWhileStopping,
+				signal,
 			});
 		} catch {
 			logger.warn("notifications: /btw session-unavailable delivery failed");
@@ -2486,8 +2504,11 @@ export class TelegramNotificationDaemon {
 		text: string;
 		parseMode?: typeof TELEGRAM_PARSE_MODE;
 		allowWhileStopping?: boolean;
+		signal?: AbortSignal;
 	}): Promise<unknown> {
 		if ((!input.allowWhileStopping && this.#stoppingBtw) || this.#btwDeliveryAbort.signal.aborted) return undefined;
+		const signals = [this.#btwDeliveryAbort.signal, AbortSignal.timeout(30_000)];
+		if (input.signal) signals.unshift(input.signal);
 		return this.botApi.call(
 			"sendMessage",
 			{
@@ -2499,14 +2520,29 @@ export class TelegramNotificationDaemon {
 			},
 			{
 				noRetry: true,
-				signal: AbortSignal.any([this.#btwDeliveryAbort.signal, AbortSignal.timeout(30_000)]),
+				signal: AbortSignal.any(signals),
 			},
 		);
 	}
 
 	async #drainBtwTurns(): Promise<void> {
 		this.#stoppingBtw = true;
+		const shutdownController = new AbortController();
+		const shutdownDeadline = Promise.withResolvers<void>();
+		const shutdownTimer = setTimeout(() => {
+			shutdownController.abort("daemon_shutdown_timeout");
+			shutdownDeadline.resolve();
+		}, BTW_SHUTDOWN_JOIN_MS);
+		for (const delivery of this.#btwTerminalDeliveries.values()) {
+			delivery.invalidated = true;
+			delivery.controller.abort("daemon_shutdown");
+		}
+		const deliveryJoins = [...this.#btwTerminalDeliveries.values()].map(delivery => delivery.finished);
+
+		const terminalizations: Promise<void>[] = [];
 		for (const [requestId, pending] of this.#pendingBtwTurns) {
+			if (shutdownController.signal.aborted) break;
+			if (this.#btwTerminalDeliveries.has(requestId)) continue;
 			const session = this.sessions.get(pending.transportSessionId);
 			if (
 				session &&
@@ -2530,8 +2566,11 @@ export class TelegramNotificationDaemon {
 					);
 				} catch {}
 			}
-			await this.#terminalizeBtwTurn(requestId, pending, true);
+			terminalizations.push(this.#terminalizeBtwTurn(requestId, pending, true, false, shutdownController.signal));
 		}
+		await Promise.race([Promise.allSettled([...deliveryJoins, ...terminalizations]), shutdownDeadline.promise]);
+		clearTimeout(shutdownTimer);
+		shutdownController.abort("daemon_shutdown");
 		this.#btwDeliveryAbort.abort();
 		this.#btwTerminalTombstones.clear();
 		this.pool.removeWhere(() => true);
@@ -2609,7 +2648,7 @@ export class TelegramNotificationDaemon {
 			(msg.type !== "config_update" && !renderThreadedFrame(msg))
 		)
 			return;
-		this.#terminalizeBtwTurnsForSession(session);
+		void this.#terminalizeBtwTurnsForSession(session).catch(() => undefined);
 		this.#clearModelChoiceAliasesForSocket(session);
 		this.#clearModelChoiceAliases(msg.sessionId);
 		session.logicalSessionId = msg.sessionId;
@@ -3633,6 +3672,7 @@ export class TelegramNotificationDaemon {
 				pending,
 				invalidated: false,
 				terminalizeOnInvalidation: false,
+				controller: new AbortController(),
 				finished: finished.promise,
 				finish: finished.resolve,
 			};
@@ -3653,6 +3693,7 @@ export class TelegramNotificationDaemon {
 							threadId: pending.threadId,
 							messageId: pending.messageId,
 							text,
+							signal: terminalDelivery.controller.signal,
 						});
 						deliveryOutcome =
 							response && typeof response === "object" && (response as { ok?: unknown }).ok === true
@@ -3681,7 +3722,11 @@ export class TelegramNotificationDaemon {
 					pending.threadId === msg.threadId &&
 					pending.updateId === msg.updateId &&
 					this.topics.sessionForTopic(pending.threadId) === pending.transportSessionId;
-				const signal = AbortSignal.any([this.#btwDeliveryAbort.signal, AbortSignal.timeout(30_000)]);
+				const signal = AbortSignal.any([
+					this.#btwDeliveryAbort.signal,
+					terminalDelivery.controller.signal,
+					AbortSignal.timeout(30_000),
+				]);
 				const deliver = async (
 					method: "sendMessage" | "sendRichMessage",
 					body: unknown,

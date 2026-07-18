@@ -33,7 +33,11 @@ import {
 } from "../src/sdk/bus/config";
 import { createNotificationsExtension } from "../src/sdk/bus/index";
 import { daemonPaths, ensureTelegramDaemonRunning } from "../src/sdk/bus/telegram-daemon";
-import { createLightweightDaemonSettings, loadLightweightDaemonSettings } from "../src/sdk/bus/telegram-daemon-cli";
+import {
+	createLightweightDaemonSettings,
+	loadLightweightDaemonSettings,
+	runDaemonInternal,
+} from "../src/sdk/bus/telegram-daemon-cli";
 import { SessionManager } from "../src/session/session-manager";
 import { cleanupFixtureRoot } from "./helpers/fixture-broker-cleanup";
 import {
@@ -88,6 +92,42 @@ const PRIMARY_GLOBAL_CFG: NotificationConfig = {
 	sessionScope: "primary",
 };
 const tempDirs: string[] = [];
+const MALFORMED_NOTIFICATION_LEAVES: ReadonlyArray<readonly [SettingPath, unknown]> = [
+	["notifications.enabled", "invalid"],
+	["notifications.telegram.botToken", 42],
+	["notifications.telegram.chatId", 42],
+	["notifications.telegram.activation", []],
+	["notifications.telegram.btw.enabled", "invalid"],
+	["notifications.telegram.rich.enabled", "invalid"],
+	["notifications.telegram.richDraft.enabled", "invalid"],
+	["notifications.telegram.topics.nameTemplate", 42],
+	["notifications.discord.botToken", 42],
+	["notifications.discord.applicationId", 42],
+	["notifications.discord.guildId", 42],
+	["notifications.discord.parentChannelId", 42],
+	["notifications.slack.botToken", 42],
+	["notifications.slack.appToken", 42],
+	["notifications.slack.workspaceId", 42],
+	["notifications.slack.channelId", 42],
+	["notifications.slack.authorizedUserId", 42],
+	["notifications.redact", "invalid"],
+	["notifications.verbosity", "invalid"],
+	["notifications.sessionScope", "invalid"],
+	["notifications.daemon.idleTimeoutMs", 0],
+];
+
+function notificationRawConfigAtPath(pathName: SettingPath, value: unknown): Record<string, unknown> {
+	const rawConfig: Record<string, unknown> = {};
+	const segments = pathName.split(".");
+	let cursor = rawConfig;
+	for (const segment of segments.slice(0, -1)) {
+		const child: Record<string, unknown> = {};
+		cursor[segment] = child;
+		cursor = child;
+	}
+	cursor[segments.at(-1)!] = value;
+	return rawConfig;
+}
 
 afterEach(async () => {
 	for (const dir of tempDirs) await brokerOwnerForTest(dir)?.stop();
@@ -285,40 +325,8 @@ describe("notifications config", () => {
 		);
 	});
 	test("full Settings and lightweight daemon reject the same malformed notification leaves", () => {
-		const malformedLeaves: Array<[SettingPath, unknown]> = [
-			["notifications.enabled", "invalid"],
-			["notifications.telegram.botToken", 42],
-			["notifications.telegram.chatId", 42],
-			["notifications.telegram.activation", []],
-			["notifications.telegram.btw.enabled", "invalid"],
-			["notifications.telegram.rich.enabled", "invalid"],
-			["notifications.telegram.richDraft.enabled", "invalid"],
-			["notifications.telegram.topics.nameTemplate", 42],
-			["notifications.discord.botToken", 42],
-			["notifications.discord.applicationId", 42],
-			["notifications.discord.guildId", 42],
-			["notifications.discord.parentChannelId", 42],
-			["notifications.slack.botToken", 42],
-			["notifications.slack.appToken", 42],
-			["notifications.slack.workspaceId", 42],
-			["notifications.slack.channelId", 42],
-			["notifications.slack.authorizedUserId", 42],
-			["notifications.redact", "invalid"],
-			["notifications.verbosity", "invalid"],
-			["notifications.sessionScope", "invalid"],
-			["notifications.daemon.idleTimeoutMs", 0],
-		];
-
-		for (const [pathName, value] of malformedLeaves) {
-			const rawConfig: Record<string, unknown> = {};
-			const segments = pathName.split(".");
-			let cursor = rawConfig;
-			for (const segment of segments.slice(0, -1)) {
-				const child: Record<string, unknown> = {};
-				cursor[segment] = child;
-				cursor = child;
-			}
-			cursor[segments.at(-1)!] = value;
+		for (const [pathName, value] of MALFORMED_NOTIFICATION_LEAVES) {
+			const rawConfig = notificationRawConfigAtPath(pathName, value);
 
 			expect(() => Settings.isolated({ [pathName]: value }).getNotificationSettingsSnapshot()).toThrow(
 				"gjc_notify_daemon_invalid_configuration",
@@ -335,31 +343,25 @@ describe("notifications config", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-btw-settings-"));
 		tempDirs.push(root);
 
-		for (const [index, [config, rawConfig]] of (
-			[
-				["true\n", true],
-				["null\n", null],
-				["notifications: true\n", { notifications: true }],
-				["notifications:\n  telegram: []\n", { notifications: { telegram: [] } }],
-				["notifications:\n  telegram:\n    btw: true\n", { notifications: { telegram: { btw: true } } }],
-				[
-					'notifications:\n  telegram:\n    btw:\n      enabled: "false"\n',
-					{ notifications: { telegram: { btw: { enabled: "false" } } } },
-				],
-				[
-					'notifications:\n  telegram:\n    rich:\n      enabled: "false"\n',
-					{ notifications: { telegram: { rich: { enabled: "false" } } } },
-				],
-				[
-					"notifications:\n  telegram:\n    topics:\n      nameTemplate: 42\n",
-					{ notifications: { telegram: { topics: { nameTemplate: 42 } } } },
-				],
-				["notifications:\n  daemon:\n    idleTimeoutMs: 0\n", { notifications: { daemon: { idleTimeoutMs: 0 } } }],
-			] as const
-		).entries()) {
+		const rawConfigs: unknown[] = [
+			true,
+			null,
+			{ notifications: true },
+			{ notifications: { telegram: [] } },
+			{ notifications: { telegram: { btw: true } } },
+			{ notifications: { telegram: { activation: true } } },
+			{ notifications: { telegram: { rich: true } } },
+			{ notifications: { telegram: { richDraft: true } } },
+			{ notifications: { telegram: { topics: true } } },
+			{ notifications: { discord: [] } },
+			{ notifications: { slack: [] } },
+			{ notifications: { daemon: true } },
+			...MALFORMED_NOTIFICATION_LEAVES.map(([pathName, value]) => notificationRawConfigAtPath(pathName, value)),
+		];
+		for (const [index, rawConfig] of rawConfigs.entries()) {
 			const agentDir = path.join(root, `agent-${index}`);
 			fs.mkdirSync(agentDir, { recursive: true });
-			fs.writeFileSync(path.join(agentDir, "config.yml"), config);
+			fs.writeFileSync(path.join(agentDir, "config.yml"), `${JSON.stringify(rawConfig)}\n`);
 
 			const settings = await Settings.loadForScope({ cwd: root, agentDir });
 			try {
@@ -367,11 +369,29 @@ describe("notifications config", () => {
 				expect(() =>
 					createLightweightDaemonSettings({ agentDir, rawConfig }).getNotificationSettingsSnapshot(),
 				).toThrow("gjc_notify_daemon_invalid_configuration");
+				if (index === 0) {
+					let daemonConstructed = false;
+					class UnexpectedDaemon {
+						constructor() {
+							daemonConstructed = true;
+						}
+						async run(): Promise<void> {}
+						requestStop(): void {}
+					}
+					await expect(
+						runDaemonInternal(["--agent-dir", agentDir, "--owner-id", "owner"], {
+							SettingsImpl: { init: async () => settings },
+							DaemonImpl: UnexpectedDaemon,
+						}),
+					).rejects.toThrow("gjc_notify_daemon_invalid_configuration");
+					expect(daemonConstructed).toBe(false);
+				}
 			} finally {
+				await settings.flush();
 				settings.getStorage()?.close();
 			}
 		}
-	});
+	}, 30_000);
 	test("full Settings rejects invalid or inaccessible config.yml like lightweight loading", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-btw-settings-load-"));
 		tempDirs.push(root);

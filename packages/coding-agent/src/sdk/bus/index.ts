@@ -80,7 +80,12 @@ import { telegramControlCommandUsage } from "./config-commands";
 import { imageAttachmentsFromMessage, notificationActionPayload, summaryFromMessage, truncate } from "./helpers";
 import { assertNativeRuntimeCompatibility } from "./native-runtime-compatibility";
 import { NotificationSessionController, type NotificationSessionRuntime } from "./session-control";
-import { type EnsureDaemonResult, ensureTelegramDaemonRunningDetailed } from "./telegram-daemon";
+import {
+	type EnsureDaemonResult,
+	endpointAuthorityDigest,
+	ensureTelegramDaemonRunningDetailed,
+} from "./telegram-daemon";
+
 
 // ===========================================================================
 // Session lifecycle control protocol (TypeScript mirror of the Rust wire
@@ -3292,6 +3297,10 @@ export function createNotificationsExtension(
 				}
 				return;
 			}
+			if (connectionId.startsWith("notification:")) {
+				pushSessionFrame(runtime!, frame);
+				return;
+			}
 			try {
 				server.sendTo(connectionId, json);
 			} catch (error) {
@@ -3743,6 +3752,23 @@ export function createNotificationsExtension(
 						return;
 					}
 				}
+				if (inbound.kind === "ephemeral_turn" || inbound.kind === "ephemeral_turn_cancel") {
+					// Older native bridges expose authenticated side turns only through onInbound,
+					// which deliberately omits the transport connection id. Broadcast the strictly
+					// correlated terminal frame so a same-authority reconnect can receive it.
+					ephemeralTurns.handle(`notification:${inbound.sessionId}`, {
+						type: inbound.kind,
+						sessionId: inbound.sessionId,
+						requestId: inbound.requestId,
+						updateId: inbound.updateId,
+						messageId: inbound.messageId,
+						threadId: inbound.threadId,
+						...(inbound.kind === "ephemeral_turn"
+							? { question: inbound.text }
+							: { reason: inbound.reason }),
+					});
+					return;
+				}
 
 				if (inbound.kind === "user_message") {
 					// Inject as a user turn (steers/continues the agent; the resulting
@@ -3849,6 +3875,13 @@ export function createNotificationsExtension(
 				await cleanupAbandonedStartup();
 				return { status: "failed" };
 			}
+			const endpoint = await server.start();
+			ephemeralTurns.configureAuthority({
+				sessionId: id,
+				endpointDigest: endpointAuthorityDigest(endpoint.url, token),
+				eventGeneration: host.generation,
+			});
+			throwIfLifecycleStopped();
 			if (notificationsEnabledForSession && settingsAvailable && settings) {
 				try {
 					if (!(await ensureConfiguredDaemons(settings, cfg, ctx.cwd, id))) {
@@ -3876,16 +3909,6 @@ export function createNotificationsExtension(
 				...buildIdentity(ctx.cwd, ctx.sessionManager.getSessionName()),
 			};
 			host.emitEvent({ kind: identityHeader.type, payload: identityHeader });
-			const endpoint = await server.start();
-			ephemeralTurns.configureAuthority({
-				sessionId: id,
-				endpointDigest: crypto
-					.createHash("sha256")
-					.update(endpoint.url + token)
-					.digest("hex"),
-				eventGeneration: host.generation,
-			});
-			throwIfLifecycleStopped();
 			if (runtimes.get(id) !== runtime) {
 				finishStartup({ status: "failed" });
 				await cleanupAbandonedStartup();

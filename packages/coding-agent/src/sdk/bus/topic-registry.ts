@@ -324,6 +324,15 @@ export class TopicRegistry {
 		return true;
 	}
 
+	/** Remove a topic record immediately for local/test cleanup compatibility. */
+	delete(sessionId: string): boolean {
+		const record = this.topics.get(sessionId);
+		if (!record) return false;
+		this.epochs.set(sessionId, Math.max(this.epochs.get(sessionId) ?? 0, record.authorityEpoch ?? 0) + 1);
+		if (this.byTopic.get(record.topicId) === sessionId) this.byTopic.delete(record.topicId);
+		return this.topics.delete(sessionId);
+	}
+
 
 	/** Serialise for atomic persistence beside the daemon state. */
 	serialize(): TopicRegistryState {

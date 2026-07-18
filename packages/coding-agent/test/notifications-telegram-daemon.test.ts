@@ -19,6 +19,8 @@ import {
 	DAEMON_GENERATION,
 	DAEMON_VERSION,
 	daemonPaths,
+	endpointAuthorityDigest,
+
 	ensureTelegramDaemonRunning,
 	ensureTelegramDaemonRunningDetailed,
 	readDaemonState,
@@ -40,6 +42,15 @@ import { NOTIFICATION_PROTOCOL_VERSION } from "../src/sdk/bus/telegram-daemon-co
 
 const THREADED_FALLBACK_NOTICE =
 	"Flat Telegram private chat supports outbound notifications and inline ask buttons only. Enable Threaded Mode in @BotFather > Bot Settings > Threads Settings for free-text replies and session commands.";
+
+test("endpoint authority digest canonicalizes endpoint presentation and binds authenticated identity", () => {
+	const canonical = endpointAuthorityDigest("ws://LOCALHOST:80/sdk?ignored=yes#ignored", "token");
+	expect(canonical).toBe(endpointAuthorityDigest("ws://localhost/sdk", "token"));
+	expect(endpointAuthorityDigest("ws://localhost/sdk", "token", "native-connection-a")).not.toBe(canonical);
+	expect(endpointAuthorityDigest("ws://localhost/sdk", "token", "native-connection-a")).toBe(
+		endpointAuthorityDigest("ws://localhost/sdk", "token", "native-connection-a"),
+	);
+});
 
 function tempAgentDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "gjc-telegram-daemon-test-"));

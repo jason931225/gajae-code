@@ -267,17 +267,28 @@ function splitTelegramPlainText(text: string, max = TELEGRAM_MESSAGE_LIMIT): str
 	if (out) chunks.push(out);
 	return chunks;
 }
-function endpointGenerationKey(url: string, token: string): string {
+export function endpointAuthorityDigest(url: string, token: string, connectionIdentity?: string): string {
 	// Discovery supplies the authenticated endpoint; normalize presentation-only
 	// URL differences before deriving authority, but never trust a client frame.
 	const parsed = new URL(url);
 	parsed.hash = "";
 	parsed.search = "";
 	parsed.hostname = parsed.hostname.toLowerCase();
-	if ((parsed.protocol === "http:" && parsed.port === "80") || (parsed.protocol === "https:" && parsed.port === "443"))
+	if (
+		((parsed.protocol === "http:" || parsed.protocol === "ws:") && parsed.port === "80") ||
+		((parsed.protocol === "https:" || parsed.protocol === "wss:") && parsed.port === "443")
+	)
 		parsed.port = "";
-	return `${parsed.toString()}\0${token}`;
+	return crypto
+		.createHash("sha256")
+		.update(`${parsed.toString()}\0${token}\0${connectionIdentity ?? ""}`, "utf8")
+		.digest("hex");
 }
+
+function endpointGenerationKey(url: string, token: string): string {
+	return endpointAuthorityDigest(url, token);
+}
+
 
 
 function topicRenameApplied(response: unknown): boolean {
@@ -1432,6 +1443,58 @@ interface PendingBtwDelivery {
 	finish: () => void;
 }
 
+class TelegramEffectSupervisor {
+	#stopping = false;
+	#allowTerminal = 0;
+	readonly #abort = new AbortController();
+	readonly #pending = new Set<Promise<unknown>>();
+
+	call(api: BotApi, method: string, body: unknown, opts?: { signal?: AbortSignal; noRetry?: boolean }): Promise<unknown> {
+
+		if (this.#stopping && this.#allowTerminal === 0)
+			return Promise.reject(Object.assign(new Error("Daemon is stopping"), { name: "AbortError" }));
+		const signal =
+			this.#allowTerminal > 0
+				? opts?.signal
+				: opts?.signal
+					? AbortSignal.any([this.#abort.signal, opts.signal])
+					: this.#abort.signal;
+
+		const effect = api.call(method, body, { ...opts, signal });
+		this.#pending.add(effect);
+		void effect.then(
+			() => this.#pending.delete(effect),
+			() => this.#pending.delete(effect),
+		);
+		return effect;
+	}
+
+	get stopping(): boolean {
+		return this.#stopping;
+	}
+
+	beginShutdown(): void {
+		this.#stopping = true;
+		this.#abort.abort("daemon_shutdown");
+	}
+
+	async allowTerminal<T>(effect: () => Promise<T>): Promise<T> {
+		this.#allowTerminal++;
+		try {
+			return await effect();
+		} finally {
+			this.#allowTerminal--;
+		}
+	}
+
+	async join(deadlineMs: number): Promise<boolean> {
+		if (this.#pending.size === 0) return true;
+		const deadline = new Promise<void>(resolve => setTimeout(resolve, deadlineMs));
+		await Promise.race([Promise.allSettled([...this.#pending]), deadline]);
+		return this.#pending.size === 0;
+	}
+}
+
 export class TelegramNotificationDaemon {
 	readonly aliasTable: AliasTable;
 	readonly messageRoutes = new Map<string | number, CallbackRoute | Omit<CallbackRoute, "answer">>();
@@ -1448,6 +1511,7 @@ export class TelegramNotificationDaemon {
 	private running = false;
 	private readonly fsImpl: TelegramDaemonFs;
 	private readonly botApi: BotApi;
+	private readonly effects = new TelegramEffectSupervisor();
 	private readonly topics = new TopicRegistry();
 	/** Serializes registry snapshots so an older atomic write cannot overwrite newer rename state. */
 	private topicsPersistQueue: Promise<void> = Promise.resolve();
@@ -1545,6 +1609,7 @@ export class TelegramNotificationDaemon {
 	 * ~25s getUpdates timeout. Safe to call from a signal handler.
 	 */
 	requestStop(_reason?: "reload" | "stop" | "signal"): void {
+		this.effects.beginShutdown();
 		for (const item of new Set(this.selectedAckPending.values())) {
 			if (item.state === "queued") this.pool.removeById(item.itemId);
 			else item.controller?.abort();
@@ -1559,6 +1624,7 @@ export class TelegramNotificationDaemon {
 		this.runtime.requestStop();
 		this.running = false;
 	}
+
 
 	/**
 	 * Start the owner-bound lifecycle control server and wire it to the
@@ -1884,7 +1950,7 @@ export class TelegramNotificationDaemon {
 		this.fsImpl = opts.fs ?? nodeFs;
 		this.replyStore = new ReplySentStore({ agentDir: opts.settings.getAgentDir(), fs: opts.fs });
 		this.aliasTable = createAliasTable();
-		this.botApi =
+		const rawBotApi =
 			opts.botApi ??
 			new TelegramBotTransport({
 				botToken: opts.botToken,
@@ -1892,6 +1958,9 @@ export class TelegramNotificationDaemon {
 				fetchImpl: opts.fetchImpl,
 				setTimeoutImpl: opts.setTimeoutImpl,
 			});
+		this.botApi = {
+			call: (method, body, callOpts) => this.effects.call(rawBotApi, method, body, callOpts),
+		};
 		this.runtime = new NotificationOperatorRuntime({
 			now: opts.now,
 			setTimeoutImpl: opts.setTimeoutImpl,
@@ -1916,7 +1985,7 @@ export class TelegramNotificationDaemon {
 				matches: msg => msg.type === "hello",
 				handle: (session, msg) => {
 					const caps = Array.isArray(msg.capabilities) ? msg.capabilities : [];
-					session.ephemeralCapable = caps.includes("ephemeral_turn_v1");
+					if (caps.includes("ephemeral_turn_v1")) session.ephemeralCapable = true;
 					if (caps.includes(CLIENT_PING_PONG_CAPABILITY)) {
 						session.capable = true;
 						this.startLiveness(session);
@@ -1986,7 +2055,7 @@ export class TelegramNotificationDaemon {
 						followers: [],
 					};
 					this.selectedAckPending.set(pendingKey, item);
-					this.pool.submit({
+					this.submitPool({
 						sessionId: session.sessionId,
 						lane: "ask",
 						itemId: item.itemId,
@@ -2232,7 +2301,7 @@ export class TelegramNotificationDaemon {
 		const WS = this.opts.WebSocketImpl ?? WebSocket;
 		const ws = new WS(`${url}/?token=${encodeURIComponent(token)}`);
 		const endpointKey = endpointGenerationKey(url, token);
-		const endpointDigest = crypto.createHash("sha256").update(endpointKey, "utf8").digest("hex");
+		const endpointDigest = endpointAuthorityDigest(url, token);
 		this.closedEndpointKeys.delete(sessionId);
 		const existing = this.sessions.get(sessionId);
 		if (existing) {
@@ -2283,6 +2352,7 @@ export class TelegramNotificationDaemon {
 								ASK_CONTROLS_CAPABILITY,
 								ASK_SELECTED_ACK_CAPABILITY,
 								TOOL_ACTIVITY_CAPABILITY,
+								"ephemeral_turn_v1",
 							],
 						}),
 					);
@@ -2589,7 +2659,7 @@ export class TelegramNotificationDaemon {
 		};
 		input.signal.addEventListener("abort", abort, { once: true });
 		try {
-			this.pool.submit({
+			this.submitPool({
 				sessionId: input.pending.transportSessionId,
 				lane: "finalized",
 				itemId,
@@ -2727,10 +2797,21 @@ export class TelegramNotificationDaemon {
 		"reasoning_summary",
 	]);
 
-	/** A frame cannot rebind a discovered transport to an arbitrary session id. */
-	#acceptsThreadedFrame(session: SessionSocket, msg: Record<string, unknown>): boolean {
-		if (typeof msg.type !== "string" || !TelegramNotificationDaemon.THREADED_FRAMES.has(msg.type)) return true;
-		return typeof msg.sessionId !== "string" || msg.sessionId === session.sessionId;
+	/** Rekey model controls before a valid server-threaded frame can render or route output. */
+	#updateLogicalSessionForThreadedFrame(session: SessionSocket, msg: Record<string, unknown>): void {
+		if (
+			typeof msg.type !== "string" ||
+			!TelegramNotificationDaemon.THREADED_FRAMES.has(msg.type) ||
+			typeof msg.sessionId !== "string" ||
+			!msg.sessionId.trim() ||
+			msg.sessionId === this.#logicalSessionId(session) ||
+			(msg.type !== "config_update" && !renderThreadedFrame(msg))
+		)
+			return;
+		void this.#terminalizeBtwTurnsForSession(session).catch(() => undefined);
+		this.#clearModelChoiceAliasesForSocket(session);
+		this.#clearModelChoiceAliases(msg.sessionId);
+		session.logicalSessionId = msg.sessionId;
 	}
 
 
@@ -2819,7 +2900,7 @@ export class TelegramNotificationDaemon {
 	}
 
 	private async submitThreadedFrame(sessionId: string, send: ThreadedSend, topicId: string): Promise<void> {
-		this.pool.submit({
+		this.submitPool({
 			sessionId,
 			lane: send.lane,
 			coalesceKey: send.coalesceKey,
@@ -3111,6 +3192,12 @@ export class TelegramNotificationDaemon {
 	}
 
 	/** Drain the shared rate-limit pool and deliver each granted send to its topic. */
+	private submitPool(item: Parameters<RateLimitPool<TelegramQueuePayload>["submit"]>[0]): boolean {
+		if (this.effects.stopping) return false;
+		this.pool.submit(item);
+		return true;
+	}
+
 	private async flushPoolInner(): Promise<void> {
 		const { granted: batch, expired } = this.pool.drainWithExpired();
 		for (const expiredItem of expired) {
@@ -3291,7 +3378,7 @@ export class TelegramNotificationDaemon {
 								parse_mode: TELEGRAM_PARSE_MODE,
 							});
 							for (let i = 1; i < chunks.length; i++) {
-								this.pool.submit({
+								this.submitPool({
 									sessionId: item.sessionId,
 									lane: item.lane,
 									payload: {
@@ -3382,7 +3469,7 @@ export class TelegramNotificationDaemon {
 						// can never be re-promoted to a duplicate sendRichMessage.
 						if (item.lane !== "live") {
 							for (let i = 1; i < chunks.length; i++) {
-								this.pool.submit({
+								this.submitPool({
 									sessionId: item.sessionId,
 									lane: item.lane,
 									payload: {
@@ -3455,7 +3542,7 @@ export class TelegramNotificationDaemon {
 		if (!(await this.pairedChatIsPrivate())) return;
 		await this.notifyThreadedFallback();
 		if (send.identity && this.flatIdentitySent.has(sessionId)) return;
-		this.pool.submit({ sessionId, lane: send.lane, coalesceKey: send.coalesceKey, payload: { send } });
+		this.submitPool({ sessionId, lane: send.lane, coalesceKey: send.coalesceKey, payload: { send } });
 		await this.flushPool();
 		if (send.identity) this.flatIdentitySent.add(sessionId);
 	}
@@ -3687,7 +3774,10 @@ export class TelegramNotificationDaemon {
 				Number.isSafeInteger(msg.lastSeq) &&
 				msg.lastSeq >= 0 &&
 				Array.isArray(msg.events);
-			if (replayValid) session.hostGeneration = msg.generation;
+			if (replayValid) {
+				session.hostGeneration = msg.generation;
+				session.ephemeralCapable = true;
+			}
 			const replayed: Record<string, unknown>[] = replayValid
 				? (msg.events as unknown[]).flatMap((event: unknown): Record<string, unknown>[] => {
 						if (!event || typeof event !== "object" || Array.isArray(event)) return [];
@@ -3738,7 +3828,7 @@ export class TelegramNotificationDaemon {
 			return;
 		}
 		if (msg?.type === "event_replay_result") return;
-		if (msg && typeof msg === "object" && !this.#acceptsThreadedFrame(session, msg)) return;
+		if (msg && typeof msg === "object") this.#updateLogicalSessionForThreadedFrame(session, msg);
 		if (await this.sessionRouter.dispatch(session, msg as Record<string, unknown>)) return;
 		if (await this.#renderModelChoices(session, msg as Record<string, unknown>)) return;
 
@@ -4753,7 +4843,8 @@ export class TelegramNotificationDaemon {
 				await this.runtime.sleep(10);
 			}
 		} finally {
-			await this.#drainBtwTurns();
+			this.effects.beginShutdown();
+			await this.effects.allowTerminal(() => this.#drainBtwTurns());
 			this.runtime.stop();
 			this.stopOwnershipHeartbeatTimer();
 			this.stopFlushTimer();
@@ -4767,6 +4858,10 @@ export class TelegramNotificationDaemon {
 			await this.persistTopics().catch(() => undefined);
 			await this.persistSeenUpdateIds().catch(() => undefined);
 			await this.opts.control?.clear?.(this.opts.ownerId).catch(() => undefined);
+			if (!(await this.effects.join(BTW_SHUTDOWN_JOIN_MS))) {
+				logger.warn("notifications: shutdown effects remain unquiesced; retaining daemon ownership");
+				return;
+			}
 			await releaseDaemonOwnership({
 				settings: this.opts.settings,
 				ownerId: this.opts.ownerId,

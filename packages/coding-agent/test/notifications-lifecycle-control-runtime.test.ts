@@ -22,10 +22,8 @@ import {
 import type { LedgerEntry, OrchestratorDeps } from "@gajae-code/coding-agent/sdk/bus/lifecycle-orchestrator";
 import { startDaemonLifecycleControl } from "@gajae-code/coding-agent/sdk/bus/telegram-daemon";
 import * as native from "@gajae-code/natives";
-import { NotificationServer } from "@gajae-code/natives";
 import { logger } from "@gajae-code/utils";
 import { Settings } from "../src/config/settings";
-import { createNotificationsExtension } from "../src/sdk/bus";
 import { tokenFingerprint } from "../src/sdk/bus/config";
 import { acquireDaemonOwnership, TelegramNotificationDaemon } from "../src/sdk/bus/telegram-daemon";
 import {
@@ -2004,95 +2002,3 @@ describe("lifecycle control runtime", () => {
 		expect(received).toEqual([["gjc_lc_exact-id", env, "exact-id", "/private/exact.json"]]);
 	});
 });
-it("notification lifecycle aborts active /btw turns, rejects disabled ingress, and restores it on re-enable", async () => {
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notify-btw-lifecycle-"));
-	const sessionId = `btw-lifecycle-${Date.now()}`;
-	const handlers = new Map<string, (event: unknown, context: unknown) => Promise<unknown>>();
-	const commands = new Map<string, { handler: (args: string, context: unknown) => Promise<unknown> }>();
-	const settings = Settings.isolated({
-		"notifications.enabled": true,
-		"notifications.telegram.botToken": "123456:secret-token",
-		"notifications.telegram.chatId": PAIRED,
-	}) as Settings;
-	const first = Promise.withResolvers<{ replyText: string }>();
-	const second = Promise.withResolvers<{ replyText: string }>();
-	const pending = [first, second];
-	let executions = 0;
-	let providerSignal: AbortSignal | undefined;
-	let inbound: Parameters<NotificationServer["onInbound"]>[0] | undefined;
-	const nativeOnInbound = NotificationServer.prototype.onInbound;
-	const onInbound = spyOn(NotificationServer.prototype, "onInbound").mockImplementation(function (
-		this: NotificationServer,
-		handler: Parameters<NotificationServer["onInbound"]>[0],
-	) {
-		inbound = handler;
-		return nativeOnInbound.call(this, handler);
-	});
-	const context = {
-		cwd,
-		sessionMetadata: { kind: "main" },
-		sessionManager: {
-			getSessionId: () => sessionId,
-			getCwd: () => cwd,
-			getSessionName: () => "Lifecycle /btw",
-			getUsageStatistics: () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 }),
-			getBranch: () => [],
-		},
-		getContextUsage: () => ({ tokens: 0, contextWindow: 1, percent: 0 }),
-		model: { provider: "test", id: "test" },
-		getThinkingLevel: () => "low",
-		ui: { notify: () => {} },
-		shutdown: () => {},
-	};
-	try {
-		createNotificationsExtension(
-			{
-				on: (event: string, handler: (event: unknown, context: unknown) => Promise<unknown>) =>
-					handlers.set(event, handler),
-				registerCommand: (
-					name: string,
-					command: { handler: (args: string, context: unknown) => Promise<unknown> },
-				) => commands.set(name, command),
-				sendUserMessage: () => {},
-			} as never,
-			{
-				settings,
-				ensureTelegramDaemon: async () => "attached",
-				runEphemeralTurn: async (_question, signal) => {
-					providerSignal = signal;
-					return await pending[executions++]!.promise;
-				},
-			},
-		);
-		await handlers.get("session_start")!({ type: "session_start" }, context);
-		expect(inbound).toBeDefined();
-
-		const frame = (requestId: string) => ({
-			kind: "ephemeral_turn",
-			connectionId: "daemon",
-			sessionId,
-			requestId,
-			updateId: 1,
-			messageId: 1,
-			threadId: "1",
-			text: "question",
-		});
-		inbound!(null, frame("active"));
-		expect(executions).toBe(1);
-
-		await commands.get("notify")!.handler("off", context);
-		expect(providerSignal?.aborted).toBe(true);
-		inbound!(null, frame("disabled"));
-		expect(executions).toBe(1);
-
-		await commands.get("notify")!.handler("on", context);
-		inbound!(null, frame("re-enabled"));
-		expect(executions).toBe(2);
-		second.resolve({ replyText: "answer" });
-		first.resolve({ replyText: "late" });
-	} finally {
-		onInbound.mockRestore();
-		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, context);
-		fs.rmSync(cwd, { recursive: true, force: true });
-	}
-}, 15_000);

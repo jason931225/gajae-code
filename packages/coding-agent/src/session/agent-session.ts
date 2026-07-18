@@ -1094,6 +1094,7 @@ function extractPermissionLocations(
  *  rely on the existing text-equality match. `sequence` gives each queued chip a
  *  stable edit id while the display arrays preserve delivery order. */
 type QueuedDisplayEntry = { text: string; tag?: string; sequence: number };
+type IrcRosterClaim = { token: symbol; signature: string; epoch: number; message: CustomMessage };
 export type QueuedMessageEditMode = "steer" | "followUp";
 
 export interface QueuedMessageEditEntry {
@@ -1513,7 +1514,7 @@ export class AgentSession {
 	#agentRegistry: AgentRegistry | undefined;
 	#lastDeliveredIrcRosterSignature: string | null = null;
 	#ircRosterEpoch = 0;
-	#ircRosterClaim: { token: symbol; signature: string; epoch: number } | null = null;
+	#ircRosterClaim: IrcRosterClaim | null = null;
 	#providerSessionId: string | undefined;
 	#providerCacheSessionId: string | undefined;
 	#isDisposed = false;
@@ -13188,6 +13189,7 @@ export class AgentSession {
 				prependMessagesValid: rosterClaim
 					? () => this.#isCurrentIrcRosterClaim(rosterClaim.token, rosterClaim.epoch)
 					: undefined,
+				ircRosterClaim: rosterClaim,
 			});
 			const replyText = dedupeIrcReply(generatedReplyText);
 			const replyObservationId = crypto.randomUUID();
@@ -13359,14 +13361,14 @@ export class AgentSession {
 		};
 	}
 
-	#claimIrcRosterCandidate(): { token: symbol; epoch: number; message: CustomMessage } | null {
+	#claimIrcRosterCandidate(): IrcRosterClaim | null {
 		if (this.#ircRosterClaim) return null;
 		const candidate = this.#buildIrcRosterCandidate();
 		if (!candidate || candidate.signature === this.#lastDeliveredIrcRosterSignature) return null;
 		const token = Symbol("irc-roster");
 		const epoch = this.#ircRosterEpoch;
-		this.#ircRosterClaim = { token, signature: candidate.signature, epoch };
-		return { token, epoch, message: candidate.message };
+		this.#ircRosterClaim = { token, signature: candidate.signature, epoch, message: candidate.message };
+		return { token, signature: candidate.signature, epoch, message: candidate.message };
 	}
 
 	#isCurrentIrcRosterClaim(token: symbol, epoch: number): boolean {
@@ -13412,85 +13414,117 @@ export class AgentSession {
 		prependMessages?: AgentMessage[];
 		/** Revalidates optional caller context after asynchronous boundaries. */
 		prependMessagesValid?: () => boolean;
+		/**
+		 * An existing IRC roster claim owned by the caller. `undefined` makes this
+		 * turn claim and commit its own roster candidate; `null` opts out.
+		 */
+		ircRosterClaim?: IrcRosterClaim | null;
 	}): Promise<{
 		replyText: string;
 		assistantMessage: AssistantMessage;
 	}> {
 		args.signal?.throwIfAborted();
-		const model = this.model;
-		if (!model) {
-			throw new Error("No active model on session");
-		}
-		const apiKey = await awaitEphemeralAbort(this.#modelRegistry.getApiKey(model, this.sessionId), args.signal);
-		if (!apiKey) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		}
-
-		const prependMessages = args.prependMessagesValid?.() === false ? undefined : args.prependMessages;
-		let snapshot = this.#buildEphemeralSnapshot(args.promptText, prependMessages);
-		let llmMessages = await awaitEphemeralAbort(this.convertMessagesToLlm(snapshot, args.signal), args.signal);
-		if (prependMessages && args.prependMessagesValid?.() === false) {
-			snapshot = this.#buildEphemeralSnapshot(args.promptText);
-			llmMessages = await awaitEphemeralAbort(this.convertMessagesToLlm(snapshot, args.signal), args.signal);
-		}
-		const context: Context = {
-			systemPrompt: this.systemPrompt,
-			messages: llmMessages,
-			// Empty tools array: with toolChoice="none" some encoders still serialize the
-			// recipient's tool catalog and the model leaks raw call markup
-			// (<function_calls>, DSML envelopes) into IRC replies. Stripping tools here
-			// removes the surface entirely.
-			tools: [],
-		};
-		// Providers use sessionId as their sticky stream identity. Reusing the
-		// active turn's identity makes this no-history request wait behind its
-		// stream (notably on the WebSocket transport), so it must be unique.
-		const ephemeralSessionId = crypto.randomUUID();
-		const options = this.prepareSimpleStreamOptions(
-			{
-				apiKey,
-				sessionId: ephemeralSessionId,
-				metadata: buildSessionMetadata(
-					ephemeralSessionId,
-					model.provider,
-					this.#modelRegistry.authStorage,
-					this.sessionId,
-				),
-				reasoning: toReasoningEffort(this.thinkingLevel),
-				hideThinkingSummary: this.agent.hideThinkingSummary,
-				serviceTier: this.serviceTier,
-				signal: args.signal,
-				toolChoice: "none",
-			},
-			model.provider,
-		);
-
-		let replyText = "";
-		let assistantMessage: AssistantMessage | undefined;
-		args.signal?.throwIfAborted();
-		const stream = streamSimple(model, context, options);
-		for await (const event of stream) {
-			if (event.type === "text_delta") {
-				replyText += event.delta;
-				if (args.onTextDelta) args.onTextDelta(event.delta);
-				continue;
+		const callerOwnsRosterClaim = args.ircRosterClaim !== undefined;
+		const rosterClaim = callerOwnsRosterClaim ? args.ircRosterClaim : this.#claimIrcRosterCandidate();
+		const rosterClaimIsCurrent = () =>
+			!rosterClaim || this.#isCurrentIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
+		const prependMessagesValid = () => rosterClaimIsCurrent() && args.prependMessagesValid?.() !== false;
+		const rosterMessage = !callerOwnsRosterClaim && rosterClaimIsCurrent() ? rosterClaim?.message : undefined;
+		try {
+			const model = this.model;
+			if (!model) {
+				throw new Error("No active model on session");
 			}
-			if (event.type === "done") {
-				assistantMessage = event.message;
-				break;
+			const apiKey = await awaitEphemeralAbort(this.#modelRegistry.getApiKey(model, this.sessionId), args.signal);
+			if (!apiKey) {
+				throw new Error(`No API key for ${model.provider}/${model.id}`);
 			}
-			if (event.type === "error") {
-				throw new Error(event.error.errorMessage || "Ephemeral turn failed");
-			}
-		}
 
-		if (!assistantMessage) {
-			throw new Error("Ephemeral turn ended without a final message");
+			const prependMessages = prependMessagesValid()
+				? [...(rosterMessage ? [rosterMessage] : []), ...(args.prependMessages ?? [])]
+				: undefined;
+			let snapshot = this.#buildEphemeralSnapshot(args.promptText, prependMessages);
+			let llmMessages = await awaitEphemeralAbort(this.convertMessagesToLlm(snapshot, args.signal), args.signal);
+			if (prependMessages && !prependMessagesValid()) {
+				snapshot = this.#buildEphemeralSnapshot(args.promptText);
+				llmMessages = await awaitEphemeralAbort(this.convertMessagesToLlm(snapshot, args.signal), args.signal);
+			}
+			const context: Context = {
+				systemPrompt: this.systemPrompt,
+				messages: llmMessages,
+				// Empty tools array: with toolChoice="none" some encoders still serialize the
+				// recipient's tool catalog and the model leaks raw call markup
+				// (<function_calls>, DSML envelopes) into IRC replies. Stripping tools here
+				// removes the surface entirely.
+				tools: [],
+			};
+			// Providers use sessionId as their sticky stream identity. Reusing the
+			// active turn's identity makes this no-history request wait behind its
+			// stream (notably on the WebSocket transport), so it must be unique.
+			const ephemeralSessionId = crypto.randomUUID();
+			const options = this.prepareSimpleStreamOptions(
+				{
+					apiKey,
+					sessionId: ephemeralSessionId,
+					metadata: buildSessionMetadata(
+						ephemeralSessionId,
+						model.provider,
+						this.#modelRegistry.authStorage,
+						this.sessionId,
+					),
+					reasoning: toReasoningEffort(this.thinkingLevel),
+					hideThinkingSummary: this.agent.hideThinkingSummary,
+					serviceTier: this.serviceTier,
+					signal: args.signal,
+					toolChoice: "none",
+				},
+				model.provider,
+			);
+
+			let replyText = "";
+			let assistantMessage: AssistantMessage | undefined;
+			args.signal?.throwIfAborted();
+			const stream = streamSimple(model, context, options);
+			for await (const event of stream) {
+				if (event.type === "text_delta") {
+					replyText += event.delta;
+					if (args.onTextDelta) args.onTextDelta(event.delta);
+					continue;
+				}
+				if (event.type === "done") {
+					assistantMessage = event.message;
+					break;
+				}
+				if (event.type === "error") {
+					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
+				}
+			}
+
+			if (!assistantMessage) {
+				throw new Error("Ephemeral turn ended without a final message");
+			}
+			// A provider may ignore the caller signal and yield a normal terminal event.
+			// Do not let that completion commit a direct roster claim or report success.
+			args.signal?.throwIfAborted();
+			if (
+				!callerOwnsRosterClaim &&
+				rosterClaim &&
+				assistantMessage.stopReason !== "error" &&
+				assistantMessage.stopReason !== "aborted"
+			) {
+				args.signal?.throwIfAborted();
+				this.#commitIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
+			}
+			args.signal?.throwIfAborted();
+			return {
+				replyText: replyText.trim(),
+				assistantMessage,
+			};
+		} finally {
+			if (!callerOwnsRosterClaim && rosterClaim) {
+				this.#releaseIrcRosterClaim(rosterClaim.token, rosterClaim.epoch);
+			}
 		}
-		return {
-			replyText: replyText.trim(),
-			assistantMessage,
-		};
 	}
 
 	/**

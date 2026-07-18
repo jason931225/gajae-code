@@ -20,7 +20,6 @@ import {
 	DAEMON_VERSION,
 	daemonPaths,
 	endpointAuthorityDigest,
-
 	ensureTelegramDaemonRunning,
 	ensureTelegramDaemonRunningDetailed,
 	readDaemonState,

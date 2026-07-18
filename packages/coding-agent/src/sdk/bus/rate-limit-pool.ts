@@ -51,7 +51,6 @@ export interface RateLimitHandle {
 	settled: Promise<Exclude<RateLimitDisposition, "queued" | "sending">>;
 }
 
-
 /** Options for {@link RateLimitPool}. */
 export interface RateLimitPoolOptions {
 	/** Burst capacity (max tokens). Default 20 (Telegram per-chat burst). */
@@ -94,7 +93,10 @@ export class RateLimitPool<T = unknown> {
 
 	private tokens: number;
 	private lastRefill: number;
-	private readonly settlements = new Map<string, PromiseWithResolvers<Exclude<RateLimitDisposition, "queued" | "sending">>>();
+	private readonly settlements = new Map<
+		string,
+		PromiseWithResolvers<Exclude<RateLimitDisposition, "queued" | "sending">>
+	>();
 
 	private seqCounter = 0;
 
@@ -131,7 +133,9 @@ export class RateLimitPool<T = unknown> {
 		const queue = this.lanes.get(identified.lane);
 		if (!queue) throw new Error(`unknown rate-limit lane: ${identified.lane}`);
 		if (item.itemId === undefined && identified.coalesceKey !== undefined) {
-			const existing = queue.find(q => q.item.sessionId === identified.sessionId && q.item.coalesceKey === identified.coalesceKey);
+			const existing = queue.find(
+				q => q.item.sessionId === identified.sessionId && q.item.coalesceKey === identified.coalesceKey,
+			);
 			if (existing) {
 				this.settle(existing.item.itemId!, "removed");
 				existing.item = identified;
@@ -155,7 +159,6 @@ export class RateLimitPool<T = unknown> {
 		}
 		return { itemId, settled: deferred.promise };
 	}
-
 
 	/**
 	 * Grant as many queued items as tokens allow at `nowMs`. This compatibility
@@ -189,7 +192,6 @@ export class RateLimitPool<T = unknown> {
 		predicate: (item: RateLimitItem<T>) => boolean,
 		disposition: Exclude<RateLimitDisposition, "queued" | "sending"> = "removed",
 	): RateLimitItem<T>[] {
-
 		const removed: RateLimitItem<T>[] = [];
 		for (const lane of LANE_PRIORITY) {
 			const queue = this.lanes.get(lane)!;
@@ -199,7 +201,6 @@ export class RateLimitPool<T = unknown> {
 				if (predicate(queued.item)) {
 					removed.push(queued.item);
 					this.settle(queued.item.itemId!, disposition);
-
 				} else {
 					queue[write++] = queued;
 				}
@@ -219,7 +220,6 @@ export class RateLimitPool<T = unknown> {
 				this.settle(item.itemId!, "removed");
 				return item;
 			}
-
 		}
 		return undefined;
 	}

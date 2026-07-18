@@ -41,7 +41,6 @@ export interface TopicRecord {
 	authorityEpoch?: number;
 	/** An uncertain delete fences future creation and inbound routing. */
 	authorityState?: "active" | "delete_pending";
-
 }
 
 /** Serialisable shape persisted to disk. */
@@ -51,7 +50,6 @@ export interface TopicRegistryState {
 	/** Durable deletion epochs retained after a definite delete. */
 	fences?: Record<string, number>;
 }
-
 
 function isValidTopicId(value: unknown): value is string {
 	return (
@@ -78,7 +76,6 @@ export class TopicRegistry {
 	private readonly inflight = new Map<string, Promise<TopicRecord>>();
 	/** Monotonic authority epochs, including deletion fences for absent records. */
 	private readonly epochs = new Map<string, number>();
-
 
 	constructor(state: TopicRegistryState = emptyTopicRegistryState()) {
 		this.topics = new Map();
@@ -124,7 +121,6 @@ export class TopicRegistry {
 					? { authorityEpoch: raw.authorityEpoch }
 					: {}),
 				...(raw.authorityState === "delete_pending" ? { authorityState: "delete_pending" as const } : {}),
-
 			};
 			this.epochs.set(sessionId, Math.max(this.epochs.get(sessionId) ?? 0, record.authorityEpoch ?? 0));
 
@@ -173,7 +169,8 @@ export class TopicRegistry {
 		const promise = (async () => {
 			const topicId = await create();
 			if (!isValidTopicId(topicId)) throw new Error("createForumTopic: invalid message_thread_id");
-			if ((this.epochs.get(sessionId) ?? 0) !== epoch) throw new Error("topic authority was revoked during creation");
+			if ((this.epochs.get(sessionId) ?? 0) !== epoch)
+				throw new Error("topic authority was revoked during creation");
 			const record: TopicRecord = { topicId, name, identitySent: false, createdAt: now(), authorityEpoch: epoch };
 			this.topics.set(sessionId, record);
 			if (this.#ambiguousTopicIds.has(topicId)) return record;
@@ -192,7 +189,6 @@ export class TopicRegistry {
 			this.inflight.delete(sessionId);
 		}
 	}
-
 
 	/** Mark the identity header as sent for a session. Idempotent. */
 	markIdentitySent(sessionId: string): void {
@@ -332,7 +328,6 @@ export class TopicRegistry {
 		if (this.byTopic.get(record.topicId) === sessionId) this.byTopic.delete(record.topicId);
 		return this.topics.delete(sessionId);
 	}
-
 
 	/** Serialise for atomic persistence beside the daemon state. */
 	serialize(): TopicRegistryState {

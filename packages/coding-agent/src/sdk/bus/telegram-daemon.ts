@@ -289,8 +289,6 @@ function endpointGenerationKey(url: string, token: string): string {
 	return endpointAuthorityDigest(url, token);
 }
 
-
-
 function topicRenameApplied(response: unknown): boolean {
 	return !!response && typeof response === "object" && (response as { ok?: unknown }).ok === true;
 }
@@ -1449,8 +1447,12 @@ class TelegramEffectSupervisor {
 	readonly #abort = new AbortController();
 	readonly #pending = new Set<Promise<unknown>>();
 
-	call(api: BotApi, method: string, body: unknown, opts?: { signal?: AbortSignal; noRetry?: boolean }): Promise<unknown> {
-
+	call(
+		api: BotApi,
+		method: string,
+		body: unknown,
+		opts?: { signal?: AbortSignal; noRetry?: boolean },
+	): Promise<unknown> {
 		if (this.#stopping && this.#allowTerminal === 0)
 			return Promise.reject(Object.assign(new Error("Daemon is stopping"), { name: "AbortError" }));
 		const signal =
@@ -1624,7 +1626,6 @@ export class TelegramNotificationDaemon {
 		this.runtime.requestStop();
 		this.running = false;
 	}
-
 
 	/**
 	 * Start the owner-bound lifecycle control server and wire it to the
@@ -2813,7 +2814,6 @@ export class TelegramNotificationDaemon {
 		this.#clearModelChoiceAliases(msg.sessionId);
 		session.logicalSessionId = msg.sessionId;
 	}
-
 
 	private topicNameFor(sessionId: string, msg: { title?: unknown; repo?: unknown; branch?: unknown }): string {
 		const repo = typeof msg?.repo === "string" && msg.repo ? msg.repo : undefined;
@@ -4858,19 +4858,20 @@ export class TelegramNotificationDaemon {
 			await this.persistTopics().catch(() => undefined);
 			await this.persistSeenUpdateIds().catch(() => undefined);
 			await this.opts.control?.clear?.(this.opts.ownerId).catch(() => undefined);
-			if (!(await this.effects.join(BTW_SHUTDOWN_JOIN_MS))) {
+			const quiesced = await this.effects.join(BTW_SHUTDOWN_JOIN_MS);
+			if (!quiesced) {
 				logger.warn("notifications: shutdown effects remain unquiesced; retaining daemon ownership");
-				return;
+			} else {
+				await releaseDaemonOwnership({
+					settings: this.opts.settings,
+					ownerId: this.opts.ownerId,
+					tokenFingerprint: tokenFingerprint(this.opts.botToken),
+					chatId: this.opts.chatId,
+					pid: this.opts.pid ?? process.pid,
+					fs: this.fsImpl,
+					now: this.opts.now,
+				});
 			}
-			await releaseDaemonOwnership({
-				settings: this.opts.settings,
-				ownerId: this.opts.ownerId,
-				tokenFingerprint: tokenFingerprint(this.opts.botToken),
-				chatId: this.opts.chatId,
-				pid: this.opts.pid ?? process.pid,
-				fs: this.fsImpl,
-				now: this.opts.now,
-			});
 		}
 	}
 

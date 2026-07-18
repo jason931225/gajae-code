@@ -86,7 +86,6 @@ import {
 	ensureTelegramDaemonRunningDetailed,
 } from "./telegram-daemon";
 
-
 // ===========================================================================
 // Session lifecycle control protocol (TypeScript mirror of the Rust wire
 // contract in `crates/gjc-sdk/src/lifecycle.rs`).
@@ -3763,9 +3762,7 @@ export function createNotificationsExtension(
 						updateId: inbound.updateId,
 						messageId: inbound.messageId,
 						threadId: inbound.threadId,
-						...(inbound.kind === "ephemeral_turn"
-							? { question: inbound.text }
-							: { reason: inbound.reason }),
+						...(inbound.kind === "ephemeral_turn" ? { question: inbound.text } : { reason: inbound.reason }),
 					});
 					return;
 				}

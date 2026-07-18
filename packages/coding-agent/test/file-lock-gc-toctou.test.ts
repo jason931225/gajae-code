@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -13,6 +13,7 @@ const LIVE_PID = 636_363;
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const dir of tempDirs.splice(0)) {
 		await fs.rm(dir, { recursive: true, force: true });
 	}
@@ -138,6 +139,61 @@ describe("withFileLock stale owner liveness (#652)", () => {
 		expect(await fs.exists(lockDir)).toBe(true);
 		const onDisk = JSON.parse(await fs.readFile(path.join(lockDir, "info"), "utf8"));
 		expect(onDisk).toEqual(replacement);
+	});
+});
+describe("file lock cleanup failure handling (#2478)", () => {
+	test("does not reap a stale lock when its metadata read fails unexpectedly", async () => {
+		const base = await makeTemp();
+		const lockedFile = path.join(base, "state.json");
+		const lockDir = `${lockedFile}.lock`;
+		const readError = Object.assign(new Error("metadata access denied"), { code: "EACCES" });
+		await writeInfo(lockDir, { pid: DEAD_PID, timestamp: Date.now() - 10_000 });
+
+		vi.spyOn(fs, "readFile").mockRejectedValueOnce(readError);
+
+		await expect(withFileLock(lockedFile, async () => {}, { staleMs: 1, retries: 1, retryDelayMs: 1 })).rejects.toBe(
+			readError,
+		);
+		expect(await fs.exists(lockDir)).toBe(true);
+	});
+
+	test("rejects when release fails after successful protected work", async () => {
+		const base = await makeTemp();
+		const lockedFile = path.join(base, "state.json");
+		const lockDir = `${lockedFile}.lock`;
+		const releaseError = Object.assign(new Error("lock removal denied"), { code: "EACCES" });
+		let completed = false;
+
+		vi.spyOn(fs, "rm").mockRejectedValueOnce(releaseError);
+
+		await expect(
+			withFileLock(lockedFile, async () => {
+				completed = true;
+			}),
+		).rejects.toBe(releaseError);
+		expect(completed).toBe(true);
+		expect(await fs.exists(lockDir)).toBe(true);
+	});
+
+	test("preserves operation and release failures", async () => {
+		const base = await makeTemp();
+		const lockedFile = path.join(base, "state.json");
+		const operationError = new Error("protected work failed");
+		const releaseError = Object.assign(new Error("lock removal denied"), { code: "EACCES" });
+
+		vi.spyOn(fs, "rm").mockRejectedValueOnce(releaseError);
+
+		let failure: unknown;
+		try {
+			await withFileLock(lockedFile, async () => {
+				throw operationError;
+			});
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(AggregateError);
+		expect((failure as AggregateError).errors).toEqual([operationError, releaseError]);
 	});
 });
 describe("file lock owner-token removal guard (#606)", () => {

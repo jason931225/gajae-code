@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@gajae-code/ai";
 import { logger } from "@gajae-code/utils";
+import { YAML } from "bun";
+import { withFileLock } from "../src/config/file-lock";
 import {
 	NotificationSettingsOverrideError,
 	resetSettingsForTest,
@@ -135,8 +137,21 @@ afterEach(async () => {
 		Bun.gc(true);
 		await Bun.sleep(50);
 	}
-	for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
-});
+	for (const dir of tempDirs.splice(0)) {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				fs.rmSync(dir, { recursive: true, force: true });
+				break;
+			} catch (error) {
+				const code =
+					error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+				if (process.platform !== "win32" || (code !== "EBUSY" && code !== "EPERM") || attempt >= 100) throw error;
+				Bun.gc(true);
+				await Bun.sleep(100);
+			}
+		}
+	}
+}, 15_000);
 
 describe("notifications config", () => {
 	test("getNotificationConfig reads defaults", () => {
@@ -392,6 +407,423 @@ describe("notifications config", () => {
 			}
 		}
 	}, 30_000);
+	test("Settings revalidates malformed notification config after direct repairs only", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-direct-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: "invalid", redact: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+
+			settings.set("theme.dark", "red-claw");
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+
+			settings.set("notifications.enabled", true);
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+
+			settings.unset("notifications.redact");
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: false });
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("Settings preserves coercible malformed notification siblings through direct partial repairs", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-direct-coercible-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		const configPath = path.join(agentDir, "config.yml");
+		fs.writeFileSync(
+			configPath,
+			`${JSON.stringify({ notifications: { enabled: "true", daemon: { idleTimeoutMs: "60000" } } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			settings.set("notifications.enabled", true);
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+			await settings.flush();
+			expect(YAML.parse(fs.readFileSync(configPath, "utf8"))).toMatchObject({
+				notifications: { enabled: true, daemon: { idleTimeoutMs: "60000" } },
+			});
+		} finally {
+			settings.getStorage()?.close();
+		}
+
+		const partiallyRepaired = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => partiallyRepaired.getNotificationSettingsSnapshot()).toThrow(
+				"gjc_notify_daemon_invalid_configuration",
+			);
+			partiallyRepaired.set("notifications.daemon.idleTimeoutMs", 60_000);
+			expect(partiallyRepaired.getNotificationSettingsSnapshot()).toMatchObject({
+				enabled: true,
+				idleTimeoutMs: 60_000,
+			});
+			await partiallyRepaired.flush();
+		} finally {
+			partiallyRepaired.getStorage()?.close();
+		}
+
+		const repaired = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(repaired.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, idleTimeoutMs: 60_000 });
+		} finally {
+			await repaired.flush();
+			repaired.getStorage()?.close();
+		}
+	});
+	test("Settings preserves coercible malformed notification siblings through atomic partial repairs", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-atomic-coercible-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		const configPath = path.join(agentDir, "config.yml");
+		fs.writeFileSync(
+			configPath,
+			`${JSON.stringify({ notifications: { enabled: "true", daemon: { idleTimeoutMs: "60000" } } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			await settings.commitAtomicBatch([{ path: "notifications.enabled", op: "set", value: true }]);
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+			await settings.flush();
+			expect(YAML.parse(fs.readFileSync(configPath, "utf8"))).toMatchObject({
+				notifications: { enabled: true, daemon: { idleTimeoutMs: "60000" } },
+			});
+		} finally {
+			settings.getStorage()?.close();
+		}
+
+		const partiallyRepaired = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => partiallyRepaired.getNotificationSettingsSnapshot()).toThrow(
+				"gjc_notify_daemon_invalid_configuration",
+			);
+			await partiallyRepaired.commitAtomicBatch([
+				{ path: "notifications.daemon.idleTimeoutMs", op: "set", value: 60_000 },
+			]);
+			expect(partiallyRepaired.getNotificationSettingsSnapshot()).toMatchObject({
+				enabled: true,
+				idleTimeoutMs: 60_000,
+			});
+			await partiallyRepaired.flush();
+		} finally {
+			partiallyRepaired.getStorage()?.close();
+		}
+
+		const repaired = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(repaired.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, idleTimeoutMs: 60_000 });
+		} finally {
+			await repaired.flush();
+			repaired.getStorage()?.close();
+		}
+	});
+	test("Settings recomputes notification validation after a blocked older save replays a direct repair", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-replay-validation-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { enabled: "true" } })}\n`);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		const lockAcquired = Promise.withResolvers<void>();
+		const releaseLock = Promise.withResolvers<void>();
+		const lock = withFileLock(configPath, async () => {
+			lockAcquired.resolve();
+			await releaseLock.promise;
+		});
+		await lockAcquired.promise;
+		try {
+			settings.set("theme.dark", "red-claw");
+			const firstFlush = settings.flushOrThrow();
+			await Promise.resolve();
+			settings.set("notifications.enabled", true);
+			releaseLock.resolve();
+			await lock;
+			await firstFlush;
+
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true });
+			await settings.flushOrThrow();
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true });
+		} finally {
+			releaseLock.resolve();
+			await lock;
+			settings.getStorage()?.close();
+		}
+	});
+	test("Settings clears malformed-root gating only after a notification repair", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-root-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "config.yml"), "true\n");
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+
+			settings.set("theme.dark", "red-claw");
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+
+			settings.set("notifications.enabled", true);
+			expect(settings.getNotificationSettingsSnapshot().enabled).toBe(true);
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+
+	test("Settings atomic notification repairs revalidate and restore fail-closed state", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-atomic-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+
+			const receipt = await settings.commitAtomicBatch([{ path: "notifications.enabled", op: "set", value: true }]);
+			expect(settings.getNotificationSettingsSnapshot().enabled).toBe(true);
+
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("ordinary saves fence notification validation restores after an external different-path repair", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-save-fence-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { redact: "invalid" } })}\n`);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			const receipt = await settings.commitAtomicBatch([
+				{ path: "notifications.enabled", op: "set", value: "invalid" },
+			]);
+			fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { enabled: "invalid", redact: true } })}\n`);
+
+			settings.set("theme.dark", "red-claw");
+			await settings.flushOrThrow();
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: false, redact: true });
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("in-memory atomic repairs restore their prior notification validation state", async () => {
+		const settings = Settings.isolated({ "notifications.enabled": "invalid" });
+		expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+
+		const receipt = await settings.commitAtomicBatch([{ path: "notifications.enabled", op: "set", value: true }]);
+		expect(settings.getNotificationSettingsSnapshot().enabled).toBe(true);
+
+		expect(await receipt.restore()).toMatchObject({ status: "restored" });
+		expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+	});
+	test("newer notification mutations reparse instead of restoring a stale receipt state", async () => {
+		const settings = Settings.isolated();
+		const receipt = await settings.commitAtomicBatch([
+			{ path: "notifications.enabled", op: "set", value: "invalid" },
+		]);
+		expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+
+		settings.set("notifications.redact", true);
+		expect(await receipt.restore()).toMatchObject({ status: "restored" });
+		expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: false, redact: true });
+
+		const conflictingReceipt = await settings.commitAtomicBatch([
+			{ path: "notifications.enabled", op: "set", value: "invalid" },
+		]);
+		settings.set("notifications.enabled", true);
+		expect(await conflictingReceipt.restore()).toMatchObject({ status: "conflict" });
+		expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: true });
+	});
+
+	test("with-current atomic repairs preserve partial notification validation", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-current-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: "invalid", redact: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			const receipt = await settings.commitAtomicBatchWithCurrent(() => [
+				{ path: "notifications.enabled", op: "set", value: true },
+			]);
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+
+			settings.unset("notifications.redact");
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: false });
+
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("with-current repair does not restore stale validation after a concurrent different notification repair", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-current-concurrent-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		const builderEntered = Promise.withResolvers<void>();
+		const continueBuilder = Promise.withResolvers<void>();
+		try {
+			const pendingReceipt = settings.commitAtomicBatchWithCurrent(async () => {
+				builderEntered.resolve();
+				await continueBuilder.promise;
+				return [{ path: "notifications.redact", op: "set", value: true }];
+			});
+			await builderEntered.promise;
+			settings.set("notifications.enabled", true);
+			continueBuilder.resolve();
+
+			const receipt = await pendingReceipt;
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: true });
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: false });
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("with-current same-value notification mutations still fence validation rollback", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-current-same-value-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: true, redact: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		const builderEntered = Promise.withResolvers<void>();
+		const continueBuilder = Promise.withResolvers<void>();
+		try {
+			const pendingReceipt = settings.commitAtomicBatchWithCurrent(async () => {
+				builderEntered.resolve();
+				await continueBuilder.promise;
+				return [{ path: "notifications.enabled", op: "set", value: true }];
+			});
+			await builderEntered.promise;
+			settings.set("notifications.enabled", true);
+			continueBuilder.resolve();
+
+			const receipt = await pendingReceipt;
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("with-current atomic notification repair rejects malformed roots without normalizing durable YAML", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-current-malformed-root-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, "true\n");
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			await expect(
+				settings.commitAtomicBatchWithCurrent(() => [{ path: "notifications.enabled", op: "set", value: true }]),
+			).rejects.toThrow("malformed root");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("true\n");
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+
+		const reloaded = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => reloaded.getNotificationSettingsSnapshot()).toThrow("gjc_notify_daemon_invalid_configuration");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("true\n");
+		} finally {
+			await reloaded.flush();
+			reloaded.getStorage()?.close();
+		}
+	}, 15_000);
+	test("atomic notification repairs reject externally malformed roots under the file lock", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-atomic-external-root-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { enabled: true } })}\n`);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			fs.writeFileSync(configPath, "null\n");
+			await expect(
+				settings.commitAtomicBatch([{ path: "notifications.enabled", op: "set", value: false }]),
+			).rejects.toThrow("malformed root");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("null\n");
+
+			fs.writeFileSync(configPath, "[]\n");
+			await expect(
+				settings.commitAtomicBatchWithCurrent(() => [{ path: "notifications.enabled", op: "set", value: false }]),
+			).rejects.toThrow("malformed root");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("[]\n");
+		} finally {
+			settings.getStorage()?.close();
+		}
+	});
+	test("atomic notification receipt restore rejects externally malformed roots under the file lock", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-notification-restore-external-root-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { enabled: true } })}\n`);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			const receipt = await settings.commitAtomicBatch([{ path: "notifications.enabled", op: "unset" }]);
+			fs.writeFileSync(configPath, "null\n");
+
+			await expect(receipt.restore()).rejects.toThrow("malformed root");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("null\n");
+		} finally {
+			settings.getStorage()?.close();
+		}
+	});
 	test("full Settings rejects invalid or inaccessible config.yml like lightweight loading", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-btw-settings-load-"));
 		tempDirs.push(root);

@@ -5493,6 +5493,381 @@ test("session_closed deletes the topic and resume creates a fresh visible topic"
 		false,
 	);
 });
+test("delete-pending topics fence model choices and threaded frames while active topics still deliver", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		WebSocketImpl: FakeWs as any,
+	});
+	daemon.connectSession("S", "ws://active", "token");
+	const activeSession = daemon.sessions.get("S")!;
+	await daemon.handleSessionMessage(activeSession, {
+		type: "identity_header",
+		sessionId: "S",
+		repo: "r",
+		branch: "b",
+	});
+	const topicId = bot.calls.find(call => call.method === "sendMessage")!.body.message_thread_id;
+
+	bot.calls = [];
+	await daemon.handleSessionMessage(activeSession, {
+		type: "turn_stream",
+		sessionId: "S",
+		phase: "finalized",
+		text: "active threaded output",
+	});
+	expect(bot.calls.find(call => call.method === "sendMessage")!.body.message_thread_id).toBe(topicId);
+
+	bot.calls = [];
+	await daemon.handleSessionMessage(activeSession, {
+		type: "control_command_result",
+		status: "ok",
+		sessionId: "S",
+		message: "Select a model.",
+		modelChoices: [{ selector: "provider/model", label: "Model" }],
+	});
+	expect(bot.calls.find(call => call.method === "sendMessage")!.body.message_thread_id).toBe(topicId);
+
+	const call = bot.call.bind(bot);
+	bot.call = async (method, body, options) => {
+		if (method === "deleteForumTopic") {
+			bot.calls.push({ method, body, options });
+			return { ok: false, description: "delete outcome unknown" };
+		}
+		return call(method, body, options);
+	};
+	await daemon.handleSessionMessage(activeSession, { type: "session_closed", sessionId: "S" });
+	expect(bot.calls.find(call => call.method === "deleteForumTopic")!.body.message_thread_id).toBe(topicId);
+
+	bot.calls = [];
+	daemon.connectSession("S", "ws://resumed", "replacement-token");
+	const resumedSession = daemon.sessions.get("S")!;
+	await daemon.handleSessionMessage(resumedSession, {
+		type: "control_command_result",
+		status: "ok",
+		sessionId: "S",
+		message: "Select a model.",
+		modelChoices: [{ selector: "provider/model", label: "Model" }],
+	});
+	await daemon.handleSessionMessage(resumedSession, {
+		type: "turn_stream",
+		sessionId: "S",
+		phase: "finalized",
+		text: "must not target the delete-pending topic",
+	});
+
+	expect(bot.calls.some(call => call.method === "createForumTopic")).toBe(false);
+	expect(bot.calls.some(call => call.method === "sendMessage")).toBe(false);
+});
+test("queued selected acknowledgement is rejected after its topic lease is fenced", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		WebSocketImpl: FakeWs as any,
+	});
+	daemon.connectSession("S", "ws://s", "token");
+	const session = daemon.sessions.get("S")!;
+	await daemon.handleSessionMessage(session, {
+		type: "action_needed",
+		kind: "ask",
+		id: "ask",
+		question: "Proceed?",
+		options: ["yes"],
+	});
+	const topicId = bot.createdTopicThreadIds.at(-1)!;
+	const internals = daemon as unknown as {
+		flushPool(): Promise<void>;
+		topics: { beginDelete(sessionId: string): unknown };
+	};
+	const flushPool = internals.flushPool.bind(daemon);
+	internals.flushPool = async () => {};
+	bot.calls = [];
+	await daemon.handleSessionMessage(session, {
+		type: "ask_selected_ack_request",
+		mode: "live",
+		requestId: "ack",
+		commitKey: "commit",
+		actionId: "ask",
+		deadlineAt: Date.now() + 8_000,
+	});
+	internals.topics.beginDelete("S");
+	internals.flushPool = flushPool;
+	await flushPool();
+
+	expect(bot.calls.some(call => call.method === "sendMessage" && call.body.message_thread_id === topicId)).toBe(false);
+	expect(FakeWs.instances[0]!.sent.map(frame => JSON.parse(frame))).toContainEqual({
+		type: "ask_selected_ack_result",
+		requestId: "ack",
+		commitKey: "commit",
+		outcome: { status: "failed", reason: "route_missing" },
+	});
+});
+
+test("held threaded frame is rejected after its topic lease is fenced", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		WebSocketImpl: FakeWs as any,
+	});
+	daemon.connectSession("S", "ws://s", "token");
+	const session = daemon.sessions.get("S")!;
+	await daemon.handleSessionMessage(session, { type: "identity_header", sessionId: "S", repo: "r", branch: "b" });
+	const topicId = bot.createdTopicThreadIds.at(-1)!;
+	const internals = daemon as unknown as {
+		flushPool(): Promise<void>;
+		topics: { beginDelete(sessionId: string): unknown };
+	};
+	const flushPool = internals.flushPool.bind(daemon);
+	internals.flushPool = async () => {};
+	bot.calls = [];
+	await daemon.handleSessionMessage(session, {
+		type: "turn_stream",
+		sessionId: "S",
+		phase: "finalized",
+		text: "held output",
+	});
+	internals.topics.beginDelete("S");
+	internals.flushPool = flushPool;
+	await flushPool();
+
+	expect(bot.calls.some(call => call.method === "sendMessage" && call.body.message_thread_id === topicId)).toBe(false);
+});
+test("held rich fallback cannot send to a fenced topic", async () => {
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(tempAgentDir()),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		rich: { enabled: true },
+	});
+	const session = { sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() };
+	await daemon.handleSessionMessage(session as never, {
+		type: "identity_header",
+		sessionId: "S",
+		repo: "r",
+		branch: "b",
+	});
+	const topicId = bot.createdTopicThreadIds.at(-1)!;
+	const richStarted = Promise.withResolvers<void>();
+	const releaseRich = Promise.withResolvers<void>();
+	const call = bot.call.bind(bot);
+	bot.call = async (method, body, options) => {
+		if (method === "sendRichMessage") {
+			bot.calls.push({ method, body, options });
+			richStarted.resolve();
+			await releaseRich.promise;
+			return { ok: false, description: "rich unavailable" };
+		}
+		return call(method, body, options);
+	};
+	bot.calls = [];
+	const delivery = daemon.handleSessionMessage(session as never, {
+		type: "turn_stream",
+		sessionId: "S",
+		phase: "finalized",
+		finalAnswer: true,
+		text: "# held rich fallback",
+	});
+	await richStarted.promise;
+	(daemon as unknown as { topics: { beginDelete(sessionId: string): unknown } }).topics.beginDelete("S");
+	releaseRich.resolve();
+	await delivery;
+	expect(bot.calls.some(call => call.method === "sendMessage" && call.body.message_thread_id === topicId)).toBe(false);
+});
+
+test("held edit fallback cannot send to a fenced topic", async () => {
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(tempAgentDir()),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+	});
+	const session = { sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() };
+	await daemon.handleSessionMessage(session as never, {
+		type: "identity_header",
+		sessionId: "S",
+		repo: "r",
+		branch: "b",
+	});
+	await daemon.handleSessionMessage(session as never, {
+		type: "turn_stream",
+		sessionId: "S",
+		phase: "live",
+		text: "live",
+		messageRef: "held-edit",
+	});
+	const topicId = bot.createdTopicThreadIds.at(-1)!;
+	const editStarted = Promise.withResolvers<void>();
+	const releaseEdit = Promise.withResolvers<void>();
+	const call = bot.call.bind(bot);
+	bot.call = async (method, body, options) => {
+		if (method === "editMessageText") {
+			bot.calls.push({ method, body, options });
+			editStarted.resolve();
+			await releaseEdit.promise;
+			throw new Error("edit rejected");
+		}
+		return call(method, body, options);
+	};
+	bot.calls = [];
+	const delivery = daemon.handleSessionMessage(session as never, {
+		type: "turn_stream",
+		sessionId: "S",
+		phase: "finalized",
+		finalAnswer: true,
+		text: "final",
+		messageRef: "held-edit",
+	});
+	await editStarted.promise;
+	(daemon as unknown as { topics: { beginDelete(sessionId: string): unknown } }).topics.beginDelete("S");
+	releaseEdit.resolve();
+	await delivery;
+	expect(bot.calls.some(call => call.method === "sendMessage" && call.body.message_thread_id === topicId)).toBe(false);
+});
+test("held draft delivery cannot continue to a fenced topic", async () => {
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(tempAgentDir()),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		rich: { enabled: true },
+		richDraft: { enabled: true },
+	});
+	const session = { sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() };
+	await daemon.handleSessionMessage(session as never, {
+		type: "identity_header",
+		sessionId: "S",
+		repo: "r",
+		branch: "b",
+	});
+	const topicId = bot.createdTopicThreadIds.at(-1)!;
+	const draftStarted = Promise.withResolvers<void>();
+	const releaseDraft = Promise.withResolvers<void>();
+	const call = bot.call.bind(bot);
+	bot.call = async (method, body, options) => {
+		if (method === "sendRichMessageDraft") {
+			bot.calls.push({ method, body, options });
+			draftStarted.resolve();
+			await releaseDraft.promise;
+			return { ok: true, result: true };
+		}
+		return call(method, body, options);
+	};
+	bot.calls = [];
+	const delivery = daemon.handleSessionMessage(session as never, {
+		type: "turn_stream",
+		sessionId: "S",
+		phase: "live",
+		text: "held draft",
+	});
+	await draftStarted.promise;
+	(daemon as unknown as { topics: { beginDelete(sessionId: string): unknown } }).topics.beginDelete("S");
+	releaseDraft.resolve();
+	await delivery;
+	expect(bot.calls.some(call => call.method === "sendMessage" && call.body.message_thread_id === topicId)).toBe(false);
+});
+
+test("held topic-name reconciliation cannot edit a fenced topic", async () => {
+	const writeStarted = Promise.withResolvers<void>();
+	const releaseWrite = Promise.withResolvers<void>();
+	let holdTopicWrite = false;
+	const fsImpl = topicStateFs(async () => {
+		if (!holdTopicWrite) return;
+		writeStarted.resolve();
+		await releaseWrite.promise;
+	});
+	const { bot, daemon, threadId } = await identityTopicHarness({ fs: fsImpl });
+	bot.calls = [];
+	holdTopicWrite = true;
+	const update = daemon.handleTelegramUpdate(forumTopicEditedUpdate(1, threadId, "held name"));
+	await writeStarted.promise;
+	(daemon as unknown as { topics: { beginDelete(sessionId: string): unknown } }).topics.beginDelete("S");
+	releaseWrite.resolve();
+	await update;
+	expect(bot.calls.some(call => call.method === "editForumTopic" && call.body.message_thread_id === threadId)).toBe(
+		false,
+	);
+});
+
+test("delete-pending identity owners are not selected for forwarding", async () => {
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+	});
+	const owner = { sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() };
+	await daemon.handleSessionMessage(owner as any, {
+		type: "identity_header",
+		sessionId: "S",
+		repo: "r",
+		branch: "b",
+	});
+	const internals = daemon as unknown as {
+		topics: { beginDelete(sessionId: string): unknown };
+		topicOwnerForIdentity(msg: { repo: string; branch: string }): string | undefined;
+	};
+	internals.topics.beginDelete("S");
+
+	expect(internals.topicOwnerForIdentity({ repo: "r", branch: "b" })).toBeUndefined();
+});
+
+test("active action controls still target their active topic", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		WebSocketImpl: FakeWs as any,
+		rich: { enabled: false },
+	});
+	daemon.connectSession("S", "ws://s", "token");
+	await daemon.handleSessionMessage(daemon.sessions.get("S")!, {
+		type: "action_needed",
+		kind: "ask",
+		id: "ask",
+		question: "Continue?",
+		options: ["yes"],
+		controls: [{ id: "navigation_forward", kind: "navigation", label: "Next", enabled: true }],
+	});
+	const sent = bot.calls.find(call => call.method === "sendMessage")!;
+
+	expect(sent.body.message_thread_id).toBe(bot.createdTopicThreadIds.at(-1));
+	expect(sent.body.reply_markup.inline_keyboard.flat().map((button: { text: string }) => button.text)).toContain(
+		"Next",
+	);
+});
 
 test("session_closed clears reply message routes for the closed session", async () => {
 	FakeWs.instances = [];

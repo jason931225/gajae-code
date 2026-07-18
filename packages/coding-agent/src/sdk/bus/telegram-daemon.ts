@@ -1380,6 +1380,12 @@ interface RenderedModelChoice {
 	label: string;
 }
 
+interface TopicAuthorityLease {
+	sessionId: string;
+	topicId: string;
+	authorityEpoch: number;
+}
+
 interface PendingThreadedFrame {
 	send: ThreadedSend;
 	msg: Record<string, unknown>;
@@ -1413,7 +1419,7 @@ interface SelectedAckQueueItem {
 
 interface TelegramQueuePayload {
 	send: ThreadedSend;
-	topicId?: string;
+	topicLease?: TopicAuthorityLease;
 	selectedAck?: SelectedAckQueueItem;
 	btwDelivery?: BtwQueuedDelivery;
 }
@@ -1974,7 +1980,7 @@ export class TelegramNotificationDaemon {
 			clearIntervalImpl: opts.clearIntervalImpl,
 		});
 		this.sessionRouter = this.createSessionRouter();
-		this.pool = new RateLimitPool<{ send: ThreadedSend; topicId?: string }>({ now: opts.now });
+		this.pool = new RateLimitPool<TelegramQueuePayload>({ now: opts.now });
 		this.poller = new TelegramUpdatePoller({
 			botApi: this.botApi,
 			runtime: this.runtime,
@@ -2030,8 +2036,11 @@ export class TelegramNotificationDaemon {
 						finishImmediately({ status: "failed", reason: "route_missing" });
 						return;
 					}
-					const topicId = this.topics.get(session.sessionId)?.topicId;
-					if (mode === "recovery" && (!topicId || msg.sessionId !== session.sessionId)) {
+					const topicLease = this.topicAuthorityLeaseFromRegistry(session.sessionId);
+					if (
+						this.topics.get(session.sessionId)?.authorityState === "delete_pending" ||
+						(mode === "recovery" && (!topicLease || msg.sessionId !== session.sessionId))
+					) {
 						finishImmediately({ status: "failed", reason: "route_missing" });
 						return;
 					}
@@ -2067,7 +2076,7 @@ export class TelegramNotificationDaemon {
 						deadlineAt,
 						payload: {
 							send: { method: "sendMessage", lane: "ask", text: "Selected!" },
-							topicId,
+							topicLease,
 							selectedAck: item,
 						},
 					});
@@ -2670,7 +2679,6 @@ export class TelegramNotificationDaemon {
 				itemId,
 				payload: {
 					send: { method: "sendMessage", lane: "finalized", text: String(input.body.text ?? "") },
-					topicId: input.pending.threadId,
 					btwDelivery: delivery,
 				},
 			});
@@ -2878,11 +2886,13 @@ export class TelegramNotificationDaemon {
 	private topicOwnerForIdentity(msg: { repo?: unknown; branch?: unknown }): string | undefined {
 		const identityKey = this.topicIdentityKey(msg);
 		const remembered = identityKey ? this.topicOwnerByIdentity.get(identityKey) : undefined;
-		if (remembered && this.topics.get(remembered)) return remembered;
+		const rememberedTopic = remembered ? this.topics.get(remembered) : undefined;
+		if (remembered && rememberedTopic && rememberedTopic.authorityState !== "delete_pending") return remembered;
 		if (!identityKey) return undefined;
 		const base = this.topicIdentityBase(msg);
 		for (const sessionId of this.topics.sessionIds()) {
 			const topic = this.topics.get(sessionId);
+			if (topic?.authorityState === "delete_pending") continue;
 			const nameMatchesLegacyIdentity =
 				base !== undefined && (topic?.name === base || topic?.name?.startsWith(`${base} - `));
 			if (topic?.identityKey === identityKey || nameMatchesLegacyIdentity) {
@@ -2900,30 +2910,55 @@ export class TelegramNotificationDaemon {
 		return !ownerId || ownerId === session.sessionId;
 	}
 
-	private async submitThreadedFrame(sessionId: string, send: ThreadedSend, topicId: string): Promise<void> {
+	private async submitThreadedFrame(
+		sessionId: string,
+		send: ThreadedSend,
+		topicLease: TopicAuthorityLease,
+	): Promise<void> {
 		this.submitPool({
 			sessionId,
 			lane: send.lane,
 			coalesceKey: send.coalesceKey,
-			payload: { send, topicId },
+			payload: { send, topicLease },
 		});
 		await this.flushPool();
 	}
 
 	private async existingTopicForPrivateChat(sessionId: string): Promise<string | undefined> {
+		return (await this.topicAuthorityLease(sessionId))?.topicId;
+	}
+
+	private async topicAuthorityLease(sessionId: string): Promise<TopicAuthorityLease | undefined> {
 		if (!(await this.pairedChatIsPrivate())) return undefined;
-		return this.topics.get(sessionId)?.topicId;
+		return this.topicAuthorityLeaseFromRegistry(sessionId);
+	}
+
+	private topicAuthorityLeaseFromRegistry(sessionId: string): TopicAuthorityLease | undefined {
+		const topic = this.topics.get(sessionId);
+		if (!topic || topic.authorityState === "delete_pending") return undefined;
+		return { sessionId, topicId: topic.topicId, authorityEpoch: topic.authorityEpoch ?? 0 };
+	}
+
+	private topicLeaseIsCurrent(lease: TopicAuthorityLease): boolean {
+		const topic = this.topics.get(lease.sessionId);
+		return (
+			topic?.authorityState !== "delete_pending" &&
+			topic?.topicId === lease.topicId &&
+			(topic.authorityEpoch ?? 0) === lease.authorityEpoch
+		);
 	}
 
 	/** Best-effort re-assertion for a durable user-owned topic name. */
-	private async reconcileUserTopicName(sessionId: string, topicId: string): Promise<void> {
+	private async reconcileUserTopicName(topicLease: TopicAuthorityLease): Promise<void> {
+		const { sessionId } = topicLease;
 		if ((this.daemonRenameAttempts.get(sessionId) ?? 0) > 0) return;
 		let userName = this.topics.userNameToReconcile(sessionId);
 		while (userName) {
 			try {
+				if (!this.topicLeaseIsCurrent(topicLease)) return;
 				const response = await this.botApi.call("editForumTopic", {
 					chat_id: this.opts.chatId,
-					message_thread_id: Number(topicId),
+					message_thread_id: Number(topicLease.topicId),
 					name: userName,
 				});
 				if (!topicRenameApplied(response)) return;
@@ -2953,11 +2988,11 @@ export class TelegramNotificationDaemon {
 		this.pendingThreadedFrames.set(sessionId, frames);
 	}
 
-	private async flushPendingThreadedFrames(sessionId: string, topicId: string): Promise<void> {
+	private async flushPendingThreadedFrames(sessionId: string, topicLease: TopicAuthorityLease): Promise<void> {
 		const frames = this.pendingThreadedFrames.get(sessionId);
 		if (!frames || frames.length === 0) return;
 		this.pendingThreadedFrames.delete(sessionId);
-		for (const frame of frames) await this.submitThreadedFrame(sessionId, frame.send, topicId);
+		for (const frame of frames) await this.submitThreadedFrame(sessionId, frame.send, topicLease);
 	}
 
 	/**
@@ -3251,11 +3286,12 @@ export class TelegramNotificationDaemon {
 			}
 			const selectedAck = item.payload.selectedAck;
 			if (selectedAck) {
-				const { topicId } = item.payload;
+				const { topicLease } = item.payload;
 				selectedAck.state = "dispatching";
 				const controller = new AbortController();
 				selectedAck.controller = controller;
-				const routeAvailable = !topicId || (await this.pairedChatIsPrivate());
+				const routeAvailable =
+					(await this.pairedChatIsPrivate()) && (!topicLease || this.topicLeaseIsCurrent(topicLease));
 				if (this.selectedAckPending.get(selectedAck.pendingKey) !== selectedAck) {
 					this.pool.settle(item.itemId!, "removed");
 					continue;
@@ -3281,7 +3317,7 @@ export class TelegramNotificationDaemon {
 						"sendMessage",
 						{
 							chat_id: this.opts.chatId,
-							...(topicId ? { message_thread_id: Number(topicId) } : {}),
+							...(topicLease ? { message_thread_id: Number(topicLease.topicId) } : {}),
 							text: "Selected!",
 						},
 						{ signal: controller.signal, noRetry: true },
@@ -3301,8 +3337,17 @@ export class TelegramNotificationDaemon {
 				}
 				continue;
 			}
-			const { send, topicId } = item.payload;
+			const { send, topicLease } = item.payload;
+			if (topicLease && !this.topicLeaseIsCurrent(topicLease)) {
+				this.pool.settle(item.itemId!, "rejected");
+				continue;
+			}
+			const topicId = topicLease?.topicId;
 			if (topicId && !(await this.pairedChatIsPrivate())) {
+				this.pool.settle(item.itemId!, "rejected");
+				continue;
+			}
+			if (topicLease && !this.topicLeaseIsCurrent(topicLease)) {
 				this.pool.settle(item.itemId!, "rejected");
 				continue;
 			}
@@ -3314,7 +3359,7 @@ export class TelegramNotificationDaemon {
 				this.pool.settle(item.itemId!, "removed");
 				continue;
 			}
-			let disposition: "accepted" | "ambiguous" = "accepted";
+			let disposition: "accepted" | "ambiguous" | "rejected" = "accepted";
 			try {
 				// Draft streaming (opt-in, off by default): stream a live turn frame as a
 				// best-effort rich-draft preview, debounced to >=1.5s per session through
@@ -3342,6 +3387,10 @@ export class TelegramNotificationDaemon {
 							);
 						}
 					}
+				}
+				if (topicLease && !this.topicLeaseIsCurrent(topicLease)) {
+					disposition = "rejected";
+					continue;
 				}
 				if (send.method === "sendPhoto" && send.photoBase64) {
 					// Real photo upload (the default botApi multiparts base64 -> file).
@@ -3379,6 +3428,7 @@ export class TelegramNotificationDaemon {
 							// non-editable, HTML-only pool items (rich markers stripped) — same
 							// per-token discipline as the non-rich split path.
 							const chunks = splitTelegramHtml(send.text!);
+							if (topicLease && !this.topicLeaseIsCurrent(topicLease)) return;
 							await this.botApi.call("sendMessage", {
 								chat_id: this.opts.chatId,
 								...threadField,
@@ -3402,7 +3452,7 @@ export class TelegramNotificationDaemon {
 											richDraftMarkdown: undefined,
 											richClass: undefined,
 										},
-										topicId,
+										topicLease,
 									},
 								});
 							}
@@ -3449,7 +3499,7 @@ export class TelegramNotificationDaemon {
 							}
 							if (edited) {
 								firstMessageId = existingId;
-							} else {
+							} else if (!topicLease || this.topicLeaseIsCurrent(topicLease)) {
 								const res = (await this.botApi.call("sendMessage", {
 									chat_id: this.opts.chatId,
 									...threadField,
@@ -3493,7 +3543,7 @@ export class TelegramNotificationDaemon {
 											richDraftMarkdown: undefined,
 											richClass: undefined,
 										},
-										topicId,
+										topicLease,
 									},
 								});
 							}
@@ -3673,8 +3723,9 @@ export class TelegramNotificationDaemon {
 
 	/** Send a single `typing` chat action into a busy session's topic (best-effort). */
 	private async sendTyping(sessionId: string): Promise<void> {
-		const topicId = this.topics.get(sessionId)?.topicId;
-		if (!topicId || !(await this.pairedChatIsPrivate())) return;
+		const topicLease = await this.topicAuthorityLease(sessionId);
+		if (!topicLease || !this.topicLeaseIsCurrent(topicLease)) return;
+		const topicId = topicLease.topicId;
 		try {
 			await this.botApi.call("sendChatAction", {
 				chat_id: this.opts.chatId,
@@ -3738,7 +3789,8 @@ export class TelegramNotificationDaemon {
 		const topicId =
 			(await this.existingTopicForPrivateChat(session.sessionId)) ??
 			(await this.ensureTopic(session.sessionId, this.topicNameFor(session.sessionId, msg)));
-		if (!topicId) return false;
+		const topicLease = await this.topicAuthorityLease(session.sessionId);
+		if (!topicId || !topicLease || topicLease.topicId !== topicId) return false;
 
 		// Each logical session owns only its most recently rendered menu.
 		this.#clearModelChoiceAliases(logicalSessionId);
@@ -3749,6 +3801,7 @@ export class TelegramNotificationDaemon {
 			choices.map(choice => choice.label),
 			index => aliases[index]!,
 		);
+		if (!this.topicLeaseIsCurrent(topicLease)) return false;
 		try {
 			const response = await this.botApi.call("sendMessage", {
 				chat_id: this.opts.chatId,
@@ -4031,21 +4084,24 @@ export class TelegramNotificationDaemon {
 			const send = renderThreadedFrame(msg);
 			if (!send) return;
 			const existingTopic = await this.existingTopicForPrivateChat(session.sessionId);
+			if (this.topics.get(session.sessionId)?.authorityState === "delete_pending") return;
 			if (!send.identity && !existingTopic && !this.flatIdentitySent.has(session.sessionId)) {
 				this.rememberPendingThreadedFrame(session.sessionId, send, msg as Record<string, unknown>);
 				return;
 			}
 			if (send.identity && !this.sessionCanClaimIdentity(session, msg)) {
 				const ownerId = this.topicOwnerForIdentity(msg);
-				const ownerTopic = ownerId ? this.topics.get(ownerId) : undefined;
-				if (ownerId && ownerId !== session.sessionId && ownerTopic) {
-					await this.flushPendingThreadedFrames(session.sessionId, ownerTopic.topicId);
+				const ownerLease = ownerId ? await this.topicAuthorityLease(ownerId) : undefined;
+				if (ownerId && ownerId !== session.sessionId && ownerLease) {
+					await this.flushPendingThreadedFrames(session.sessionId, ownerLease);
 					return;
 				}
 			}
 			const topicId =
 				existingTopic ?? (await this.ensureTopic(session.sessionId, this.topicNameFor(session.sessionId, msg)));
-			if (!topicId) {
+			const topicLease = await this.topicAuthorityLease(session.sessionId);
+			if (!topicId || !topicLease || topicLease.topicId !== topicId) {
+				if (this.topics.get(session.sessionId)?.authorityState === "delete_pending") return;
 				await this.deliverFlatFallback(session.sessionId, send);
 				return;
 			}
@@ -4058,7 +4114,7 @@ export class TelegramNotificationDaemon {
 				// Explicit Telegram-side user renames own the topic title. Pending user
 				// reconciliation runs before daemon identity naming, so retries and daemon
 				// restarts cannot silently replace the preserved name.
-				await this.reconcileUserTopicName(session.sessionId, topicId);
+				await this.reconcileUserTopicName(topicLease);
 				const name = this.topicNameFor(session.sessionId, msg);
 				if (this.topics.needsRename(session.sessionId, name)) {
 					this.daemonRenameAttempts.set(
@@ -4066,6 +4122,7 @@ export class TelegramNotificationDaemon {
 						(this.daemonRenameAttempts.get(session.sessionId) ?? 0) + 1,
 					);
 					try {
+						if (!this.topicLeaseIsCurrent(topicLease)) return;
 						const response = await this.botApi.call("editForumTopic", {
 							chat_id: this.opts.chatId,
 							message_thread_id: Number(topicId),
@@ -4080,31 +4137,34 @@ export class TelegramNotificationDaemon {
 						if (remaining > 0) this.daemonRenameAttempts.set(session.sessionId, remaining);
 						else {
 							this.daemonRenameAttempts.delete(session.sessionId);
-							await this.reconcileUserTopicName(session.sessionId, topicId);
+							await this.reconcileUserTopicName(topicLease);
 						}
 					}
 				}
 				// Send the full bulleted identity header EXACTLY ONCE per topic.
 				if (this.topics.needsIdentity(session.sessionId)) {
-					await this.submitThreadedFrame(session.sessionId, send, topicId);
+					await this.submitThreadedFrame(session.sessionId, send, topicLease);
 					this.topics.markIdentitySent(session.sessionId);
 				}
-				await this.flushPendingThreadedFrames(session.sessionId, topicId);
+				await this.flushPendingThreadedFrames(session.sessionId, topicLease);
 				await this.persistTopics();
 				return;
 			}
-			await this.submitThreadedFrame(session.sessionId, send, topicId);
+			await this.submitThreadedFrame(session.sessionId, send, topicLease);
 			return;
 		}
 		if (msg.type === "action_needed" && msg.id) {
 			if (msg.kind === "ask") session.pending.set(msg.id, { sessionId: session.sessionId, actionId: msg.id });
+			if (this.topics.get(session.sessionId)?.authorityState === "delete_pending") return;
 			const topicId = await this.ensureTopic(session.sessionId, this.topicNameFor(session.sessionId, msg));
+			const topicLease = topicId ? this.topicAuthorityLeaseFromRegistry(session.sessionId) : undefined;
+			if (topicId && (!topicLease || topicLease.topicId !== topicId)) return;
 			if (!topicId) {
 				// Fail closed for non-private chats; only nudge + flat-deliver in a private DM.
 				if (!(await this.pairedChatIsPrivate())) return;
 				await this.notifyThreadedFallback();
 			}
-			const threadField = topicId ? { message_thread_id: Number(topicId) } : {};
+			const threadField = topicLease ? { message_thread_id: Number(topicLease.topicId) } : {};
 			const controls: Array<{
 				id: "navigation_forward";
 				kind: "navigation";
@@ -4159,6 +4219,7 @@ export class TelegramNotificationDaemon {
 				const chunks = splitTelegramHtml(rendered.text);
 				let result: { result?: { message_id?: number } } = {};
 				for (let i = 0; i < chunks.length; i++) {
+					if (topicLease && !this.topicLeaseIsCurrent(topicLease)) return undefined;
 					result = (await this.botApi.call("sendMessage", {
 						chat_id: this.opts.chatId,
 						...threadField,
@@ -4174,6 +4235,7 @@ export class TelegramNotificationDaemon {
 				// Rich (default on): promote to sendRichMessage with a top-level
 				// reply_markup (probe-confirmed). Any miss falls back to the HTML loop.
 
+				if (topicLease && !this.topicLeaseIsCurrent(topicLease)) return;
 				const outcome = await deliverRichActionWithFallback(
 					this.botApi,
 					{ chat_id: this.opts.chatId, ...threadField },
@@ -4354,7 +4416,8 @@ export class TelegramNotificationDaemon {
 			} catch {
 				return "retry";
 			}
-			await this.reconcileUserTopicName(sessionId, String(threadId));
+			const topicLease = this.topicAuthorityLeaseFromRegistry(sessionId);
+			if (topicLease) await this.reconcileUserTopicName(topicLease);
 			await this.rememberSeenUpdateId(updateId);
 			return "consumed";
 		}
@@ -4363,7 +4426,8 @@ export class TelegramNotificationDaemon {
 		} catch {
 			return "retry";
 		}
-		await this.reconcileUserTopicName(sessionId, String(threadId));
+		const topicLease = this.topicAuthorityLeaseFromRegistry(sessionId);
+		if (topicLease) await this.reconcileUserTopicName(topicLease);
 		await this.rememberSeenUpdateId(updateId);
 		return "consumed";
 	}

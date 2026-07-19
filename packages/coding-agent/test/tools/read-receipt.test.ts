@@ -20,9 +20,13 @@ const realNatives = await import("@gajae-code/natives");
 mock.module("@gajae-code/coding-agent/utils/markit", () => ({
 	...realMarkit,
 	convertFileWithMarkit: async (...args: unknown[]) =>
-		markitContent ? { ok: true, content: markitContent } : (realMarkit.convertFileWithMarkit as (...a: unknown[]) => unknown)(...args),
+		markitContent
+			? { ok: true, content: markitContent }
+			: (realMarkit.convertFileWithMarkit as (...a: unknown[]) => unknown)(...args),
 	convertBufferWithMarkit: async (...args: unknown[]) =>
-		markitContent ? { ok: true, content: markitContent } : (realMarkit.convertBufferWithMarkit as (...a: unknown[]) => unknown)(...args),
+		markitContent
+			? { ok: true, content: markitContent }
+			: (realMarkit.convertBufferWithMarkit as (...a: unknown[]) => unknown)(...args),
 }));
 mock.module("@gajae-code/natives", () => ({
 	...realNatives,
@@ -65,7 +69,10 @@ function createContext(settings: Settings): AgentToolContext {
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
-	return result.content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
+	return result.content
+		.filter(block => block.type === "text")
+		.map(block => block.text ?? "")
+		.join("\n");
 }
 
 function bodyOf(result: { details?: { displayContent?: { text: string } } }): string {
@@ -77,7 +84,7 @@ function receiptSettings(extra: Record<string, unknown> = {}): Settings {
 		"tools.maxInlineResultBytes": 0,
 		"tools.readArtifactSpillThreshold": 1,
 		"read.summarize.enabled": false,
-		"readHashLines": false,
+		readHashLines: false,
 		...extra,
 	});
 }
@@ -178,11 +185,13 @@ describe("read receipt by default", () => {
 	it("caps structural summaries by units and retains both recovery footers once", async () => {
 		const file = path.join(testDir, "summary.ts");
 		fs.writeFileSync(file, "export const placeholder = true;\n");
-		const kept = Array.from({ length: 100 }, (_, i) => ({ kind: "code", startLine: i + 1, endLine: i + 1, text: `const line${i} = \"${"x".repeat(300)}\";` }));
-		summarySegments = [
-			{ kind: "elided", startLine: 101, endLine: 110 },
-			...kept,
-		];
+		const kept = Array.from({ length: 100 }, (_, i) => ({
+			kind: "code",
+			startLine: i + 1,
+			endLine: i + 1,
+			text: `const line${i} = "${"x".repeat(300)}";`,
+		}));
+		summarySegments = [{ kind: "elided", startLine: 101, endLine: 110 }, ...kept];
 
 		const result = await read(file, receiptSettings({ "read.summarize.enabled": true }));
 		const text = textOf(result);
@@ -254,13 +263,10 @@ describe("read receipt by default", () => {
 		const settings = receiptSettings({ "tools.readArtifactSpillThreshold": 256 });
 		const sessionManager = SessionManager.create(testDir, path.join(testDir, "sessions"));
 		const tool = wrapToolWithMetaNotice(new ReadTool(createSession(testDir)));
-		const result = await tool.execute(
-			"read-receipt",
-			{ path: `${file}:raw` },
-			undefined,
-			undefined,
-			{ ...createContext(settings), sessionManager },
-		);
+		const result = await tool.execute("read-receipt", { path: `${file}:raw` }, undefined, undefined, {
+			...createContext(settings),
+			sessionManager,
+		});
 		const artifactId = result.details?.meta?.truncation?.artifactId;
 		expect(artifactId).toBeDefined();
 		const artifactPath = await sessionManager.getArtifactPath(artifactId ?? "");

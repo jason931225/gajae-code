@@ -906,11 +906,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const truncation = ignoreResultLimits
 			? noTruncResult(selectedContent)
 			: truncateHead(
-				selectedContent,
-				options.resultByteCeiling === undefined
-					? undefined
-					: { maxBytes: options.resultByteCeiling, maxLines: Number.MAX_SAFE_INTEGER },
-			);
+					selectedContent,
+					options.resultByteCeiling === undefined
+						? undefined
+						: { maxBytes: options.resultByteCeiling, maxLines: Number.MAX_SAFE_INTEGER },
+				);
 
 		const shouldAddHashLines = displayMode.hashLines;
 		const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
@@ -1417,7 +1417,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		elidedLines: number;
 		capped: boolean;
 	} {
-
 		const displayMode = resolveFileDisplayMode(this.session);
 		const shouldAddHashLines = displayMode.hashLines;
 		const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
@@ -1489,7 +1488,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				model = display = "...";
 				implicitElidedLines = unit.endLine - unit.startLine + 1;
 			} else if (unit.kind === "merged") {
-				const formatted = formatMergedBraceLine(unit.startLine, unit.endLine, unit.headText, unit.tailText, shouldAddHashLines, shouldAddLineNumbers);
+				const formatted = formatMergedBraceLine(
+					unit.startLine,
+					unit.endLine,
+					unit.headText,
+					unit.tailText,
+					shouldAddHashLines,
+					shouldAddLineNumbers,
+				);
 				model = formatted.model;
 				display = formatted.display;
 				implicitElidedLines = Math.max(0, unit.endLine - unit.startLine - 1);
@@ -1516,8 +1522,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			modelParts.push("…");
 			displayParts.push("…");
 		}
-		return { text: modelParts.join("\n"), displayText: displayParts.join("\n"), elidedSpans, elidedLines, capped: capDropped };
-
+		return {
+			text: modelParts.join("\n"),
+			displayText: displayParts.join("\n"),
+			elidedSpans,
+			elidedLines,
+			capped: capDropped,
+		};
 	}
 
 	async execute(
@@ -1698,32 +1709,44 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const notebookText = await readEditableNotebookText(absolutePath, localReadPath);
 			if (isMultiRange(parsed) && parsed.kind === "lines") {
 				return this.#buildInMemoryMultiRangeResult(notebookText, parsed.ranges, {
-					details: { resolvedPath: absolutePath }, sourcePath: absolutePath, entityLabel: "notebook",
+					details: { resolvedPath: absolutePath },
+					sourcePath: absolutePath,
+					entityLabel: "notebook",
 				});
 			}
 			const { offset, limit } = selToOffsetLimit(parsed);
 			return this.#buildInMemoryTextResult(notebookText, offset, limit, {
-				details: { resolvedPath: absolutePath }, sourcePath: absolutePath, entityLabel: "notebook",
+				details: { resolvedPath: absolutePath },
+				sourcePath: absolutePath,
+				entityLabel: "notebook",
 				spillEligible: parsed.kind !== "none",
 				resultByteCeiling:
 					parsed.kind !== "none"
-						? Math.max(RAW_COLLECTOR_MAX_BYTES, this.session.settings.get("tools.readArtifactSpillThreshold") * 1024)
+						? Math.max(
+								RAW_COLLECTOR_MAX_BYTES,
+								this.session.settings.get("tools.readArtifactSpillThreshold") * 1024,
+							)
 						: undefined,
 				receiptPath: parsed.kind === "none" ? localReadPath : undefined,
-
 			});
 		} else if (shouldConvertWithMarkit) {
 			const result = await convertFileWithMarkit(absolutePath, signal);
 			if (result.ok) {
 				const { offset, limit } = selToOffsetLimit(parsed);
 				return this.#buildInMemoryTextResult(result.content, offset, limit, {
-					details: { resolvedPath: absolutePath }, sourcePath: absolutePath, entityLabel: "converted document", raw: isRawSelector(parsed),
-				spillEligible: parsed.kind !== "none",
-				resultByteCeiling:
-					parsed.kind !== "none"
-						? Math.max(RAW_COLLECTOR_MAX_BYTES, this.session.settings.get("tools.readArtifactSpillThreshold") * 1024)
-						: undefined,
-				receiptPath: parsed.kind === "none" ? localReadPath : undefined,
+					details: { resolvedPath: absolutePath },
+					sourcePath: absolutePath,
+					entityLabel: "converted document",
+					raw: isRawSelector(parsed),
+					spillEligible: parsed.kind !== "none",
+					resultByteCeiling:
+						parsed.kind !== "none"
+							? Math.max(
+									RAW_COLLECTOR_MAX_BYTES,
+									this.session.settings.get("tools.readArtifactSpillThreshold") * 1024,
+								)
+							: undefined,
+					receiptPath: parsed.kind === "none" ? localReadPath : undefined,
 				});
 			}
 			content = [{ type: "text", text: `[Cannot read ${ext} file: ${result.error || "conversion failed"}]` }];
@@ -1747,7 +1770,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						renderedSummary.text,
 						footer,
 						renderedSummary.capped
-							? formatSummaryCapFooter(localReadPath, this.session.settings.get("read.summaryMaxBytes") * 1024, summaryTotalLines)
+							? formatSummaryCapFooter(
+									localReadPath,
+									this.session.settings.get("read.summaryMaxBytes") * 1024,
+									summaryTotalLines,
+								)
 							: "",
 					]
 						.filter(Boolean)
@@ -1823,7 +1850,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const isBareReceipt = parsed.kind === "none" && !content;
 					const rawSelector = isRawSelector(parsed);
 					const DEFAULT_LIMIT = this.#defaultLimit;
-					const effectiveLimit = rawSelector ? Number.MAX_SAFE_INTEGER : limit ?? DEFAULT_LIMIT;
+					const effectiveLimit = rawSelector ? Number.MAX_SAFE_INTEGER : (limit ?? DEFAULT_LIMIT);
 					const receiptBudgetBytes = this.session.settings.get("read.receiptBudgetBytes") * 1024;
 					const maxLinesToCollect = rawSelector
 						? Number.MAX_SAFE_INTEGER
@@ -1832,7 +1859,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							: Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
 					const selectedLineLimit = rawSelector ? null : effectiveLimit + leadingContext + trailingContext;
 					const maxBytesForRead = rawSelector
-						? Math.max(RAW_COLLECTOR_MAX_BYTES, this.session.settings.get("tools.readArtifactSpillThreshold") * 1024)
+						? Math.max(
+								RAW_COLLECTOR_MAX_BYTES,
+								this.session.settings.get("tools.readArtifactSpillThreshold") * 1024,
+							)
 						: isBareReceipt
 							? receiptBudgetBytes
 							: Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);

@@ -795,7 +795,11 @@ function sanitizeText(text: string, width: number): string {
 }
 
 function previewByteCap(width: number): number {
-	return width === FULL_PREVIEW_WIDTH ? FULL_PREVIEW_BYTES : width === PREVIEW_WIDTH ? PREVIEW_BYTES : RECEIPT_PREVIEW_BYTES;
+	return width === FULL_PREVIEW_WIDTH
+		? FULL_PREVIEW_BYTES
+		: width === PREVIEW_WIDTH
+			? PREVIEW_BYTES
+			: RECEIPT_PREVIEW_BYTES;
 }
 
 export function capCodePointsAndBytes(text: string, maxCodePoints: number, maxBytes: number): string {
@@ -818,7 +822,6 @@ export function capCodePointsAndBytes(text: string, maxCodePoints: number, maxBy
 	}
 	return `${preview}${ellipsis}`;
 }
-
 
 function previewJobOutput(
 	job: AsyncJob,

@@ -605,10 +605,7 @@ async function spillLargeResultToArtifact(
 	toolName: string,
 	context: AgentToolContext | undefined,
 ): Promise<AgentToolResult> {
-	if (
-		toolName === "read" &&
-		(result.details as { spillEligible?: boolean } | undefined)?.spillEligible !== true
-	) {
+	if (toolName === "read" && (result.details as { spillEligible?: boolean } | undefined)?.spillEligible !== true) {
 		return result;
 	}
 

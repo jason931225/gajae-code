@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Malformed selectors on internal read URLs now fail explicitly instead of silently falling back to an unbounded resource read.
+
 ## [0.11.3] - 2026-07-19
 ### Added
 - Bracketed pastes containing complete lists of saved static-image paths can now attach up to 16 images in source order after explicit confirmation. Paste transactions are cancellation-safe, disabled in command modes, enforce source, encoded-output, dimension, and decoded-memory budgets before commit, reject animated, remote, linked, or path-swapped sources, and restore the literal paste on cancellation or failure.

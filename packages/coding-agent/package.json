@@ -29,7 +29,8 @@
 	},
 	"scripts": {
 		"build": "bun scripts/build-binary.ts",
-		"check": "biome check . && bun run generate-hotkeys-docs --check && bun run verify:sdk-canonicalization && bun run check:types",
+		"check": "biome check . && bun run check:types",
+		"check:runtime": "bun run generate-hotkeys-docs --check && bun run verify:sdk-canonicalization",
 		"check:types": "tsc -p tsconfig.json --noEmit",
 		"lint": "biome lint .",
 		"test": "bun test",

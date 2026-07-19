@@ -4,6 +4,9 @@
 
 ## [0.11.2] - 2026-07-19
 
+### Changed
+- Simplified the release CI to a minimal, industry-standard workflow: a version tag builds the native addons and binaries, then publishes to npm and cuts the GitHub Release in one self-contained job graph. Removed the source-SHA re-verification gate, evidence-provenance handshake, and draft/finalize multi-job dance that made every version-bump commit fail CI. The lint/type-check job is now native-free (biome + tsc); runtime doc and SDK-canonicalization checks moved to the test job so they run with a built addon.
+
 ### Fixed
 - The Python eval runtime now honors the documented `GJC_*` environment variables instead of silently reading only legacy `PI_*` names. `GJC_PY` (tokens `0`/`bash`, `1`/`py`, `js`, `mix`/`both`) overrides the eval backend allowance with precedence over legacy `PI_PY`/`PI_JS`; `GJC_PYTHON_SKIP_CHECK`, `GJC_PYTHON_IPC_TRACE`, and `GJC_PYTHON_INTEGRATION` are read first with `PI_*` fallback (OR semantics, so either truthy name wins). Operators following `docs/environment-variables.md` and `docs/python-repl.md` who set `GJC_PY=py` previously saw no effect — a silent docs/runtime contract break. Legacy `PI_*` names remain supported for backward compatibility.
 

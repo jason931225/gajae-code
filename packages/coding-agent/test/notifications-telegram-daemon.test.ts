@@ -8920,6 +8920,134 @@ describe("Telegram tool activity capability and routing", () => {
 		expect(bot.calls.filter(call => call.method === "sendMessage")).toHaveLength(1);
 		expect(liveMessages.has("S:tool:A")).toBe(true);
 	});
+	test("delivers a tool start queued before identity without changing its policy epoch", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const bot = new FakeBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: setPrivateAgentDir(settings(agentDir), agentDir),
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			WebSocketImpl: FakeWs as any,
+			toolActivity: { enabled: true },
+		});
+		daemon.connectSession("S", "ws://s", "token");
+		const session = daemon.sessions.get("S")!;
+
+		await daemon.handleSessionMessage(session, {
+			type: "tool_activity",
+			sessionId: "S",
+			toolCallId: "before-identity",
+			toolName: "read",
+			phase: "started",
+		});
+		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(false);
+
+		await daemon.handleSessionMessage(session, {
+			type: "identity_header",
+			sessionId: "S",
+			repo: "repo",
+			branch: "branch",
+		});
+		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(true);
+	});
+
+	test("drops a queued tool start when endpoint authority changes during topic creation", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const bot = new FakeBotApi();
+		const topicStarted = Promise.withResolvers<void>();
+		const releaseTopic = Promise.withResolvers<void>();
+		const originalCall = bot.call.bind(bot);
+		bot.call = async (method, body, options) => {
+			if (method === "createForumTopic") {
+				topicStarted.resolve();
+				await releaseTopic.promise;
+			}
+			return await originalCall(method, body, options);
+		};
+		const daemon = new TelegramNotificationDaemon({
+			settings: setPrivateAgentDir(settings(agentDir), agentDir),
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			WebSocketImpl: FakeWs as any,
+			toolActivity: { enabled: true },
+		});
+		daemon.connectSession("S", "ws://old", "old-token");
+		const oldSession = daemon.sessions.get("S")!;
+		await daemon.handleSessionMessage(oldSession, {
+			type: "tool_activity",
+			sessionId: "S",
+			toolCallId: "old-authority",
+			toolName: "read",
+			phase: "started",
+		});
+		const identity = daemon.handleSessionMessage(oldSession, {
+			type: "identity_header",
+			sessionId: "S",
+			repo: "repo",
+			branch: "branch",
+		});
+		await topicStarted.promise;
+		daemon.connectSession("S", "ws://new", "new-token");
+		releaseTopic.resolve();
+		await identity;
+		await (daemon as unknown as { toolTerminalizationChain: Promise<void> }).toolTerminalizationChain;
+
+		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(false);
+	});
+	test("drops a queued tool start after close and same-authority reconnect during topic creation", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const bot = new FakeBotApi();
+		const topicStarted = Promise.withResolvers<void>();
+		const releaseTopic = Promise.withResolvers<void>();
+		const originalCall = bot.call.bind(bot);
+		bot.call = async (method, body, options) => {
+			if (method === "createForumTopic") {
+				topicStarted.resolve();
+				await releaseTopic.promise;
+			}
+			return await originalCall(method, body, options);
+		};
+		const daemon = new TelegramNotificationDaemon({
+			settings: setPrivateAgentDir(settings(agentDir), agentDir),
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			WebSocketImpl: FakeWs as any,
+			toolActivity: { enabled: true },
+		});
+		daemon.connectSession("S", "ws://old", "old-token");
+		const oldSession = daemon.sessions.get("S")!;
+		await daemon.handleSessionMessage(oldSession, {
+			type: "tool_activity",
+			sessionId: "S",
+			toolCallId: "closed-authority",
+			toolName: "read",
+			phase: "started",
+		});
+		const identity = daemon.handleSessionMessage(oldSession, {
+			type: "identity_header",
+			sessionId: "S",
+			repo: "repo",
+			branch: "branch",
+		});
+		await topicStarted.promise;
+		oldSession.ws.close();
+		daemon.connectSession("S", "ws://old", "old-token");
+		releaseTopic.resolve();
+		await identity;
+		await (daemon as unknown as { toolTerminalizationChain: Promise<void> }).toolTerminalizationChain;
+
+		expect(daemon.sessions.get("S")).not.toBe(oldSession);
+		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(false);
+	});
 	test("settings-driven daemon replacement terminalizes visible tools before disabled successor starts", async () => {
 		FakeWs.instances = [];
 		const agentDir = tempAgentDir();
@@ -9178,6 +9306,13 @@ describe("Telegram tool activity capability and routing", () => {
 			repo: "repo",
 			branch: "branch",
 		});
+		await daemon.handleSessionMessage(session, {
+			type: "tool_activity",
+			sessionId: "S",
+			toolCallId: "known-visible",
+			toolName: "subagent",
+			phase: "started",
+		});
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const originalCall = bot.call.bind(bot);
@@ -9204,8 +9339,171 @@ describe("Telegram tool activity capability and routing", () => {
 		await expect((daemon as unknown as { toolShutdownBarrier: Promise<void> }).toolShutdownBarrier).rejects.toThrow(
 			"ambiguous",
 		);
+		expect(
+			bot.calls.some(
+				call => call.method === "editMessageText" && String(call.body.text).includes("subagent — unknown"),
+			),
+		).toBe(true);
 	});
 
+	test("strict shutdown sees a delayed best-effort cleanup failure", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const bot = new FakeBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: setPrivateAgentDir(settings(agentDir), agentDir),
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			WebSocketImpl: FakeWs as any,
+			toolActivity: { enabled: true },
+		});
+		daemon.connectSession("S", "ws://old", "old-token");
+		const oldSession = daemon.sessions.get("S")!;
+		await daemon.handleSessionMessage(oldSession, {
+			type: "identity_header",
+			sessionId: "S",
+			repo: "repo",
+			branch: "branch",
+		});
+		await daemon.handleSessionMessage(oldSession, {
+			type: "tool_activity",
+			sessionId: "S",
+			toolCallId: "overlapping-cleanup",
+			toolName: "read",
+			phase: "started",
+		});
+
+		const firstEditStarted = Promise.withResolvers<void>();
+		const releaseFirstEdit = Promise.withResolvers<void>();
+		const originalCall = bot.call.bind(bot);
+		let editAttempt = 0;
+		bot.call = async (method, body, options) => {
+			if (method === "editMessageText" && ++editAttempt === 1) {
+				firstEditStarted.resolve();
+				await releaseFirstEdit.promise;
+				return { ok: false, description: "best effort rejected" };
+			}
+			return await originalCall(method, body, options);
+		};
+
+		daemon.connectSession("S", "ws://new", "new-token");
+		await firstEditStarted.promise;
+		daemon.requestStop("reload");
+		releaseFirstEdit.resolve();
+		await (daemon as unknown as { toolShutdownBarrier: Promise<void> }).toolShutdownBarrier;
+
+		expect(editAttempt).toBe(2);
+		expect(
+			(daemon as unknown as { unresolvedToolTerminalizations: Map<string, unknown> }).unresolvedToolTerminalizations
+				.size,
+		).toBe(0);
+	});
+	test("retains malformed best-effort terminal failures for strict shutdown cleanup", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const bot = new FakeBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: setPrivateAgentDir(settings(agentDir), agentDir),
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			WebSocketImpl: FakeWs as any,
+			toolActivity: { enabled: true },
+		});
+		daemon.connectSession("S", "ws://old", "old-token");
+		const oldSession = daemon.sessions.get("S")!;
+		await daemon.handleSessionMessage(oldSession, {
+			type: "identity_header",
+			sessionId: "S",
+			repo: "repo",
+			branch: "branch",
+		});
+		await daemon.handleSessionMessage(oldSession, {
+			type: "tool_activity",
+			sessionId: "S",
+			toolCallId: "malformed-terminal",
+			toolName: "read",
+			phase: "started",
+		});
+		const originalCall = bot.call.bind(bot);
+		bot.call = async (method, body, options) => {
+			if (method === "editMessageText") {
+				bot.calls.push({ method, body, options });
+				return undefined;
+			}
+			return await originalCall(method, body, options);
+		};
+
+		daemon.connectSession("S", "ws://new", "new-token");
+		await (daemon as unknown as { toolTerminalizationChain: Promise<void> }).toolTerminalizationChain;
+		expect(
+			(daemon as unknown as { unresolvedToolTerminalizations: Map<string, unknown> }).unresolvedToolTerminalizations
+				.size,
+		).toBe(1);
+
+		bot.call = originalCall;
+		daemon.requestStop("reload");
+		await (daemon as unknown as { toolShutdownBarrier: Promise<void> }).toolShutdownBarrier;
+		expect(bot.calls.filter(call => call.method === "editMessageText").length).toBeGreaterThanOrEqual(2);
+		expect(
+			(daemon as unknown as { unresolvedToolTerminalizations: Map<string, unknown> }).unresolvedToolTerminalizations
+				.size,
+		).toBe(0);
+	});
+	test("strict shutdown attempts every visible tool when an earlier cleanup fails", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const bot = new FakeBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: setPrivateAgentDir(settings(agentDir), agentDir),
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			WebSocketImpl: FakeWs as any,
+			toolActivity: { enabled: true },
+		});
+		daemon.connectSession("S", "ws://s", "token");
+		const session = daemon.sessions.get("S")!;
+		await daemon.handleSessionMessage(session, {
+			type: "identity_header",
+			sessionId: "S",
+			repo: "repo",
+			branch: "branch",
+		});
+		bot.calls = [];
+		for (const toolCallId of ["first", "second"]) {
+			await daemon.handleSessionMessage(session, {
+				type: "tool_activity",
+				sessionId: "S",
+				toolCallId,
+				toolName: "read",
+				phase: "started",
+			});
+		}
+		const originalCall = bot.call.bind(bot);
+		bot.call = async (method, body, options) => {
+			if (method === "editMessageText" && (body as { message_id?: number }).message_id === 1) {
+				bot.calls.push({ method, body, options });
+				return { ok: false, description: "first cleanup rejected" };
+			}
+			return await originalCall(method, body, options);
+		};
+
+		daemon.requestStop("reload");
+		await expect((daemon as unknown as { toolShutdownBarrier: Promise<void> }).toolShutdownBarrier).rejects.toThrow(
+			"first cleanup rejected",
+		);
+		const edits = bot.calls.filter(call => call.method === "editMessageText");
+		expect(edits.filter(call => call.body.message_id === 1)).toHaveLength(5);
+		expect(edits.some(call => call.body.message_id === 2)).toBe(true);
+		const liveMessages = (daemon as unknown as { liveMessages: Map<string, number> }).liveMessages;
+		expect(liveMessages.has("S:tool:first")).toBe(true);
+		expect(liveMessages.has("S:tool:second")).toBe(false);
+	});
 	test("shutdown retries rejected terminal edits and restores visible ownership", async () => {
 		FakeWs.instances = [];
 		const agentDir = tempAgentDir();

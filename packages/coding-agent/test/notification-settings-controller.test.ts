@@ -286,6 +286,18 @@ describe("notification settings controller adapter", () => {
 				return recovery();
 			},
 			unregisterNotificationRoot: async () => ({ root: "/workspace/current/.gjc/state", remainingRoots: 1 }),
+			stopTelegramDaemon: async input => {
+				expect(input).toBe(settings);
+				expect(getNotificationConfig(input).toolActivity.enabled).toBe(true);
+				events.push("stop");
+				return { ok: true, message: "stopped", before: { health: "running" } };
+			},
+			restartTelegramDaemon: async input => {
+				expect(input).toBe(settings);
+				expect(getNotificationConfig(input).toolActivity.enabled).toBe(false);
+				events.push("reload");
+				return { ok: true, message: "reloaded" };
+			},
 			reloadTelegramDaemon: async input => {
 				expect(input).toBe(settings);
 				expect(getNotificationConfig(input).toolActivity.enabled).toBe(false);
@@ -460,7 +472,7 @@ describe("notification settings controller adapter", () => {
 			{ path: "notifications.telegram.richDraft.enabled", op: "set", value: true },
 			{ path: "notifications.telegram.toolActivity.enabled", op: "set", value: false },
 		]);
-		expect(events).toEqual(["commit", "reload", "notify"]);
+		expect(events).toEqual(["stop", "commit", "reload", "notify"]);
 
 		const discarded = await operations.preflightProposedIdentity(
 			{ token: secret() as never, chatId: "input-chat", richEnabled: true, richDraftEnabled: false },
@@ -469,6 +481,87 @@ describe("notification settings controller adapter", () => {
 		if (!discarded.draft) throw new Error("Expected prepared Telegram draft.");
 		operations.discardConfigureDraft(discarded.draft);
 		await expect(operations.commitConfigure(discarded.draft)).rejects.toThrow("draft expired");
+	});
+
+	it("restarts the fenced daemon when a tool activity disable commit fails", async () => {
+		const events: string[] = [];
+		const settings = {
+			getAgentDir: () => "/tmp/gjc-settings-controller",
+			getNotificationSettingsSnapshot: () => snapshot(),
+			commitAtomicBatch: async () => {
+				events.push("commit");
+				throw new Error("commit failed");
+			},
+		} as unknown as Settings;
+		const operations = createNotificationsEditorOperations(
+			{
+				settings,
+				session: {},
+				sessionManager: { getCwd: () => "/workspace/current", getSessionId: () => "session-current" },
+			} as unknown as NotificationsEditorAdapterContext,
+			{
+				stopTelegramDaemon: async () => {
+					events.push("stop");
+					return { ok: true, message: "stopped", before: { health: "running" } };
+				},
+				restartTelegramDaemon: async input => {
+					events.push("restart");
+					expect(getNotificationConfig(input).toolActivity.enabled).toBe(true);
+					return { ok: true, message: "restarted" };
+				},
+			},
+		);
+
+		await expect(
+			operations.commitPreferences({
+				redact: true,
+				verbosity: "verbose",
+				sessionScope: "primary",
+				richEnabled: false,
+				richDraftEnabled: true,
+				toolActivityEnabled: false,
+			}),
+		).rejects.toThrow("commit failed");
+		expect(events).toEqual(["stop", "commit", "restart"]);
+		expect(getNotificationConfig(settings).toolActivity.enabled).toBe(true);
+	});
+
+	it("reports both commit and daemon restart failure after fencing", async () => {
+		const settings = {
+			getAgentDir: () => "/tmp/gjc-settings-controller",
+			getNotificationSettingsSnapshot: () => snapshot(),
+			commitAtomicBatch: async () => {
+				throw new Error("commit failed");
+			},
+		} as unknown as Settings;
+		const operations = createNotificationsEditorOperations(
+			{
+				settings,
+				session: {},
+				sessionManager: { getCwd: () => "/workspace/current", getSessionId: () => "session-current" },
+			} as unknown as NotificationsEditorAdapterContext,
+			{
+				stopTelegramDaemon: async () => ({
+					ok: true,
+					message: "stopped",
+					before: { health: "running" },
+				}),
+				restartTelegramDaemon: async () => ({ ok: false, message: "owner did not restart" }),
+			},
+		);
+
+		await expect(
+			operations.commitPreferences({
+				redact: true,
+				verbosity: "verbose",
+				sessionScope: "primary",
+				richEnabled: false,
+				richDraftEnabled: true,
+				toolActivityEnabled: false,
+			}),
+		).rejects.toThrow(
+			"Notification preference commit failed (commit failed) and daemon restart failed (owner did not restart).",
+		);
 	});
 
 	it("enters controller-owned blocked runtime before reporting a blocked committed identity", async () => {

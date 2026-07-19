@@ -128,6 +128,9 @@ describe("filesystem MAP retrieval", () => {
 		await fs.writeFile(path.join(root, "secret.md"), markdown("Secret", "token: 1234567890"));
 		expect((await getFilesystemMemoryDocument({ project: root }, "project:///safe.md")).code).toBe("ok");
 		expect((await getFilesystemMemoryDocument({ project: root }, "project:///secret.md")).code).toBe("policy_denied");
+		expect((await getFilesystemMemoryDocument({ project: root }, "project:///checkpoint.json")).code).toBe(
+			"invalid_path",
+		);
 	});
 	it("reports policy denial and secret-like repository content in doctor output", async () => {
 		const root = await fixtureRoot();

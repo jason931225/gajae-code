@@ -97,6 +97,13 @@ describe("filesystem memory CLI lifecycle and protocol", () => {
 		expect(payload.value.deferrals).toContain("runtime memory backend integration");
 	});
 
+	it("rejects non-Markdown get URIs and non-MAP resolve URIs before scope access", async () => {
+		const getResult = await runCli(["memory", "get", "session:///session/task.checkpoint.json", "--format", "json"]);
+		expect(JSON.parse(getResult.stdout)).toMatchObject({ code: "invalid_path" });
+		const resolveResult = await runCli(["memory", "resolve", "project:///MEMORY.md", "route", "--format", "json"]);
+		expect(JSON.parse(resolveResult.stdout)).toMatchObject({ code: "invalid_path" });
+	});
+
 	it("initializes only explicitly selected global scope, is idempotent, and does not change runtime memory settings", async () => {
 		const { agentDir } = await fixture();
 		const global = path.join(agentDir, "memory-filesystem", "global");

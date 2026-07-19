@@ -183,6 +183,8 @@ export async function getFilesystemMemoryDocument(
 ): Promise<FilesystemMemoryOutcome<FilesystemMemoryResult>> {
 	const parsed = parseFilesystemMemoryUri(uriText);
 	if (parsed.code !== "ok") return parsed;
+	if (!parsed.value.components.at(-1)?.endsWith(".md"))
+		return { code: "invalid_path", message: "Memory get requires a Markdown document URI." };
 	const root = roots[parsed.value.scope];
 	if (!root) return { code: "policy_denied", message: "Memory scope is unavailable." };
 	const document = await load({ uri: parsed.value, root });

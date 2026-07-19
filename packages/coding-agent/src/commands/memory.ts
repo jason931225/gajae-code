@@ -244,6 +244,11 @@ export default class Memory extends Command {
 				output(format, { code: "invalid_path", message: "resolve requires MAP_URI and ROUTE." });
 				return;
 			}
+			const mapLeaf = parsed.value.components.at(-1);
+			if (mapLeaf !== "memory.yaml" && mapLeaf !== "memory.json") {
+				output(format, { code: "invalid_path", message: "resolve requires a memory.yaml or memory.json URI." });
+				return;
+			}
 			const root = roots.value.roots[parsed.value.scope];
 			if (!root) {
 				output(format, { code: "policy_denied", message: "Memory scope is unavailable." });

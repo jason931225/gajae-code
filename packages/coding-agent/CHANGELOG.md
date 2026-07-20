@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 ### Fixed
+- Added fail-closed managed tmux owner SIGABRT recovery: exact-child supervisor receipts and pre-CLI admission now bind replacement ownership, strict durable Ultragoal/transcript evidence reconciles terminal child yields over stale nonterminal runtime state, recovery hydration remains write-free until an ownership fence, and hostile identity, corruption, concurrency, and path boundaries preserve dirty product files (#2681).
 - Restored the canonical public CLI command-surface contract for the independently documented `gjc memory` filesystem/MAP command after its feature merge omitted the expected command-list update.
+- Filesystem/MAP `memory doctor` now treats intentionally uninitialized scopes as absent instead of making partial-scope opt-in permanently unhealthy; explicit policy denials and real document/MAP safety findings remain reported.
 - Added evidence-preserving recovery for legacy multi-writer SDK session-index corruption: `gjc gc` now diagnoses corrupt prefixes, `--repair-session-index` quarantines the original snapshot/log under the session-index lock before atomically restoring only the checksum-valid monotonic prefix, and append failures point operators to the explicit repair path (#2654).
+- Preserved access to legal SQLite table names beginning with `sqlite` but not reserved `sqlite_`.
 - Malformed selectors on internal read URLs now fail explicitly instead of silently falling back to an unbounded resource read.
 - Newly registered earlier resource-GC policies advance the pending sweep without postponing an already earlier sweep.
 - Provider onboarding wizard completion is now deterministic under CI load: duplicate in-flight confirmation is suppressed, success tests await the real refresh/notification/status boundary instead of fixed sleeps, and the newly configured model is verified through the subsequent model selector.
@@ -34,6 +37,8 @@
 - OpenAI-compatible web search now turns malformed successful response bodies into bounded provider errors while preserving normal provider fallback (#2593).
 - Windows session storage now keeps a symlink-resolved drive-letter path for Bun filesystem I/O instead of a native Volume GUID identity path, preventing `ENOENT` failures during resident-cache writes that could drop the final assistant message at turn completion.
 - On platforms with verified retained publication identity support, detached SDK broker processes now stop after durable loss or replacement of their owned publication while preserving warm reuse and protocol/state formats (#2583). Bounded-practical limitation: requests admitted before the first definitive loss observation—or after authoritative same-object recovery and before a later loss observation—may still perform pathname-based index, ledger, lifecycle, cleanup, or child effects. A detached session-host child spawned by an admitted request may outlive broker exit and may continue pathname effects for the session lifetime. Broker self-reap does not cancel or signal that child and does not provide absolute hostile replacement isolation.
+### Changed
+- Telegram live-message streaming now defaults on for configured Telegram notifications through one durable global preference, supports live in-session preference refresh without weakening redaction, and keeps Discord and Slack finalized-only; process environment overrides remain available.
 
 ## [0.11.3] - 2026-07-19
 ### Added
@@ -45,6 +50,7 @@
 ### Changed
 - Updated the Kimi Coding Plan Eco, Medium, and Pro presets to Kimi K3 with its supported `low`, `high`, and `max` reasoning efforts.
 - The `read` tool is now receipt-by-default: bare and unparseable reads return a bounded receipt (≤50 lines / 10 KiB) with a re-read-with-selector footer only when truncated, `:raw` stays pure verbatim up to a max(2 MiB, spill threshold) ceiling, structural summaries cap unit-granularly at 20 KiB while preserving elision and source-recovery footers, and directories are byte/line capped and never spill. Only an explicit full-content selector (`:raw` or an explicit range) with real content is spill-eligible. Subagent previews now enforce a real byte/code-point cap via per-shape render budgets plus a shape-aware artifact-eligibility tag enforced centrally in output-meta.
+- Telegram tool-activity updates can now be disabled persistently with `/toolactivity off` (and restored with `/toolactivity on`) or from the Notifications preferences UI, without disabling final answers, asks, or other notification delivery.
 
 ### Removed
 - Removed the legacy worktree cleanup implementation behind the `@gajae-code/coding-agent/cli/worktree-cli` and `@gajae-code/coding-agent/commands/worktree` package subpaths (base and `.js` forms). The `gjc worktree`/`wt` CLI command has been unregistered since the workflow-surface narrowing; the modules behind it (including the recursive-deletion `clear` path) were only reachable as package imports. The subpaths now resolve to throwing tombstone modules whose error explains the deliberate removal and the supported replacement: inspect leftover managed worktrees under `~/.gjc/wt` manually and use `git worktree remove` / `git worktree prune`.

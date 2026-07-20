@@ -1323,6 +1323,14 @@ test("SDK host directly delivers correlated lifecycle frames for an accepted pro
 		result: { accepted: true, commandId: expect.any(String), turnId: expect.any(String) },
 	});
 	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	await handlers.get("message_update")?.(
+		{
+			type: "message_update",
+			message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
+			assistantMessageEvent: { type: "text_delta", delta: "hi" },
+		},
+		sessionContext,
+	);
 	socket.send(
 		JSON.stringify({
 			type: "control_request",
@@ -1344,6 +1352,17 @@ test("SDK host directly delivers correlated lifecycle frames for an accepted pro
 		() => frames.some(frame => frame.type === "agent_start") && frames.some(frame => frame.type === "agent_end"),
 		"correlated accepted prompt lifecycle",
 	);
+	await waitFor(
+		() =>
+			frames.some(
+				frame =>
+					frame.type === "event" &&
+					frame.kind === "message_update" &&
+					(frame.payload as { event?: { assistantMessageEvent?: { delta?: unknown } } })?.event
+						?.assistantMessageEvent?.delta === "hi",
+			),
+		"correlated assistant message event",
+	);
 	const correlation = {
 		commandId: acknowledgement.result?.commandId,
 		turnId: acknowledgement.result?.turnId,
@@ -1355,6 +1374,7 @@ test("SDK host directly delivers correlated lifecycle frames for an accepted pro
 		expect.objectContaining({ type: "agent_end", sessionId, ...correlation }),
 	]);
 	expect(observerFrames.some(frame => frame.type === "agent_start" || frame.type === "agent_end")).toBe(false);
+	expect(observerFrames.some(frame => frame.type === "event" && frame.kind === "message_update")).toBe(false);
 	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
 });
 

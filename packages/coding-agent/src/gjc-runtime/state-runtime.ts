@@ -29,9 +29,13 @@ import {
 import { renderCliWriteReceipt } from "./cli-write-receipt";
 import { applyAmbiguityFloorToEnvelope } from "./deep-interview-ambiguity";
 import {
+	assertDeepInterviewEnvelopeInputLimits,
+	assertDeepInterviewInputWithinLimit,
 	assertDeepInterviewIntentManifest,
 	assertDeepInterviewIntentReview,
+	assertDeepInterviewStructuredResponseWithinLimit,
 	type DeepInterviewIntentManifest,
+	MAX_DEEP_INTERVIEW_STRUCTURED_RESPONSE_LENGTH,
 	mergeDeepInterviewEnvelope,
 	normalizeDeepInterviewEnvelope,
 } from "./deep-interview-state";
@@ -992,6 +996,7 @@ async function reconcileWorkflowSkillStateUnlocked(
 ): Promise<{ stateFile: string }> {
 	const { cwd, mode, threadId, turnId, active, payload } = options;
 	const filePath = modeStateFile(cwd, mode, sessionId);
+	if (mode === "deep-interview") assertDeepInterviewStructuredResponseWithinLimit(payload);
 	const existingRead = await readExistingStateForMutation(filePath);
 	const existingPayload = existingRead.kind === "valid" ? existingRead.value : {};
 	const nowIsoStr = nowIso();
@@ -1028,6 +1033,7 @@ async function reconcileWorkflowSkillStateUnlocked(
 					unknown
 				>)
 			: mergeWithNullDelete(existingPayload, payload);
+	if (mode === "deep-interview") assertDeepInterviewEnvelopeInputLimits(merged);
 	merged.skill = mode;
 	merged.current_phase = trimmedPhase;
 	merged.active = active;
@@ -1177,6 +1183,13 @@ async function handleWrite(args: readonly string[], cwd: string): Promise<StateC
 			"gjc state write requires --mode <skill>, positional <skill>, input.skill, or an active workflow in the current session active state",
 		);
 
+	if (mode === "deep-interview") {
+		try {
+			assertDeepInterviewStructuredResponseWithinLimit(payload);
+		} catch (error) {
+			throw new StateCommandError(2, error instanceof Error ? error.message : String(error));
+		}
+	}
 	const filePath = modeStateFile(cwd, mode, sessionId);
 	const forced = hasFlag(args, "--force");
 	return await withWorkflowStateLock(
@@ -1219,6 +1232,11 @@ async function handleWrite(args: readonly string[], cwd: string): Promise<StateC
 				merged = applyAmbiguityFloorToEnvelope(
 					mergeDeepInterviewEnvelope(existingPayload, payload, { replace: hasFlag(args, "--replace") }),
 				).envelope;
+				try {
+					assertDeepInterviewEnvelopeInputLimits(merged);
+				} catch (error) {
+					throw new StateCommandError(2, error instanceof Error ? error.message : String(error));
+				}
 			} else if (hasFlag(args, "--replace")) {
 				merged = { ...payload };
 			} else {
@@ -1419,6 +1437,25 @@ async function handleClear(args: readonly string[], cwd: string): Promise<StateC
 const DEEP_INTERVIEW_INTENT_ID_RE = /(?:artifact|surface|integration|constraint):[a-z0-9][a-z0-9._/-]{0,127}/g;
 
 async function assertDeepInterviewHandoffReady(state: Record<string, unknown>): Promise<void> {
+	const specPath = typeof state.spec_path === "string" ? state.spec_path : undefined;
+	const expectedSha = typeof state.spec_sha256 === "string" ? state.spec_sha256 : undefined;
+	let content: string | undefined;
+	if (specPath) {
+		try {
+			content = await fs.readFile(specPath, "utf-8");
+		} catch (error) {
+			throw new StateCommandError(
+				2,
+				`deep-interview handoff cannot read persisted spec: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		const boundedContent = content.endsWith("\n") ? content.slice(0, -1) : content;
+		assertDeepInterviewInputWithinLimit(
+			boundedContent,
+			MAX_DEEP_INTERVIEW_STRUCTURED_RESPONSE_LENGTH,
+			"persisted deep-interview spec",
+		);
+	}
 	const envelope = normalizeDeepInterviewEnvelope(state);
 	const inner = envelope.state;
 	if (!inner) return;
@@ -1428,19 +1465,8 @@ async function assertDeepInterviewHandoffReady(state: Record<string, unknown>): 
 		return;
 	}
 	assertDeepInterviewIntentManifest(inner.intent_contract);
-	const specPath = typeof state.spec_path === "string" ? state.spec_path : undefined;
-	const expectedSha = typeof state.spec_sha256 === "string" ? state.spec_sha256 : undefined;
-	if (!specPath || !expectedSha)
+	if (!specPath || !expectedSha || content === undefined)
 		throw new StateCommandError(2, "deep-interview handoff requires a persisted intent-validated spec");
-	let content: string;
-	try {
-		content = await fs.readFile(specPath, "utf-8");
-	} catch (error) {
-		throw new StateCommandError(
-			2,
-			`deep-interview handoff cannot read persisted spec: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
 	if (createHash("sha256").update(content).digest("hex") !== expectedSha)
 		throw new StateCommandError(2, "deep-interview handoff spec hash mismatch");
 	const observedIds = [...new Set(content.match(DEEP_INTERVIEW_INTENT_ID_RE) ?? [])].sort();

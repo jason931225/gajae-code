@@ -301,6 +301,15 @@ export declare class Process {
   /** Launch arguments for this process. */
   args(): Array<string>
   /**
+   * Send `signal` only to this pinned process reference.
+   *
+   * On Linux this uses the owned pidfd; on Windows it uses the owned process
+   * handle. It deliberately never discovers descendants or signals a process
+   * group. Returns `false` when the pinned process has already exited or the
+   * operating system rejects delivery.
+   */
+  signalRoot(signal: number): boolean
+  /**
    * Send `signal` to this process and its descendants, children first.
    *
    * On Linux and macOS the signal is forwarded as-is. On Windows there is no
@@ -341,6 +350,33 @@ export declare class PtySession {
   resize(cols: number, rows: number): void
   /** Force-kill the active PTY command. */
   kill(): void
+}
+
+/** Retained trusted-root authority for Linux recovery artifacts. */
+export declare class RecoveryFsRoot {
+  /** Return the stable identity of the retained root descriptor. */
+  identity(): RecoveryFsResult
+  /** Stat one existing regular, single-linked file without following links. */
+  stat(relativePath: string): RecoveryFsResult
+  /** Read one existing regular, single-linked file without following links. */
+  read(relativePath: string, maxBytes: number): RecoveryFsResult
+  /**
+   * Create one previously absent regular, owner-only file and synchronously
+   * persist its contents. Existing entries are never replaced.
+   */
+  create(relativePath: string, data: Uint8Array): RecoveryFsResult
+  /**
+   * Atomically install an already-created regular file at an absent name.
+   * Both names remain relative to this retained root and are never resolved
+   * through a pathname after their parent descriptors are acquired.
+   */
+  install(sourceRelativePath: string, destinationRelativePath: string): RecoveryFsResult
+  /**
+   * Synchronize the retained root directory, making a preceding create or
+   * install durable when the filesystem supports directory fsync.
+   */
+  fsync(): RecoveryFsResult
+  close(): RecoveryFsResult
 }
 
 /** Persistent brush-core shell session. */
@@ -1601,6 +1637,18 @@ export interface NativeExactUnlinkResult {
   ok: boolean
   code?: string
   detachedPath?: string
+  retainedSuccessorPath?: string
+  /**
+   * An internal exchange-placeholder cleanup entry retained after cleanup
+   * could not complete. This is never a canonical publisher successor and
+   * remains recoverable only at this path.
+   */
+  retainedPlaceholderPath?: string
+  /**
+   * A retained cleanup entry whose identity could not be verified. This is
+   * neither a stale detached object nor a publisher successor.
+   */
+  retainedUnknownPath?: string
 }
 
 /** Result of applying or checking owner-only path security. */
@@ -1632,6 +1680,12 @@ export interface NotificationEndpoint {
   /** The session id this endpoint serves. */
   sessionId: string
 }
+
+/**
+ * Acquire an immutable trusted-root descriptor. Linux is required; every
+ * other platform returns a durable unsupported-platform result.
+ */
+export declare function openRecoveryFsRoot(path: string): RecoveryFsRoot
 
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
@@ -1748,6 +1802,20 @@ export declare function ptyTimeoutCount(): bigint
  * Returns an error if clipboard access fails or image encoding fails.
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
+
+export interface RecoveryFsIdentity {
+  dev: string
+  ino: string
+  size: string
+  mtimeNs: string
+}
+
+export interface RecoveryFsResult {
+  ok: boolean
+  code?: string
+  identity?: RecoveryFsIdentity
+  data?: Uint8Array
+}
 
 export declare function renameNoReplacePath(sourcePath: string, destinationPath: string): NativeExactUnlinkResult
 

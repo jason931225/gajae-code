@@ -581,7 +581,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						);
 						const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 						const singleResult = result.details?.results[0];
-						return singleResult?.paused ? { kind: "paused" } : finalText;
+						if (singleResult?.paused) return { kind: "paused" };
+						// A resumed subprocess that aborted or exited non-zero is a failed
+						// resume, not a completed one. Throw the rendered failure summary
+						// (finalText) so the leg is reported failed instead of being
+						// returned as successful continuation.
+						if (singleResult && ((singleResult.aborted ?? false) || singleResult.exitCode !== 0)) {
+							throw new Error(finalText);
+						}
+						return finalText;
 					},
 					{
 						id: `${descriptor.task.id}-resume-${Snowflake.next()}`,

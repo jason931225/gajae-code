@@ -13,7 +13,9 @@ export const NOTIFICATION_PROTOCOL_VERSION = 3;
  * freshly-upgraded host must still recognize an older, still-live daemon that
  * predates capability-gated frame enforcement and trigger a reload. Bump this
  * on every daemon-behavior change independent of the wire version.
- * The current development baseline already includes #2299's generation 4;
- * this behavior change therefore advances the operational generation to 5.
+ * The current development baseline already includes #2299's generation 4,
+ * incarnation fencing in generation 5, owner-lock authority in generation 6,
+ * identity-atomic transition markers in generation 7, and stable signaling plus
+ * tri-state foreign-owner provenance in generation 8.
  */
-export const DAEMON_GENERATION = 5;
+export const DAEMON_GENERATION = 8;

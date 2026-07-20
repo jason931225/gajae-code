@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { Agent } from "@gajae-code/agent-core";
-import { type AssistantMessage, getBundledModel, type Model } from "@gajae-code/ai";
+import { Agent, type AgentTool, type StreamFn } from "@gajae-code/agent-core";
+import { type AssistantMessage, getBundledModel, type Model, type ToolCall } from "@gajae-code/ai";
 import { createMockModel } from "@gajae-code/ai/providers/mock";
 import { AssistantMessageEventStream } from "@gajae-code/ai/utils/event-stream";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
@@ -13,6 +13,7 @@ import { AgentSession, type AgentSessionEvent } from "@gajae-code/coding-agent/s
 import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
 import { TempDir } from "@gajae-code/utils";
+import * as z from "zod/v4";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -23,6 +24,32 @@ function lastAssistant(session: AgentSession): AssistantMessage {
 		throw new Error("Expected trailing assistant message");
 	}
 	return message as AssistantMessage;
+}
+
+function assistantMessage(
+	model: Model,
+	content: AssistantMessage["content"],
+	stopReason: AssistantMessage["stopReason"],
+	errorMessage?: string,
+): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason,
+		...(errorMessage === undefined ? {} : { errorMessage }),
+		timestamp: Date.now(),
+	};
 }
 
 /**
@@ -227,6 +254,18 @@ describe("AgentSession resilient retry", () => {
 				}
 				: undefined,
 		});
+	}
+	function buildBareStreamingSession(options: { tools?: AgentTool[]; streamFn: StreamFn }): AgentSession {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const agent = new Agent({
+			getApiKey: provider => `${provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: options.tools ?? [], messages: [] },
+			streamFn: options.streamFn,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		return new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
 	}
 	function createExtensionRunner(handlers = new Map<string, Array<() => Promise<void>>>()) {
 		const extension: Extension = {
@@ -912,80 +951,152 @@ describe("AgentSession resilient retry", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 		expect(lastAssistant(session).stopReason).toBe("stop");
 	});
-	it("fails closed on structured watchdog error facts and partial output under bare defaults", async () => {
-		for (const options of [
-			{ transportFailure: { kind: "transport", status: 503 } },
-			{ partialContent: "already visible" },
-		] as const) {
-			session = buildStatusErrorSession({
-				errorMessage: "Example Provider Watchdog stream timed out while waiting for the first event",
-				bareDefault: true,
-				...options,
-				recoveredContent: "should-not-reach",
+	it("fails closed on structured watchdog facts and actual streamed partial output under bare defaults", async () => {
+		for (const partialOutput of [false, true]) {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const streamedDeltas: string[] = [];
+			session = buildBareStreamingSession({
+				streamFn: () => {
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						const empty = assistantMessage(model, [], "error", "Example Provider Watchdog stream timed out while waiting for the first event");
+						if (!partialOutput) empty.transportFailure = { kind: "transport", status: 503 };
+						stream.push({ type: "start", partial: empty });
+						if (partialOutput) {
+							const visible = assistantMessage(model, [{ type: "text", text: "already visible" }], "error", "Example Provider Watchdog stream timed out while waiting for the first event");
+							stream.push({ type: "text_start", contentIndex: 0, partial: empty });
+							stream.push({ type: "text_delta", contentIndex: 0, delta: "already ", partial: visible });
+							stream.push({ type: "text_delta", contentIndex: 0, delta: "visible", partial: visible });
+							streamedDeltas.push("already ", "visible");
+							stream.push({ type: "error", reason: "error", error: visible });
+							return;
+						}
+						stream.push({ type: "error", reason: "error", error: empty });
+					});
+					return stream;
+				},
 			});
 			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 			const { retryStartEvents } = track(session);
+			const observedDeltas: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+					observedDeltas.push(event.assistantMessageEvent.delta);
+				}
+			});
 
 			await session.prompt("bare-config unsafe watchdog");
 			await session.waitForIdle();
 
 			expect(retryStartEvents).toHaveLength(0);
 			expect(lastAssistant(session).stopReason).toBe("error");
+			if (partialOutput) {
+				expect(observedDeltas).toEqual(streamedDeltas);
+				expect(lastAssistant(session).content).toEqual([{ type: "text", text: "already visible" }]);
+			}
 			await session.dispose();
 			session = undefined;
 		}
 	});
-
-	it("does not replay a bare-default watchdog after a counted tool execution", async () => {
-		const requestedModels: string[] = [];
-		session = buildBareRetrySession({
-			responses: [
-				{ throw: "Example Provider Watchdog stream timed out while waiting for the first event" },
-				{ content: ["should-not-reach"] },
-			],
-			requestedModels,
-			onStreamStart: agent => {
-				agent.emitExternalEvent({
-					type: "tool_execution_start",
-					toolCallId: "counted-tool",
-					toolName: "bash",
-					args: { command: "true" },
+	it("does not replay a bare-default watchdog after a registered tool completes and continues", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const toolCall: ToolCall = { type: "toolCall", id: "counted-tool-call", name: "counted", arguments: {} };
+		let toolRuns = 0;
+		let streamCalls = 0;
+		const countedTool: AgentTool = {
+			name: "counted",
+			label: "Counted",
+			description: "Counts real executions for replay-safety coverage",
+			parameters: z.object({}),
+			execute: async () => {
+				toolRuns++;
+				return { content: [{ type: "text" as const, text: "counted result" }] };
+			},
+		};
+		session = buildBareStreamingSession({
+			tools: [countedTool],
+			streamFn: () => {
+				streamCalls++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (streamCalls === 1) {
+						const response = assistantMessage(model, [toolCall], "toolUse");
+						stream.push({ type: "start", partial: response });
+						stream.push({ type: "done", reason: "toolUse", message: response });
+						return;
+					}
+					const failure = assistantMessage(model, [], "error", "Example Provider Watchdog stream timed out while waiting for the first event");
+					stream.push({ type: "start", partial: failure });
+					stream.push({ type: "error", reason: "error", error: failure });
 				});
+				return stream;
 			},
 		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const { retryStartEvents } = track(session);
 
-		await session.prompt("bare-config counted tool watchdog");
+		await session.prompt("real counted tool watchdog");
 		await session.waitForIdle();
 
+		expect(toolRuns).toBe(1);
+		expect(session.agent.state.messages).toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: toolCall.id, toolName: "counted" }));
+		expect(streamCalls).toBe(2);
 		expect(retryStartEvents).toHaveLength(0);
-		expect(requestedModels).toHaveLength(1);
 		expect(lastAssistant(session).stopReason).toBe("error");
 	});
-
-	it("resets replay safety for a cancel-and-submit replacement prompt", async () => {
-		const requestedModels: string[] = [];
-		session = buildBareRetrySession({
-			responses: [
-				{ content: ["superseded"] },
-				{ throw: "Example Provider Watchdog stream timed out while waiting for the first event" },
-				{ content: ["replacement recovered"] },
-			],
-			requestedModels,
+	it("gives an active cancel-and-submit replacement a clean retry epoch", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const originalStarted = Promise.withResolvers<void>();
+		const originalAborted = Promise.withResolvers<void>();
+		const originalStream = new AssistantMessageEventStream();
+		let streamCalls = 0;
+		session = buildBareStreamingSession({
+			streamFn: (_requestedModel, _context, options) => {
+				streamCalls++;
+				if (streamCalls === 1) {
+					queueMicrotask(() => {
+						originalStream.push({ type: "start", partial: assistantMessage(model, [], "stop") });
+						originalStarted.resolve();
+						options?.signal?.addEventListener("abort", () => {
+							originalAborted.resolve();
+							const aborted = assistantMessage(model, [], "aborted", "Aborted");
+							originalStream.push({ type: "error", reason: "aborted", error: aborted });
+						}, { once: true });
+					});
+					return originalStream;
+				}
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (streamCalls === 2) {
+						const failure = assistantMessage(model, [], "error", "Example Provider Watchdog stream timed out while waiting for the first event");
+						stream.push({ type: "start", partial: failure });
+						stream.push({ type: "error", reason: "error", error: failure });
+						return;
+					}
+					const recovered = assistantMessage(model, [{ type: "text", text: "replacement recovered" }], "stop");
+					stream.push({ type: "start", partial: recovered });
+					stream.push({ type: "done", reason: "stop", message: recovered });
+				});
+				return stream;
+			},
 		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const { retryStartEvents, retryEndEvents } = track(session);
 
-		await session.prompt("original");
-		await session.waitForIdle();
+		const originalPrompt = session.prompt("original");
+		await originalStarted.promise;
 		expect(await session.cancelAndSubmit("replacement")).toEqual({ kind: "submitted" });
+		await originalAborted.promise;
+		await originalPrompt;
 		await session.waitForIdle();
+		originalStream.push({ type: "done", reason: "stop", message: assistantMessage(model, [{ type: "text", text: "late original" }], "stop") });
+		await Promise.resolve();
 
+		expect(streamCalls).toBe(3);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryEndEvents).toEqual([expect.objectContaining({ success: true })]);
-		expect(requestedModels).toHaveLength(3);
-		expect(lastAssistant(session).stopReason).toBe("stop");
+		expect(session.agent.state.messages.some(message => JSON.stringify(message).includes("late original"))).toBe(false);
+		expect(lastAssistant(session).content).toEqual([{ type: "text", text: "replacement recovered" }]);
 	});
 	it("fails closed on non-canonical watchdog prose under bare defaults", async () => {
 		const nearMisses = [

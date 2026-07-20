@@ -583,11 +583,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						const singleResult = result.details?.results[0];
 						if (singleResult?.paused) return { kind: "paused" };
 						// A resumed subprocess that aborted or exited non-zero is a failed
-						// resume, not a completed one. Surface it as a failed job (preserving
-						// the error text) so the leader's routing does not treat a broken
-						// resume as successful continuation.
+						// resume, not a completed one. Surface the subprocess failure rather
+						// than discarding it behind the rendered fallback text.
 						if (singleResult && ((singleResult.aborted ?? false) || singleResult.exitCode !== 0)) {
-							throw new Error(finalText);
+							throw new Error(singleResult.errorSummary || singleResult.abortSummary || finalText);
 						}
 						return finalText;
 					},

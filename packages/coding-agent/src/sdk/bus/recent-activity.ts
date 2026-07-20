@@ -236,7 +236,10 @@ export async function listRecentSessions(deps: RecentActivityDeps): Promise<List
 		candidates.push(...listed.owned);
 		warnings.push(
 			...listed.invalid
-				.filter(invalid => invalid.code !== "cwd_not_found" && invalid.code !== "cwd_not_directory")
+				.filter(
+					invalid =>
+						!deps.allWorkspaces || (invalid.code !== "cwd_not_found" && invalid.code !== "cwd_not_directory"),
+				)
 				.map(invalid => `Ignored invalid managed session candidate: ${invalid.code}`),
 		);
 	}

@@ -147,6 +147,37 @@ describe("recent-activity picker", () => {
 		}
 	});
 
+	it("silently ignores workspace bindings replaced by files", async () => {
+		const root = tempRoot();
+		const cwd = path.join(root, "workspace");
+		const removedCwd = path.join(root, "removed-workspace");
+		await managedDirectory(root, cwd);
+		await managedDirectory(root, removedCwd);
+		fs.rmSync(removedCwd, { recursive: true });
+		fs.writeFileSync(removedCwd, "not a directory", { mode: 0o600 });
+
+		const result = await listRecentSessions({ cwd, sessionsRoot: root, allWorkspaces: true });
+
+		expect(result).toMatchObject({ kind: "complete", entries: [], warnings: [] });
+	});
+
+	it("warns about removed workspace candidates during direct scans", async () => {
+		const root = tempRoot();
+		const cwd = path.join(root, "workspace");
+		const removedCwd = path.join(root, "removed-workspace");
+		const directory = await managedDirectory(root, cwd);
+		fs.mkdirSync(removedCwd, { recursive: true, mode: 0o700 });
+		writeSession(directory, "stale-candidate", removedCwd, {}, 2_000);
+		fs.rmSync(removedCwd, { recursive: true });
+
+		const result = await listRecentSessions({ cwd, sessionsRoot: root });
+
+		expect(result).toMatchObject({
+			kind: "complete",
+			entries: [],
+			warnings: ["Ignored invalid managed session candidate: cwd_not_found"],
+		});
+	});
 	it("fails closed for an unsafe all-workspace sessions root", async () => {
 		if (process.platform === "win32") return;
 		const root = tempRoot();

@@ -2755,6 +2755,8 @@ export function createNotificationsExtension(
 
 		onSdkRequest?: (kind: "control" | "query", connectionId: string, frame: Record<string, unknown>) => void;
 		runEphemeralTurn?: (promptText: string, signal: AbortSignal) => Promise<{ replyText: string }>;
+		/** Observes settlement of optional session-branch startup after reconciliation completes. */
+		onBranchStartupSettled?: (receipt: { sessionId: string; status: SessionStartResult["status"] }) => void;
 		readNotificationFile?: (path: string) => Promise<Buffer>;
 		readNotificationDiffStat?: (cwd: string) => Promise<string | undefined>;
 	} = {},
@@ -2772,9 +2774,12 @@ export function createNotificationsExtension(
 	// exact runtime object retains authority for an explicit idempotent retry.
 	const cleanupRetries = new Map<string, SessionRuntime>();
 	const sessionStartPromises = new Map<string, Promise<SessionStartResult>>();
+	const branchStartupTasks = new Set<Promise<void>>();
 	let activeRuntimeId: string | undefined;
 	let identityControlInFlight = false;
-	let deferredIdentityRotation: { event: { previousSessionFile?: string }; ctx: ExtensionContext } | undefined;
+	let deferredIdentityRotation:
+		| { event: { previousSessionFile?: string }; ctx: ExtensionContext; awaitStartup: boolean }
+		| undefined;
 	let extensionShuttingDown = false;
 
 	async function ensureTelegramOwner(
@@ -3390,7 +3395,8 @@ export function createNotificationsExtension(
 					const pending = deferredIdentityRotation;
 					deferredIdentityRotation = undefined;
 					identityControlInFlight = false;
-					if (response.ok === true && pending) await rotateSessionAuthority(pending.event, pending.ctx);
+					if (response.ok === true && pending)
+						await rotateSessionAuthority(pending.event, pending.ctx, pending.awaitStartup);
 				}
 			},
 			control: async (connectionId, frame) => {
@@ -4378,13 +4384,70 @@ export function createNotificationsExtension(
 	// session id. `/new`, fork, and resume must all tear down A before publishing
 	// B. Chat implementations may preserve a topic as metadata, but it must never
 	// preserve A's endpoint or credentials as B's control/viewing authority.
+	const reconcileBackgroundStartup = (
+		id: string,
+		ctx: ExtensionContext,
+		startup: Promise<SessionStartResult>,
+	): Promise<void> =>
+		startup
+			.then(async result => {
+				if (
+					result.status !== "started" ||
+					extensionShuttingDown ||
+					sessionId(ctx) !== id ||
+					activeRuntimeId !== id ||
+					!runtimes.has(id)
+				)
+					return;
+				await controller.reconcileCurrentSession(ctx);
+			})
+			.catch(error => logger.warn(`notifications: deferred startup reconciliation failed: ${String(error)}`));
+
+	const trackBranchStartup = (id: string, ctx: ExtensionContext, startup: Promise<SessionStartResult>): void => {
+		let status: SessionStartResult["status"] = "failed";
+		void startup.then(
+			result => {
+				status = result.status;
+			},
+			() => {},
+		);
+		const task = reconcileBackgroundStartup(id, ctx, startup);
+		branchStartupTasks.add(task);
+		void task.finally(() => {
+			branchStartupTasks.delete(task);
+			try {
+				options.onBranchStartupSettled?.({ sessionId: id, status });
+			} catch (error) {
+				logger.warn(`notifications: branch startup receipt failed: ${String(error)}`);
+			}
+		});
+	};
+
 	const rotateSessionAuthority = async (
 		event: { previousSessionFile?: string },
 		ctx: ExtensionContext,
+		awaitStartup: boolean,
 	): Promise<void> => {
 		if (extensionShuttingDown) return;
 		const newId = sessionId(ctx);
 		const prevId = activeRuntimeId ?? sessionIdFromFile(event.previousSessionFile);
+		if (prevId === newId) {
+			const pendingStartup = sessionStartPromises.get(newId);
+			if (pendingStartup) {
+				if (awaitStartup) {
+					await pendingStartup;
+					if (!extensionShuttingDown && runtimes.has(newId) && activeRuntimeId === newId)
+						await controller.reconcileCurrentSession(ctx);
+				} else {
+					trackBranchStartup(newId, ctx, pendingStartup);
+				}
+				return;
+			}
+			if (runtimes.has(newId)) {
+				await controller.reconcileCurrentSession(ctx);
+				return;
+			}
+		}
 		if (prevId && prevId !== newId) {
 			controller.rekeySession(prevId, newId);
 			try {
@@ -4398,26 +4461,31 @@ export function createNotificationsExtension(
 			}
 		}
 		if (extensionShuttingDown) return;
-		await startSession(ctx);
-		if (extensionShuttingDown) {
-			await stopSession(newId);
+		const startup = startSession(ctx);
+		if (awaitStartup) {
+			await startup;
+			if (extensionShuttingDown) {
+				await stopSession(newId);
+				return;
+			}
+			await controller.reconcileCurrentSession(ctx);
 			return;
 		}
-		await controller.reconcileCurrentSession(ctx);
+		trackBranchStartup(newId, ctx, startup);
 	};
 	api.on("session_switch", async (event, ctx) => {
 		if (identityControlInFlight) {
-			deferredIdentityRotation = { event, ctx };
+			deferredIdentityRotation = { event, ctx, awaitStartup: true };
 			return;
 		}
-		await rotateSessionAuthority(event, ctx);
+		await rotateSessionAuthority(event, ctx, true);
 	});
 	api.on("session_branch", async (event, ctx) => {
 		if (identityControlInFlight) {
-			deferredIdentityRotation = { event, ctx };
+			deferredIdentityRotation = { event, ctx, awaitStartup: false };
 			return;
 		}
-		await rotateSessionAuthority(event, ctx);
+		await rotateSessionAuthority(event, ctx, false);
 	});
 
 	const terminalizeInFlightTools = (rt: SessionRuntime, id: string, phase: "cancelled" | "unknown"): void => {
@@ -4808,6 +4876,7 @@ export function createNotificationsExtension(
 		extensionShuttingDown = true;
 		identityControlInFlight = false;
 		deferredIdentityRotation = undefined;
+		await Promise.allSettled([...branchStartupTasks]);
 		const id = sessionId(ctx);
 		const rt = runtimes.get(id);
 		if (rt) terminalizeInFlightTools(rt, id, "unknown");

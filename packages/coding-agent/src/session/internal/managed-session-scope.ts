@@ -400,7 +400,8 @@ function inspectCandidate(filePath: string, provenance: "v2" | "legacy"): Manage
 		const header = value as Record<string, unknown>;
 		if (header.type !== "session" || typeof header.id !== "string" || typeof header.cwd !== "string")
 			return { code: "invalid_header" };
-		if (!identityFor(header.cwd).ok) return { code: "invalid_cwd" };
+		const cwdIdentity = identityFor(header.cwd);
+		if (!cwdIdentity.ok) return { code: `cwd_${cwdIdentity.code}` };
 		const named = fs.lstatSync(filePath, { bigint: true });
 		if (
 			!named.isFile() ||
@@ -551,7 +552,7 @@ export function listManagedCandidates(scope: ManagedScope): ManagedCandidateList
 				}
 				const candidateIdentity = identityFor(candidate.cwd);
 				if (!candidateIdentity.ok) {
-					invalid.push({ code: "invalid_cwd" });
+					invalid.push({ code: `cwd_${candidateIdentity.code}` });
 					continue;
 				}
 				if (

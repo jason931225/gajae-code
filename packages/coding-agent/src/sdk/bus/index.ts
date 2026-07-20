@@ -999,6 +999,7 @@ type SessionStartResult = {
 	status: SessionStartStatus;
 	runtime?: SessionRuntime;
 	failure?: SdkStartupFailure;
+	suppressExtensionError?: boolean;
 };
 
 function pushSessionFrame(
@@ -4265,6 +4266,7 @@ export function createNotificationsExtension(
 			logger.warn(`notifications: failed to start server: ${String(e)}`);
 			const result = failLifecycleStartup("failed", e);
 			finishStartup(result);
+			let suppressExtensionError = false;
 			let stopped = false;
 			try {
 				stopped = await stopSession(id, "session", runtime);
@@ -4274,9 +4276,10 @@ export function createNotificationsExtension(
 				// than letting it escape startSession and surface a red extension error
 				// through session_start / session_switch / session_branch.
 				logger.error(`notifications: SDK notification runtime cleanup failed: ${String(error)}`);
+				suppressExtensionError = true;
 			}
 			if (!stopped) await cleanupAbandonedStartup();
-			return { ...result, runtime };
+			return { ...result, runtime, suppressExtensionError };
 		}
 	}
 
@@ -4416,7 +4419,17 @@ export function createNotificationsExtension(
 
 	const startAndReconcileSession = async (ctx: ExtensionContext): Promise<void> => {
 		const result = await startSession(ctx);
-		if (result.status === "started" || result.status === "already") await controller.reconcileCurrentSession(ctx);
+		if (result.status === "started" || result.status === "already") {
+			await controller.reconcileCurrentSession(ctx);
+			return;
+		}
+		if (
+			!lifecycleStartupCapability &&
+			result.status === "failed" &&
+			!extensionShuttingDown &&
+			!result.suppressExtensionError
+		)
+			throw new Error(`notifications: SDK startup failed: ${result.failure?.message ?? "Unknown startup failure."}`);
 	};
 
 	api.on("session_start", async (_event, ctx) => {

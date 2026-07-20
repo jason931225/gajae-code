@@ -568,7 +568,10 @@ export class HindsightApi {
 				: err instanceof ResponseTooLargeError
 					? "response exceeded size limit"
 					: "response could not be read";
-			throw new HindsightError(`${operation} request failed: ${reason}`);
+			throw new HindsightError(`${operation} request failed: ${reason}`, response.status);
+		}
+		if (requestSignal.aborted) {
+			throw new HindsightError(`${operation} request failed: timed out`, response.status);
 		}
 		const parsed = text ? safeJsonParse(text) : null;
 

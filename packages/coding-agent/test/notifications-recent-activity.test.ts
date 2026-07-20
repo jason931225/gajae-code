@@ -108,6 +108,20 @@ describe("recent-activity picker", () => {
 		expect(result.entries.map(entry => entry.sessionId)).toEqual(["saved-elsewhere"]);
 	});
 
+	it("silently ignores sessions whose workspace directories were removed", async () => {
+		const root = tempRoot();
+		const cwd = path.join(root, "workspace");
+		const removedCwd = path.join(root, "removed-workspace");
+		const directory = await managedDirectory(root, cwd);
+		await managedDirectory(root, removedCwd);
+		writeSession(directory, "stale-candidate", removedCwd, {}, 2_000);
+		fs.rmSync(removedCwd, { recursive: true });
+
+		const result = await listRecentSessions({ cwd, sessionsRoot: root, allWorkspaces: true });
+
+		expect(result).toMatchObject({ kind: "complete", entries: [], warnings: [] });
+	});
+
 	it("fails closed for an unsafe all-workspace sessions root", async () => {
 		if (process.platform === "win32") return;
 		const root = tempRoot();

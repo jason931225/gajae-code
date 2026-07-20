@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -120,6 +120,31 @@ describe("recent-activity picker", () => {
 		const result = await listRecentSessions({ cwd, sessionsRoot: root, allWorkspaces: true });
 
 		expect(result).toMatchObject({ kind: "complete", entries: [], warnings: [] });
+	});
+
+	it("preserves warnings for non-stale cwd identity failures", async () => {
+		const root = tempRoot();
+		const cwd = path.join(root, "workspace");
+		const brokenCwd = path.join(root, "identity-error");
+		const directory = await managedDirectory(root, cwd);
+		writeSession(directory, "broken-candidate", brokenCwd, {}, 2_000);
+		const canonicalIdentity = native.canonicalExistingDirectoryIdentity;
+		const identity = vi
+			.spyOn(native, "canonicalExistingDirectoryIdentity")
+			.mockImplementation(pathname =>
+				pathname === brokenCwd ? { ok: false, code: "io_error" } : canonicalIdentity(pathname),
+			);
+		try {
+			const result = await listRecentSessions({ cwd, sessionsRoot: root });
+
+			expect(result).toMatchObject({
+				kind: "complete",
+				entries: [],
+				warnings: ["Ignored invalid managed session candidate: cwd_io_error"],
+			});
+		} finally {
+			identity.mockRestore();
+		}
 	});
 
 	it("fails closed for an unsafe all-workspace sessions root", async () => {

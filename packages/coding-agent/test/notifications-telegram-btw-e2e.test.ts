@@ -162,14 +162,11 @@ test("real notifications extension rebinds /btw without provider replay or main-
 		providerResponse.resolve({ replyText: "| Formula | Value |\n| --- | --- |\n| $x^2$ | 4 |" });
 		await waitFor(() => bot.count("sendRichMessage") === richBefore + 1, "correlated rich /btw delivery");
 		expect(providerCalls).toHaveLength(1);
-		expect(providerCalls[0]!.prompt).toBe(`<btw>
-This is an ephemeral side question for the current interactive session.
-Answer briefly and directly using the conversation context already provided.
-Do not use tools.
-Do not ask follow-up questions.
-Question:
-exact side question
-</btw>`);
+		expect(
+			providerCalls[0]!.prompt,
+		).toBe(`You are answering inside an ephemeral multi-turn side chat for the interactive session.
+Use only the sanitized visible-text conversation scope and prior side-chat turns provided as messages.
+Answer directly. Do not use tools or request hidden session state.`);
 		expect(providerCalls[0]!.signal).toBeInstanceOf(AbortSignal);
 		expect(mainSessionInjections).toBe(0);
 		expect(bot.count("sendMessage")).toBe(sendMessageBefore);

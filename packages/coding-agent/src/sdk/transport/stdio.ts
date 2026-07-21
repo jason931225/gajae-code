@@ -1,5 +1,5 @@
-import { startRelayPair } from "./relay";
 import type { ServeHandle, ServeOptions } from "./index";
+import { startRelayPair } from "./relay";
 
 function writeDiagnostic(value: unknown): void {
 	process.stderr.write(`${JSON.stringify(value)}\n`);

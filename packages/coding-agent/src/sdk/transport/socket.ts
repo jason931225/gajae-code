@@ -4,9 +4,9 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { MAX_UNIX_SOCKET_PATH_BYTES } from "../../harness-control-plane/storage";
 import { authenticatePreface } from "./auth-preface";
-import { startRelayPair } from "./relay";
-import type { RelayOptions, RelayPair, TransportError } from "./relay";
 import type { ServeHandle, ServeOptions } from "./index";
+import type { RelayOptions, RelayPair, TransportError } from "./relay";
+import { startRelayPair } from "./relay";
 
 function socketFailure(code: string): Error {
 	return new Error(code);

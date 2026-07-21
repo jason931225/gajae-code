@@ -7,9 +7,9 @@
  * stdout. Commands arrive as newline-delimited JSON on stdin.
  */
 import * as fs from "node:fs/promises";
-import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { startProductionSdkHost } from "./sdk-production-host";
 
 type Host = Awaited<ReturnType<typeof startProductionSdkHost>>;

@@ -604,6 +604,24 @@ export const stripClaudeToolPrefix = (name: string, prefixOverride: string = cla
 	return name.slice(prefixOverride.length);
 };
 
+// Anthropic requires image `data` to be standard (RFC 4648) base64: the standard
+// alphabet only, correct quartet grouping, and padding (when present) confined to
+// a trailing `=`/`==`. A resident image whose blob went missing bakes a
+// human-readable placeholder into `data` (e.g. "[Session resident imageData blob
+// missing: …]"), and other callers can pass whitespace, data URLs, or URL-safe
+// variants — all of which the API rejects with a 400 `invalid base64 data` that
+// fails the *entire* request and bricks the session. Validate the wire format
+// strictly and degrade anything that is not standard base64 to text.
+//
+// Accepts canonical padded forms and their unpadded equivalents; rejects
+// length % 4 === 1, misplaced/overlong padding, whitespace, data URLs, URL-safe
+// (`-`/`_`) alphabets, prose, and empty input. The pattern has no nested
+// quantifier, so even oversized inputs are rejected in linear time.
+const ANTHROPIC_BASE64_IMAGE_DATA = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+function isAnthropicBase64ImageData(data: string): boolean {
+	return data.length > 0 && data.length % 4 !== 1 && ANTHROPIC_BASE64_IMAGE_DATA.test(data);
+}
+
 /**
  * Convert content blocks to Anthropic API format
  */
@@ -627,7 +645,18 @@ function convertContentBlocks(
 		.filter((block): block is TextContent => block.type === "text")
 		.map(block => block.text.toWellFormed())
 		.filter(text => text.trim().length > 0);
-	const imageBlocks = content.filter((block): block is ImageContent => block.type === "image");
+	const imageBlocks: ImageContent[] = [];
+	for (const block of content) {
+		if (block.type !== "image") continue;
+		if (isAnthropicBase64ImageData(block.data)) {
+			imageBlocks.push(block);
+			continue;
+		}
+		// Non-base64 image payload (e.g. a missing-blob placeholder): degrade to
+		// text so one lost image cannot invalidate the entire request.
+		const text = block.data.toWellFormed().trim();
+		if (text.length > 0) textBlocks.push(text);
+	}
 	const omittedImages = !supportsImages && imageBlocks.length > 0;
 	if (imageBlocks.length === 0 || !supportsImages) {
 		if (omittedImages) {

@@ -58,6 +58,7 @@ function createInputControllerContext(options: {
 		historyStorage: { getRecent: () => [] },
 		skillCommands: new Map(),
 		pendingImages: options.pendingImages ?? [],
+		hasActiveBtw: () => false,
 		getSlashCommands: () => [{ name: "changelog", description: "Show changelog" }],
 	} as unknown as InteractiveModeContext;
 	if (options.delegated) {
@@ -205,6 +206,7 @@ describe("CommandPalette", () => {
 			showStatus: () => {},
 			historyStorage: { getRecent: () => [] },
 			skillCommands: new Map([["skill:demo", { description: "Demo skill" }]]),
+			hasActiveBtw: () => false,
 			getSlashCommands: () => liveCommands,
 		} as unknown as InteractiveModeContext;
 		new InputController(ctx).openCommandPalette();
@@ -253,6 +255,7 @@ describe("CommandPalette", () => {
 			showStatus: () => {},
 			historyStorage: { getRecent: () => [] },
 			skillCommands: new Map(),
+			hasActiveBtw: () => false,
 			getSlashCommands: () => [{ name: "clear", description: "Clear the session" }],
 		} as unknown as InteractiveModeContext;
 		new InputController(ctx).openCommandPalette();
@@ -296,6 +299,7 @@ describe("CommandPalette", () => {
 			showStatus: () => {},
 			historyStorage: { getRecent: () => [] },
 			skillCommands: new Map(),
+			hasActiveBtw: () => false,
 			getSlashCommands: () => [{ name: "changelog", description: "Show changelog" }],
 		} as unknown as InteractiveModeContext;
 		new InputController(ctx).openCommandPalette();

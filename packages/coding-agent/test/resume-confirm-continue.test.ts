@@ -414,6 +414,7 @@ it("bounds a rejected selected strict-open promise to one error before session s
 				action: "open-idle",
 			}),
 			openExistingSessionStrict: async () => {
+				strictOpens++;
 				throw new Error("injected strict-open rejection");
 			},
 			discoverAuthStorage: async () => {

@@ -56,33 +56,33 @@ function upstreamUrl(url: string, token: string): string {
 }
 
 function waitForDrain(stream: Writable): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const onDrain = (): void => done(resolve);
-		const onError = (error: Error): void => done(() => reject(error));
-		const done = (callback: () => void): void => {
-			stream.removeListener("drain", onDrain);
-			stream.removeListener("error", onError);
-			callback();
-		};
-		stream.once("drain", onDrain);
-		stream.once("error", onError);
-	});
+	const { promise, reject, resolve } = Promise.withResolvers<void>();
+	const onDrain = (): void => done(resolve);
+	const onError = (error: Error): void => done(() => reject(error));
+	const done = (callback: () => void): void => {
+		stream.removeListener("drain", onDrain);
+		stream.removeListener("error", onError);
+		callback();
+	};
+	stream.once("drain", onDrain);
+	stream.once("error", onError);
+	return promise;
 }
 
 const WEBSOCKET_CONNECTING = 0;
 const WEBSOCKET_OPEN = 1;
 
 function waitForWebSocketDrain(ws: RelayWebSocket, isClosed: () => boolean): Promise<void> {
-	return new Promise(resolve => {
-		const poll = (): void => {
-			if (isClosed() || ws.readyState !== WEBSOCKET_OPEN || ws.bufferedAmount === 0) {
-				resolve();
-				return;
-			}
-			setTimeout(poll, 10);
-		};
-		poll();
-	});
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const poll = (): void => {
+		if (isClosed() || ws.readyState !== WEBSOCKET_OPEN || ws.bufferedAmount === 0) {
+			resolve();
+			return;
+		}
+		setTimeout(poll, 10);
+	};
+	poll();
+	return promise;
 }
 
 /** Starts a dedicated raw-WebSocket relay for exactly one downstream stream. */

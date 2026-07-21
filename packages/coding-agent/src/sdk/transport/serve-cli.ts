@@ -1,4 +1,5 @@
 import { CliParseError } from "@gajae-code/utils/cli";
+import type { SdkSessionEndpoint } from "../client/discovery";
 import { listSdkSessionEndpoints } from "../client/discovery";
 import { type SdkEndpointSelectionError, selectLiveEndpoint } from "../client/liveness";
 import { DEFAULT_PENDING_CEILING_BYTES, MIN_PENDING_CEILING_BYTES, startSocketServe, startStdioServe } from "./index";
@@ -66,7 +67,7 @@ export function resolveServePendingCeiling(flagValue: string | undefined, envVal
 	return ceiling;
 }
 
-function isSelectionError(value: ReturnType<typeof selectLiveEndpoint>): value is SdkEndpointSelectionError {
+function isSelectionError(value: SdkSessionEndpoint | SdkEndpointSelectionError): value is SdkEndpointSelectionError {
 	return "code" in value;
 }
 

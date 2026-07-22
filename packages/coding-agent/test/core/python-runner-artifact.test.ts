@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createRunnerScriptInitializer } from "@gajae-code/coding-agent/eval/py/runner-artifact";
+import { createRunnerScriptCache, createRunnerScriptInitializer } from "@gajae-code/coding-agent/eval/py/runner-artifact";
 import RUNNER_SCRIPT from "../../src/eval/py/runner.py" with { type: "text" };
 
 describe("Python runner artifact", () => {
@@ -45,6 +45,17 @@ describe("Python runner artifact", () => {
 		}
 		const privateDirectories = (await fs.readdir(root)).filter(name => name.startsWith("gjc-python-runner-"));
 		expect(privateDirectories).toHaveLength(1);
+	});
+	it("removes the process-private artifact directory during cleanup", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-python-artifact-cleanup-"));
+		roots.push(root);
+		const cache = createRunnerScriptCache(root);
+		const scriptPath = await cache.ensureRunnerScript();
+		const directory = path.dirname(scriptPath);
+
+		await cache.cleanup();
+
+		await expect(fs.lstat(directory)).rejects.toThrow();
 	});
 
 	it("retries after initialization failure instead of memoizing rejection", async () => {

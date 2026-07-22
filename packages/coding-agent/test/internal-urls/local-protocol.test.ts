@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -265,6 +266,46 @@ describe("LocalProtocolHandler", () => {
 				await initializeLocalRoot(LocalProtocolHandler.resolveOptions()!);
 				expect(await fs.readFile(path.join(localRoot, "legacy.json"), "utf8")).toBe('{"legacy":true}');
 				await expect(fs.lstat(path.join(artifactsDir, "local"))).rejects.toMatchObject({ code: "ENOENT" });
+			});
+		});
+	});
+
+	it("aborts legacy migration when the canonical root changes at manifest capture", async () => {
+		await withTempDir(async artifactsDir => {
+			const sessionId = `legacy-capture-swap-${path.basename(artifactsDir)}`;
+			const legacy = path.join(artifactsDir, "local");
+			const displacedLegacy = path.join(artifactsDir, "displaced-local");
+			await fs.mkdir(legacy, { recursive: true });
+			await Bun.write(path.join(legacy, "legacy.json"), '{"legacy":true}');
+			await withLocalRoot(sessionId, async localRoot => {
+				const lstat = fs.lstat.bind(fs);
+				let rootSnapshots = 0;
+				const lstatSpy = vi.spyOn(fs, "lstat").mockImplementation((async (
+					target: nodeFs.PathLike,
+					options?: nodeFs.StatOptions,
+				) => {
+					if (path.resolve(String(target)) === legacy && ++rootSnapshots === 3) {
+						await fs.rename(legacy, displacedLegacy);
+						await fs.mkdir(legacy);
+						await Bun.write(path.join(legacy, "replacement.json"), '{"replacement":true}');
+					}
+					return lstat(target, options);
+				}) as unknown as typeof fs.lstat);
+				try {
+					LocalProtocolHandler.setOverride(localOptions(sessionId, artifactsDir));
+					await expect(initializeLocalRoot(LocalProtocolHandler.resolveOptions()!)).rejects.toThrow(
+						"Legacy local:// migration source changed during capture",
+					);
+				} finally {
+					lstatSpy.mockRestore();
+				}
+
+				expect(await fs.readFile(path.join(legacy, "replacement.json"), "utf8")).toBe('{"replacement":true}');
+				expect(await fs.readFile(path.join(displacedLegacy, "legacy.json"), "utf8")).toBe('{"legacy":true}');
+				await expect(fs.lstat(path.join(localRoot, ".gjc-local-legacy-migrated-v1"))).rejects.toMatchObject({
+					code: "ENOENT",
+				});
+				await expect(fs.lstat(path.join(localRoot, "legacy.json"))).rejects.toMatchObject({ code: "ENOENT" });
 			});
 		});
 	});

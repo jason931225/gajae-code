@@ -871,7 +871,7 @@ function notificationRootForCwd(cwd: string): string {
 }
 
 function validBotToken(token: unknown): token is string {
-	return typeof token === "string" && token.length > 0;
+	return typeof token === "string" && token.trim().length > 0;
 }
 
 function isExplicitlyStoppedDaemonState(state: unknown): state is DaemonState {
@@ -7812,6 +7812,12 @@ export class TelegramNotificationDaemon {
 		// before timers or pre-poll startup work can invalidate this run.
 		// Best-effort; notification delivery remains available on failure.
 		await this.startLifecycleControl();
+		// A stop may arrive while lifecycle startup awaits its control endpoint.
+		// Do not re-enable runtime work after that stop; close the partial server.
+		if (!this.running) {
+			this.stopLifecycleControl();
+			return;
+		}
 		this.runtime.start();
 		this.startOwnershipHeartbeatTimer();
 		this.startFlushTimer();

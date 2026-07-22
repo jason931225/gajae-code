@@ -264,15 +264,15 @@ it("passes the daemon-derived audit key through real lifecycle startup without a
 	expect(registered).toBe(1);
 });
 
-it("does not attach lifecycle audit dependencies or fall back when daemon key derivation has no token", async () => {
-	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-daemon-missing-audit-key-"));
+it("rejects a whitespace-only token before lifecycle, timer, or Bot API activity", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-daemon-whitespace-token-"));
 	const settings = daemonSettings(agentDir);
-	await startAsOwner(settings, "missing-audit-key-owner", "bot-token");
-
 	let dependenciesBuilt = 0;
 	let registered = 0;
 	let started = 0;
 	let stopped = 0;
+	let intervalsStarted = 0;
+	let apiCalls = 0;
 	const factory: LifecycleControlServerFactory = () =>
 		({
 			onLifecycleRequest: () => {
@@ -288,16 +288,19 @@ it("does not attach lifecycle audit dependencies or fall back when daemon key de
 		}) as LifecycleControlServer;
 	const daemon = new TelegramNotificationDaemon({
 		settings,
-		ownerId: "missing-audit-key-owner",
-		botToken: undefined as unknown as string,
+		ownerId: "whitespace-token-owner",
+		botToken: " \t\n ",
 		chatId: PAIRED,
-		botApi: { call: async () => ({ ok: true, result: [] }) } as never,
-		idleTimeoutMs: 10,
-		now: (() => {
-			let now = 0;
-			return () => (now += 11);
-		})(),
-		setTimeoutImpl: immediateTimeout(),
+		botApi: {
+			call: async () => {
+				apiCalls++;
+				return { ok: true, result: [] };
+			},
+		} as never,
+		setIntervalImpl: ((..._args: unknown[]) => {
+			intervalsStarted++;
+			return 0;
+		}) as unknown as typeof setInterval,
 		createLifecycleControlServer: factory,
 		createLifecycleOrchestratorDeps: () => {
 			dependenciesBuilt++;
@@ -307,7 +310,59 @@ it("does not attach lifecycle audit dependencies or fall back when daemon key de
 
 	await daemon.run();
 
-	expect([dependenciesBuilt, registered, started, stopped]).toEqual([0, 0, 0, 0]);
+	expect([dependenciesBuilt, registered, started, stopped, intervalsStarted, apiCalls]).toEqual([0, 0, 0, 0, 0, 0]);
+});
+
+it("does not resume daemon startup after stop during deferred lifecycle startup", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-daemon-lifecycle-stop-"));
+	const settings = daemonSettings(agentDir);
+	await startAsOwner(settings, "lifecycle-stop-owner", "123456:secret-token");
+	const lifecycleStarted = Promise.withResolvers<void>();
+	const releaseLifecycleStart = Promise.withResolvers<void>();
+	let registered = 0;
+	let stopped = 0;
+	let intervalsStarted = 0;
+	let apiCalls = 0;
+	const factory: LifecycleControlServerFactory = () =>
+		({
+			onLifecycleRequest: () => {
+				registered++;
+			},
+			respond: () => {},
+			start: async () => {
+				lifecycleStarted.resolve();
+				await releaseLifecycleStart.promise;
+			},
+			stop: () => {
+				stopped++;
+			},
+		}) as LifecycleControlServer;
+	const daemon = new TelegramNotificationDaemon({
+		settings,
+		ownerId: "lifecycle-stop-owner",
+		botToken: "123456:secret-token",
+		chatId: PAIRED,
+		botApi: {
+			call: async () => {
+				apiCalls++;
+				return { ok: true, result: [] };
+			},
+		} as never,
+		setIntervalImpl: ((..._args: unknown[]) => {
+			intervalsStarted++;
+			return 0;
+		}) as unknown as typeof setInterval,
+		createLifecycleControlServer: factory,
+		createLifecycleOrchestratorDeps: () => stubDeps(),
+	});
+
+	const run = daemon.run();
+	await lifecycleStarted.promise;
+	daemon.requestStop();
+	releaseLifecycleStart.resolve();
+	await run;
+
+	expect([registered, stopped, intervalsStarted, apiCalls]).toEqual([1, 1, 0, 0]);
 });
 
 describe("lifecycle control runtime", () => {

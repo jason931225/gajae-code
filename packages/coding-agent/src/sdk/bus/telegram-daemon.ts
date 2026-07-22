@@ -143,7 +143,7 @@ export interface TelegramDaemonFs {
 	open(path: string, flags: string, mode?: number): Promise<{ close(): Promise<void> }>;
 	readdir(path: string): Promise<string[]>;
 	chmod(path: string, mode: number): Promise<void>;
-	stat?(path: string): Promise<{ mtimeMs: number }>;
+	stat?(path: string): Promise<{ mtimeMs: number; size?: number; dev?: number; ino?: number; ctimeMs?: number }>;
 	readEndpointFile?(path: string): Promise<NotificationEndpointFile>;
 	exactUnlink?(path: string, identity: NotificationEndpointFileIdentity): Promise<NotificationExactUnlinkResult>;
 }
@@ -507,9 +507,17 @@ type LegacyOwnershipLockMetadata = {
 	incarnation?: string;
 	startedAt: number;
 };
+type V010OwnershipLockMetadata = {
+	size: 0;
+	mtimeMs?: number;
+	dev?: number;
+	ino?: number;
+	ctimeMs?: number;
+};
 type OwnershipLockRead =
 	| { kind: "missing" }
 	| { kind: "malformed"; raw: string; mtimeMs?: number }
+	| { kind: "v010"; metadata: V010OwnershipLockMetadata }
 	| { kind: "legacy"; metadata: LegacyOwnershipLockMetadata }
 	| { kind: "valid"; metadata: OwnershipLockMetadata };
 
@@ -521,6 +529,20 @@ export async function readOwnershipLock(fsImpl: TelegramDaemonFs, file: string):
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
 		throw error;
+	}
+	if (raw.length === 0) {
+		const stat = await fsImpl.stat?.(file).catch(() => undefined);
+		if (stat?.size !== 0) return { kind: "malformed", raw, mtimeMs: stat?.mtimeMs };
+		return {
+			kind: "v010",
+			metadata: {
+				size: 0,
+				...(stat?.mtimeMs === undefined ? {} : { mtimeMs: stat.mtimeMs }),
+				...(stat?.dev === undefined ? {} : { dev: stat.dev }),
+				...(stat?.ino === undefined ? {} : { ino: stat.ino }),
+				...(stat?.ctimeMs === undefined ? {} : { ctimeMs: stat.ctimeMs }),
+			},
+		};
 	}
 	try {
 		const value = JSON.parse(raw) as Partial<OwnershipLockMetadata>;
@@ -564,6 +586,7 @@ export function liveOwnershipLockDecision(input: {
 	| { acquired: false; attached: false; blocked: true }
 	| { acquired: false; attached: false; provisional: true }
 	| undefined {
+	if (input.lock.kind === "v010") return { acquired: false, attached: false, blocked: true };
 	if (input.lock.kind !== "valid" && input.lock.kind !== "legacy") return undefined;
 	if (!input.pidAlive(input.lock.metadata.pid)) return undefined;
 	if (input.lock.kind === "legacy") {
@@ -585,8 +608,9 @@ function ownershipLockMatches(left: OwnershipLockRead, right: OwnershipLockRead)
 	if (left.kind === "missing") return true;
 	if (left.kind === "malformed" && right.kind === "malformed")
 		return left.raw === right.raw && left.mtimeMs !== undefined && left.mtimeMs === right.mtimeMs;
-	if ((left.kind !== "valid" && left.kind !== "legacy") || (right.kind !== "valid" && right.kind !== "legacy"))
-		return false;
+	if ((left.kind === "legacy" && right.kind === "legacy") || (left.kind === "v010" && right.kind === "v010"))
+		return JSON.stringify(left.metadata) === JSON.stringify(right.metadata);
+	if (left.kind !== "valid" || right.kind !== "valid") return false;
 	return JSON.stringify(left.metadata) === JSON.stringify(right.metadata);
 }
 
@@ -601,10 +625,22 @@ function ownershipLockMatchesState(lock: OwnershipLockRead, state: DaemonState |
 	);
 }
 
-function ownershipLockMatchesStoppedState(lock: OwnershipLockRead, state: unknown): boolean {
+function ownershipLockMatchesStoppedState(
+	lock: OwnershipLockRead,
+	state: unknown,
+	pidAlive: (pid: number) => boolean,
+): boolean {
 	if (isExplicitlyStoppedDaemonState(state)) return ownershipLockMatchesState(lock, state);
-	if (!isLegacyStoppedDaemonState(state) || lock.kind !== "legacy") return false;
-	const legacyState = state as Pick<DaemonState, "pid" | "startedAt"> & { stoppedAt: number };
+	if (!isLegacyStoppedDaemonState(state)) return false;
+	const legacyState = state as Pick<DaemonState, "pid" | "startedAt" | "generation"> & { stoppedAt: number };
+	if (lock.kind === "v010")
+		return (
+			legacyState.generation === 3 &&
+			!pidAlive(legacyState.pid) &&
+			lock.metadata.mtimeMs !== undefined &&
+			lock.metadata.mtimeMs <= legacyState.stoppedAt
+		);
+	if (lock.kind !== "legacy") return false;
 	return (
 		lock.metadata.pid === legacyState.pid &&
 		lock.metadata.startedAt <= legacyState.startedAt &&
@@ -622,6 +658,17 @@ async function transitionLockIsHeldByCaller(input: {
 
 function ownershipLockMatchesMetadata(lock: OwnershipLockRead, metadata: OwnershipLockMetadata): boolean {
 	return lock.kind === "valid" && JSON.stringify(lock.metadata) === JSON.stringify(metadata);
+}
+
+async function unlinkOwnershipLockExactly(
+	fsImpl: TelegramDaemonFs,
+	file: string,
+	expected: OwnershipLockRead,
+): Promise<boolean> {
+	if (expected.kind === "missing" || !fsImpl.readEndpointFile || !fsImpl.exactUnlink) return false;
+	const endpoint = await fsImpl.readEndpointFile(file).catch(() => undefined);
+	if (!endpoint || !ownershipLockMatches(expected, await readOwnershipLock(fsImpl, file))) return false;
+	return (await fsImpl.exactUnlink(file, endpoint.identity)).ok;
 }
 
 /**
@@ -687,6 +734,7 @@ async function ownershipLockIsReclaimable(input: {
 	pidIncarnation: (pid: number) => string | undefined;
 }): Promise<boolean> {
 	if (input.lock.kind === "missing") return true;
+	if (input.lock.kind === "v010") return false;
 	if (input.lock.kind === "malformed") {
 		if (!input.fs.stat) return false;
 		const stat = await input.fs.stat(input.path).catch(() => undefined);
@@ -959,24 +1007,98 @@ export function hasSafeDaemonStateShape(state: unknown): state is DaemonState {
 	);
 }
 
-type LegacyParentDaemonState = Omit<DaemonState, "incarnation" | "acquisitionId" | "ownershipPhase" | "generation"> & {
+const V010_PARENT_STATE_KEYS = [
+	"pid",
+	"ownerId",
+	"tokenFingerprint",
+	"chatId",
+	"startedAt",
+	"heartbeatAt",
+	"roots",
+	"version",
+] as const;
+const V010_GENERATION_3_PARENT_STATE_KEYS = [...V010_PARENT_STATE_KEYS, "generation"] as const;
+
+type ParentDaemonStateBase = Omit<
+	DaemonState,
+	"incarnation" | "acquisitionId" | "ownershipPhase" | "generation" | "launcherPid"
+> & {
 	incarnation?: undefined;
 	acquisitionId?: undefined;
 	ownershipPhase?: undefined;
+	generation?: unknown;
+	launcherPid?: undefined;
+};
+type GenerationAbsentParentDaemonState = Omit<ParentDaemonStateBase, "generation"> & {
 	generation?: undefined;
 };
+type Generation3ReleaseDaemonState = Omit<ParentDaemonStateBase, "generation"> & {
+	generation: 3;
+};
+export type LegacyParentDaemonState = GenerationAbsentParentDaemonState | Generation3ReleaseDaemonState;
 
 interface LegacyMigrationAttestation {
+	stateDigest: string;
+	confirmed?: true;
+	lock?: V010OwnershipLockMetadata;
 	pid: number;
 	incarnation: string;
 	heartbeatAt: number;
 	observedAt: number;
+	tokenFingerprint: string;
+	chatId: string;
 }
 
-function isLegacyParentDaemonState(state: unknown): state is LegacyParentDaemonState {
-	const candidate = state as Partial<LegacyParentDaemonState> | undefined;
+function historicalStateSerializer(state: LegacyParentDaemonState): string {
+	const historicalState = {
+		pid: state.pid,
+		ownerId: state.ownerId,
+		tokenFingerprint: state.tokenFingerprint,
+		chatId: state.chatId,
+		startedAt: state.startedAt,
+		heartbeatAt: state.heartbeatAt,
+		roots: state.roots,
+		version: state.version,
+		...(state.generation === undefined ? {} : { generation: 3 }),
+	};
+	return `${JSON.stringify(historicalState, null, 2)}\n`;
+}
+
+function legacyParentStateDigest(state: LegacyParentDaemonState): string {
+	const { heartbeatAt: _heartbeatAt, ...immutableState } = state;
+	return crypto
+		.createHash("sha256")
+		.update(historicalStateSerializer({ ...immutableState, heartbeatAt: 0 }))
+		.digest("hex");
+}
+
+function hasExactParentStateKeys(state: object, keys: readonly string[]): boolean {
+	const actual = Object.keys(state);
+	return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
+}
+
+function isGenerationAbsentParentDaemonState(state: unknown): state is GenerationAbsentParentDaemonState {
+	return hasParentDaemonStateShape(state) && hasExactParentStateKeys(state, V010_PARENT_STATE_KEYS);
+}
+
+function isGeneration3ReleaseDaemonState(state: unknown): state is Generation3ReleaseDaemonState {
+	return (
+		hasParentDaemonStateShape(state) &&
+		state.generation === 3 &&
+		hasExactParentStateKeys(state, V010_GENERATION_3_PARENT_STATE_KEYS)
+	);
+}
+
+function isParentDaemonState(state: unknown): state is LegacyParentDaemonState {
+	return isGenerationAbsentParentDaemonState(state) || isGeneration3ReleaseDaemonState(state);
+}
+
+function hasParentDaemonStateShape(state: unknown): state is ParentDaemonStateBase {
+	const candidate = state as Partial<ParentDaemonStateBase> | undefined;
 	return Boolean(
 		candidate &&
+			typeof candidate === "object" &&
+			!Array.isArray(candidate) &&
 			Number.isSafeInteger(candidate.pid) &&
 			(candidate.pid ?? 0) > 0 &&
 			typeof candidate.ownerId === "string" &&
@@ -991,9 +1113,68 @@ function isLegacyParentDaemonState(state: unknown): state is LegacyParentDaemonS
 			candidate.incarnation === undefined &&
 			candidate.acquisitionId === undefined &&
 			candidate.ownershipPhase === undefined &&
-			candidate.generation === undefined &&
-			candidate.stoppedAt === undefined,
+			candidate.launcherPid === undefined &&
+			candidate.stoppedAt === undefined &&
+			(candidate.generation === undefined || candidate.generation === 3),
 	);
+}
+
+const isLegacyParentDaemonState = isParentDaemonState;
+
+/**
+ * A live v0.10-shaped record is authority only in its exact historical form.
+ * Parsed JSON alone cannot establish that form: field order and serialization
+ * bytes are part of the migration attestation.
+ */
+async function isLiveNoncanonicalParentState(input: {
+	fs: TelegramDaemonFs;
+	statePath: string;
+	state: unknown;
+	pidAlive: (pid: number) => boolean;
+	pidIncarnation: (pid: number) => string | undefined;
+	tokenFingerprint: string;
+	chatId: string;
+}): Promise<boolean> {
+	const candidate = input.state as Partial<ParentDaemonStateBase> | undefined;
+	if (
+		!candidate ||
+		typeof candidate !== "object" ||
+		Array.isArray(candidate) ||
+		!validDaemonPid(candidate.pid) ||
+		typeof candidate.ownerId !== "string" ||
+		candidate.ownerId.length === 0 ||
+		typeof candidate.tokenFingerprint !== "string" ||
+		typeof candidate.chatId !== "string" ||
+		!Number.isSafeInteger(candidate.startedAt) ||
+		!Number.isSafeInteger(candidate.heartbeatAt) ||
+		!Array.isArray(candidate.roots) ||
+		!candidate.roots.every(root => typeof root === "string") ||
+		candidate.version !== DAEMON_VERSION ||
+		!input.pidAlive(candidate.pid)
+	)
+		return false;
+	if (
+		isStoppedDaemonState(candidate) ||
+		(candidate.incarnation !== undefined &&
+			(candidate.acquisitionId !== undefined || candidate.ownershipPhase !== undefined))
+	)
+		return false;
+	if (
+		candidate.incarnation !== undefined &&
+		isProcessIncarnation(input.pidIncarnation(candidate.pid)) &&
+		input.pidIncarnation(candidate.pid) !== candidate.incarnation &&
+		!(candidate.tokenFingerprint === input.tokenFingerprint && candidate.chatId === input.chatId)
+	)
+		return false;
+	if (!isParentDaemonState(candidate)) return true;
+	try {
+		return (await input.fs.readFile(input.statePath, "utf8")) !== historicalStateSerializer(candidate);
+	} catch {
+		return false;
+	}
+}
+function legacyOwnershipLockMatchesHandoffState(lock: OwnershipLockRead, state: unknown): boolean {
+	return lock.kind === "v010" && isGeneration3ReleaseDaemonState(state);
 }
 
 function legacyMigrationAttestationPath(statePath: string): string {
@@ -1003,6 +1184,7 @@ function legacyMigrationAttestationPath(statePath: string): string {
 async function legacyParentHandoffDecision(input: {
 	fs: TelegramDaemonFs;
 	statePath: string;
+	lockPath: string;
 	state: LegacyParentDaemonState;
 	now: number;
 	pidAlive: (pid: number) => boolean;
@@ -1010,7 +1192,15 @@ async function legacyParentHandoffDecision(input: {
 	tokenFingerprint: string;
 	chatId: string;
 }): Promise<
-	{ acquired: false; attached: false; provisional?: boolean; reloadRequired?: boolean; blocked?: boolean } | undefined
+	| {
+			acquired: false;
+			attached: false;
+			provisional?: boolean;
+			reloadRequired?: boolean;
+			legacyReloadRequired?: boolean;
+			blocked?: boolean;
+	  }
+	| undefined
 > {
 	const { state } = input;
 	if (!input.pidAlive(state.pid)) return undefined;
@@ -1018,33 +1208,133 @@ async function legacyParentHandoffDecision(input: {
 		return { acquired: false, attached: false, blocked: true };
 	const incarnation = input.pidIncarnation(state.pid);
 	if (!isProcessIncarnation(incarnation)) return { acquired: false, attached: false, blocked: true };
-	const attestationPath = legacyMigrationAttestationPath(input.statePath);
-	const previous = await readJson<LegacyMigrationAttestation>(input.fs, attestationPath);
+	let stateBytes: string;
+	try {
+		stateBytes = await input.fs.readFile(input.statePath, "utf8");
+	} catch {
+		return { acquired: false, attached: false, provisional: true };
+	}
+	if (stateBytes !== historicalStateSerializer(state)) return { acquired: false, attached: false, blocked: true };
+	const lock = await readOwnershipLock(input.fs, input.lockPath);
+	const attestationLock =
+		state.generation === undefined && lock.kind === "missing"
+			? undefined
+			: lock.kind === "v010" && legacyOwnershipLockMatchesHandoffState(lock, state)
+				? lock.metadata
+				: null;
+	if (attestationLock === null) return { acquired: false, attached: false, blocked: true };
+	const previous = await readJson<LegacyMigrationAttestation>(
+		input.fs,
+		legacyMigrationAttestationPath(input.statePath),
+	);
+	const stateDigest = legacyParentStateDigest(state);
 	const attested = Boolean(
 		previous &&
-			Number.isSafeInteger(previous.pid) &&
-			isProcessIncarnation(previous.incarnation) &&
-			Number.isSafeInteger(previous.heartbeatAt) &&
-			Number.isSafeInteger(previous.observedAt) &&
+			previous.stateDigest === stateDigest &&
+			JSON.stringify(previous.lock) === JSON.stringify(attestationLock) &&
 			previous.pid === state.pid &&
 			previous.incarnation === incarnation &&
+			previous.tokenFingerprint === input.tokenFingerprint &&
+			previous.chatId === input.chatId &&
 			state.heartbeatAt > previous.heartbeatAt &&
 			input.now - previous.observedAt <= HEARTBEAT_TTL_MS,
 	);
-	await writeJsonAtomic(input.fs, attestationPath, {
+	await writeJsonAtomic(input.fs, legacyMigrationAttestationPath(input.statePath), {
+		stateDigest,
+		...(attested ? { confirmed: true as const } : {}),
+		...(attestationLock === undefined ? {} : { lock: attestationLock }),
 		pid: state.pid,
 		incarnation,
 		heartbeatAt: state.heartbeatAt,
 		observedAt: input.now,
+		tokenFingerprint: input.tokenFingerprint,
+		chatId: input.chatId,
 	} satisfies LegacyMigrationAttestation);
-	return attested
-		? { acquired: false, attached: false, reloadRequired: true }
-		: { acquired: false, attached: false, provisional: true };
+	if (!attested) return { acquired: false, attached: false, provisional: true };
+	return { acquired: false, attached: false, reloadRequired: true, legacyReloadRequired: true };
+}
+
+export interface AttestedLegacyDaemonOwner {
+	state: LegacyParentDaemonState;
+	incarnation: string;
+}
+
+/** Revalidate the exact two-observation legacy proof immediately before signaling. */
+export async function readAttestedLegacyDaemonOwner(input: {
+	settings: Settings;
+	fs?: TelegramDaemonFs;
+	now?: () => number;
+	pidIncarnation?: (pid: number) => string | undefined;
+	tokenFingerprint: string;
+	chatId: string;
+}): Promise<AttestedLegacyDaemonOwner | undefined> {
+	const fsImpl = input.fs ?? nodeFs;
+	const paths = daemonPaths(input.settings.getAgentDir());
+	const state = await readJson<unknown>(fsImpl, paths.state);
+	if (!isGeneration3ReleaseDaemonState(state)) return undefined;
+	let stateBytes: string;
+	try {
+		stateBytes = await fsImpl.readFile(paths.state, "utf8");
+	} catch {
+		return undefined;
+	}
+	if (stateBytes !== historicalStateSerializer(state)) return undefined;
+	const lock = await readOwnershipLock(fsImpl, paths.lock);
+	if (lock.kind !== "v010") return undefined;
+	const attestation = await readJson<LegacyMigrationAttestation>(fsImpl, legacyMigrationAttestationPath(paths.state));
+	const incarnation = (input.pidIncarnation ?? defaultPidIncarnation)(state.pid);
+	const now = (input.now ?? Date.now)();
+	if (
+		attestation?.confirmed !== true ||
+		!isProcessIncarnation(incarnation) ||
+		attestation.stateDigest !== legacyParentStateDigest(state) ||
+		JSON.stringify(attestation.lock) !== JSON.stringify(lock.metadata) ||
+		attestation.pid !== state.pid ||
+		attestation.incarnation !== incarnation ||
+		attestation.tokenFingerprint !== input.tokenFingerprint ||
+		attestation.chatId !== input.chatId ||
+		attestation.heartbeatAt > state.heartbeatAt ||
+		now < attestation.observedAt ||
+		now - attestation.observedAt > HEARTBEAT_TTL_MS
+	)
+		return undefined;
+	return { state, incarnation };
 }
 
 function isRecognizedLegacyGeneration(generation: number | undefined): boolean {
-	return (
-		generation === undefined || (Number.isSafeInteger(generation) && generation > 0 && generation < DAEMON_GENERATION)
+	return generation === undefined || generation === 3;
+}
+
+/**
+ * A predecessor is reloadable only when it has the complete modern ownership
+ * proof. Generation is absent from the first fully-provenanced modern records,
+ * so it is an incompatible predecessor too; parent-format records remain
+ * excluded because they lack this ownership proof.
+ */
+function hasFullModernOwnerProvenance(
+	state: DaemonState | undefined,
+	pidIncarnation?: (pid: number) => string | undefined,
+): boolean {
+	return Boolean(
+		hasSafeDaemonStateShape(state) &&
+			state.generation !== 3 &&
+			state.ownershipPhase === "ready" &&
+			typeof state.acquisitionId === "string" &&
+			state.acquisitionId.length > 0 &&
+			ownerProvenanceMatches(state, pidIncarnation),
+	);
+}
+
+function isFullModernPredecessor(
+	state: DaemonState | undefined,
+	pidIncarnation?: (pid: number) => string | undefined,
+): boolean {
+	return Boolean(
+		hasFullModernOwnerProvenance(state, pidIncarnation) &&
+			(state?.generation === undefined ||
+				(Number.isSafeInteger(state?.generation) &&
+					(state?.generation as number) > 0 &&
+					(state?.generation as number) < DAEMON_GENERATION)),
 	);
 }
 
@@ -1086,18 +1376,23 @@ export function isPhysicalMatchingOwner(input: {
 	pidAlive: (pid: number) => boolean;
 	pidIncarnation?: (pid: number) => string | undefined;
 }): boolean {
-	const { state } = input;
-	return Boolean(
-		state &&
-			hasSafeDaemonStateShape(state) &&
-			state.stoppedAt === undefined &&
-			ownerIdentityMatches(state, input.tokenFingerprint, input.chatId) &&
-			input.pidAlive(state.pid) &&
-			ownerProvenanceMatches(state, input.pidIncarnation),
-	);
+	const persistedState: unknown = input.state;
+	const legacyParentState = isLegacyParentDaemonState(persistedState) ? persistedState : undefined;
+	const modernState = hasSafeDaemonStateShape(persistedState) ? persistedState : undefined;
+	const state = modernState ?? legacyParentState;
+	if (
+		!state ||
+		state.stoppedAt !== undefined ||
+		!ownerIdentityMatches(state, input.tokenFingerprint, input.chatId) ||
+		!input.pidAlive(state.pid)
+	)
+		return false;
+	return legacyParentState
+		? isProcessIncarnation((input.pidIncarnation ?? defaultPidIncarnation)(legacyParentState.pid))
+		: modernState !== undefined && ownerProvenanceMatches(modernState, input.pidIncarnation);
 }
 
-/** True only for a signalable legacy owner or this generation's ready bound child. */
+/** True only for a fully-provenanced modern owner outside the generation-3 parent schema. */
 export function isSignalableMatchingOwner(input: {
 	state: DaemonState | undefined;
 	tokenFingerprint: string;
@@ -1106,14 +1401,7 @@ export function isSignalableMatchingOwner(input: {
 	pidIncarnation?: (pid: number) => string | undefined;
 }): boolean {
 	const { state } = input;
-	return Boolean(
-		isPhysicalMatchingOwner(input) &&
-			(isRecognizedLegacyGeneration(state?.generation) ||
-				(state?.generation === DAEMON_GENERATION &&
-					state.ownershipPhase === "ready" &&
-					typeof state.acquisitionId === "string" &&
-					state.acquisitionId.length > 0)),
-	);
+	return Boolean(isPhysicalMatchingOwner(input) && hasFullModernOwnerProvenance(state, input.pidIncarnation));
 }
 
 export function isFreshLiveOwner(input: {
@@ -1180,6 +1468,7 @@ export async function acquireDaemonOwnership(input: {
 	provisional?: boolean;
 	reason?: "identity_mismatch";
 	reloadRequired?: boolean;
+	legacyReloadRequired?: boolean;
 }> {
 	const fsImpl = input.fs ?? nodeFs;
 	const now = input.now ?? Date.now;
@@ -1216,6 +1505,7 @@ export async function acquireDaemonOwnership(input: {
 		}
 		if (!state || state.stoppedAt !== undefined || !ownerIdentityMatches(state, input.tokenFingerprint, input.chatId))
 			return undefined;
+		if (state.generation === 3) return { acquired: false, attached: false, blocked: true };
 		// Unavailable provenance is ambiguous and must remain fail-closed. A
 		// different authoritative incarnation proves PID reuse, so allow only the
 		// transition-locked path below to reclaim the stale owner artifacts.
@@ -1238,19 +1528,18 @@ export async function acquireDaemonOwnership(input: {
 		)
 			return { acquired: false, attached: true };
 		// A physical owner that cannot prove current compatibility is never safe to
-		// attach. Legacy, stale, and malformed generations require a handoff;
-		// otherwise retain the explicit provisional classification.
+		// attach. A reload handoff additionally requires a fresh heartbeat: a stale
+		// record must remain blocked rather than authorizing a signal to its PID.
 		if (
-			state.version !== DAEMON_VERSION ||
-			!isFreshLiveOwner({
+			isFreshLiveOwner({
 				state,
 				now: now(),
 				tokenFingerprint: input.tokenFingerprint,
 				chatId: input.chatId,
 				pidAlive,
 				pidIncarnation,
-			}) ||
-			isRecognizedLegacyGeneration(state.generation)
+			}) &&
+			(state.version !== DAEMON_VERSION || isFullModernPredecessor(state, pidIncarnation))
 		)
 			return { acquired: false, attached: false, reloadRequired: true };
 		return { acquired: false, attached: false, provisional: true };
@@ -1278,12 +1567,48 @@ export async function acquireDaemonOwnership(input: {
 			? { acquired: false, attached: false, blocked: true, reason: "identity_mismatch" }
 			: { acquired: false, attached: false, blocked: true };
 	}
+	if (
+		await isLiveNoncanonicalParentState({
+			fs: fsImpl,
+			statePath: paths.state,
+			state: existing,
+			pidAlive,
+			pidIncarnation,
+			tokenFingerprint: input.tokenFingerprint,
+			chatId: input.chatId,
+		})
+	)
+		return { acquired: false, attached: false, blocked: true };
 
 	const transition = await acquireTransitionLock({ fs: fsImpl, path: paths.steal, pidAlive, pidIncarnation });
 	if (!transition) return { acquired: false, attached: false, provisional: true };
 	try {
 		const rechecked = await readJson<DaemonState>(fsImpl, paths.state);
 		const recheckedLock = await readOwnershipLock(fsImpl, paths.lock);
+		const recheckedForeignOwner = classifyForeignLiveOwner({
+			state: rechecked,
+			tokenFingerprint: input.tokenFingerprint,
+			chatId: input.chatId,
+			pidAlive,
+			pidIncarnation,
+		});
+		if (recheckedForeignOwner) {
+			return recheckedForeignOwner === "identity_mismatch"
+				? { acquired: false, attached: false, blocked: true, reason: "identity_mismatch" }
+				: { acquired: false, attached: false, blocked: true };
+		}
+		if (
+			await isLiveNoncanonicalParentState({
+				fs: fsImpl,
+				statePath: paths.state,
+				state: rechecked,
+				pidAlive,
+				pidIncarnation,
+				tokenFingerprint: input.tokenFingerprint,
+				chatId: input.chatId,
+			})
+		)
+			return { acquired: false, attached: false, blocked: true };
 		const recheckedDecision = isLegacyParentDaemonState(rechecked) ? undefined : attachDecision(rechecked);
 		if (
 			recheckedDecision &&
@@ -1297,13 +1622,19 @@ export async function acquireDaemonOwnership(input: {
 		// A newer initializer may have replaced the pathname while that tombstone
 		// remained, and must receive the same liveness/freshness protection as any
 		// other live reservation.
-		const stoppedLockMatches = ownershipLockMatchesStoppedState(recheckedLock, rechecked);
-		const lockDecision = stoppedLockMatches
-			? undefined
-			: liveOwnershipLockDecision({ lock: recheckedLock, pidAlive, pidIncarnation });
+		const stoppedLockMatches = ownershipLockMatchesStoppedState(recheckedLock, rechecked, pidAlive);
+		// A v0.10 parent owns a legacy { pid, startedAt } lock. An exact
+		// state/lock pair is authority only to attest or retry handoff of that
+		// owner; it is never attached or unlinked here.
+		const legacyHandoffLockMatches = legacyOwnershipLockMatchesHandoffState(recheckedLock, rechecked);
+		const lockDecision =
+			stoppedLockMatches || legacyHandoffLockMatches
+				? undefined
+				: liveOwnershipLockDecision({ lock: recheckedLock, pidAlive, pidIncarnation });
 		if (lockDecision) return lockDecision;
 		if (
 			!stoppedLockMatches &&
+			!legacyHandoffLockMatches &&
 			!(await ownershipLockIsReclaimable({
 				fs: fsImpl,
 				path: paths.lock,
@@ -1318,6 +1649,7 @@ export async function acquireDaemonOwnership(input: {
 			const legacyDecision = await legacyParentHandoffDecision({
 				fs: fsImpl,
 				statePath: paths.state,
+				lockPath: paths.lock,
 				state: rechecked,
 				now: now(),
 				pidAlive,
@@ -1328,18 +1660,6 @@ export async function acquireDaemonOwnership(input: {
 			if (legacyDecision) return legacyDecision;
 		} else if (recheckedDecision) {
 			return recheckedDecision;
-		}
-		const recheckedForeignOwner = classifyForeignLiveOwner({
-			state: rechecked,
-			tokenFingerprint: input.tokenFingerprint,
-			chatId: input.chatId,
-			pidAlive,
-			pidIncarnation,
-		});
-		if (recheckedForeignOwner) {
-			return recheckedForeignOwner === "identity_mismatch"
-				? { acquired: false, attached: false, blocked: true, reason: "identity_mismatch" }
-				: { acquired: false, attached: false, blocked: true };
 		}
 		if (
 			hasSafeDaemonStateShape(rechecked) &&
@@ -1354,7 +1674,8 @@ export async function acquireDaemonOwnership(input: {
 		if (currentLock.kind !== "missing") {
 			if (!(await transitionLockIsHeldByCaller({ fs: fsImpl, path: paths.steal, lock: transition })))
 				return { acquired: false, attached: false, provisional: true };
-			await fsImpl.unlink(paths.lock);
+			if (!(await unlinkOwnershipLockExactly(fsImpl, paths.lock, currentLock)))
+				return { acquired: false, attached: false, provisional: true };
 		}
 		const ownershipLock: OwnershipLockMetadata = {
 			pid,
@@ -1590,14 +1911,15 @@ export async function retireProvisionalDaemonOwnership(input: {
 		)
 			return false;
 		if (!(await transitionLockIsHeldByCaller({ fs: fsImpl, path: paths.steal, lock: transition }))) return false;
+		const lock = await readOwnershipLock(fsImpl, paths.lock);
+		if (!ownershipLockMatchesState(lock, state)) return false;
 		await writeJsonAtomic(fsImpl, paths.state, {
 			...state,
 			ownershipPhase: "retired",
 			stoppedAt: (input.now ?? Date.now)(),
 		});
-		if (await transitionLockIsHeldByCaller({ fs: fsImpl, path: paths.steal, lock: transition }))
-			await fsImpl.unlink(paths.lock).catch(() => undefined);
-		return true;
+		if (!(await transitionLockIsHeldByCaller({ fs: fsImpl, path: paths.steal, lock: transition }))) return false;
+		return await unlinkOwnershipLockExactly(fsImpl, paths.lock, lock);
 	} finally {
 		await releaseDaemonTransitionLock({ fs: fsImpl, path: paths.steal, lock: transition });
 	}
@@ -1754,6 +2076,8 @@ export async function confirmTelegramDaemonSpawn(input: {
 	sleep?: (ms: number) => Promise<void>;
 	waitStepMs?: number;
 	timeoutMs?: number;
+	/** Retain an unproven no-PID child lease during a successor handoff. */
+	preserveOnUnprovenChildExit?: boolean;
 }): Promise<boolean> {
 	if (input.spawned.result !== "owner_spawned") return true;
 	const childPid = input.spawned.acquisition.pid;
@@ -1775,6 +2099,14 @@ export async function confirmTelegramDaemonSpawn(input: {
 		timeoutMs: input.timeoutMs,
 	});
 	if (ready) return true;
+	// An identified live child remains fenced. A no-PID launch retains its lease
+	// only when a successor handoff explicitly requests that protection; ordinary
+	// confirmation keeps the historical cleanup behavior.
+	if (
+		(hasExactChildPid && (input.pidAlive ?? defaultPidAlive)(childPid as number)) ||
+		(!hasExactChildPid && input.preserveOnUnprovenChildExit)
+	)
+		return false;
 	const launcherPid = input.spawned.acquisition.launcherPid ?? input.pid;
 	const retired = await retireProvisionalDaemonOwnership({
 		settings: input.settings,
@@ -1856,9 +2188,11 @@ export async function releaseDaemonOwnership(input: {
 		)
 			return;
 		if (!(await transitionLockIsHeldByCaller({ fs: fsImpl, path: paths.steal, lock: transition }))) return;
+		const lock = await readOwnershipLock(fsImpl, paths.lock);
+		if (!ownershipLockMatchesState(lock, state)) return;
 		await writeJsonAtomic(fsImpl, paths.state, { ...state, stoppedAt: (input.now ?? Date.now)() });
 		if (await transitionLockIsHeldByCaller({ fs: fsImpl, path: paths.steal, lock: transition }))
-			await fsImpl.unlink(paths.lock).catch(() => undefined);
+			await unlinkOwnershipLockExactly(fsImpl, paths.lock, lock);
 	} finally {
 		await releaseDaemonTransitionLock({ fs: fsImpl, path: paths.steal, lock: transition });
 	}
@@ -1945,7 +2279,13 @@ export interface TelegramSpawnAcquisition {
 
 export type TelegramSpawnOwnerResult =
 	| { result: "owner_spawned"; acquisition: TelegramSpawnAcquisition; runtime: DaemonRuntimeInfo; warnings: string[] }
-	| { result: "attached"; runtime: DaemonRuntimeInfo; warnings: string[]; reloadRequired?: boolean }
+	| {
+			result: "attached";
+			runtime: DaemonRuntimeInfo;
+			warnings: string[];
+			reloadRequired?: boolean;
+			legacyReloadRequired?: boolean;
+	  }
 	| { result: "blocked"; runtime: DaemonRuntimeInfo; warnings: string[]; reloadRequired?: boolean };
 
 /**
@@ -2028,6 +2368,7 @@ export async function spawnTelegramDaemonOwner(
 			runtime: buildTelegramDaemonSpawnArgs({ execPath, ownerId: "", agentDir }).runtime,
 			warnings: [],
 			reloadRequired: ownership.reloadRequired,
+			legacyReloadRequired: ownership.legacyReloadRequired,
 		};
 	}
 	const launcherPid = deps.pid ?? process.pid;
@@ -2211,6 +2552,13 @@ export async function ensureTelegramDaemonRunningDetailed(
 	if (!isTelegramConfigured(cfg)) return "disabled";
 	const root = notificationRootForCwd(input.cwd);
 	const fp = tokenFingerprint(cfg.botToken);
+	// A live v0.10 parent has no stable process authority on Windows. Never turn an
+	// unproven cooperative handoff into destructive cleanup or a replacement spawn.
+	if ((deps.platform ?? process.platform) === "win32") {
+		const parentState: unknown = await readDaemonState(input.settings, deps.fs);
+		if (isParentDaemonState(parentState) && (deps.pidAlive ?? defaultPidAlive)(parentState.pid))
+			return "blocked_identity";
+	}
 	// Windows can retain dead launcher metadata without an ownership lock; reclaim
 	// its dead discovery records before the replacement can publish a new owner.
 	if ((deps.platform ?? process.platform) === "win32" && !deps.fs) {
@@ -2259,7 +2607,11 @@ export async function ensureTelegramDaemonRunningDetailed(
 			waitStepMs: deps.waitStepMs,
 			timeoutMs: deps.readinessTimeoutMs,
 		});
-		if (ready) {
+		// A legacy parent cannot satisfy the current ready-state shape, but the
+		// bounded wait gives its heartbeat a second observation window. Retry the
+		// acquisition once so legacyParentHandoffDecision can consume that
+		// attestation before startup treats the owner as blocked.
+		if (ready || isLegacyParentDaemonState(provisional)) {
 			spawned = await withTelegramSetupLease(
 				cfg.botToken,
 				async () =>
@@ -2301,7 +2653,7 @@ export async function ensureTelegramDaemonRunningDetailed(
 		const previous = await readNotificationRootRegistration({ ...input, fs: deps.fs });
 		await registerNotificationRoot({ ...input, fs: deps.fs });
 		const controller = new TelegramDaemonController(input.settings, telegramControllerDeps(deps));
-		const upgrade = await controller.reloadForGenerationUpgrade();
+		const upgrade = await controller.reloadForGenerationUpgrade({}, spawned.legacyReloadRequired === true);
 		if (upgrade.outcome !== "ready") {
 			await restoreNotificationRootRegistration({
 				settings: input.settings,
@@ -2363,12 +2715,28 @@ export async function ensureTelegramDaemonRunning(
 }
 
 function telegramControllerDeps(deps: TelegramDaemonDeps): TelegramDaemonControlDeps {
+	// The legacy signal seam has no authority metadata of its own. Pair it with
+	// the captured process incarnation so the controller retains its identity
+	// fence; Windows continues through its hard-authority refusal path.
+	const cooperativeSignalReference =
+		deps.sendSignal && (deps.platform ?? process.platform) !== "win32"
+			? (pid: number): DaemonProcessReference | undefined => {
+					const incarnation = deps.pidIncarnation?.(pid);
+					if (!isProcessIncarnation(incarnation)) return undefined;
+					return {
+						incarnation,
+						termination: "cooperative",
+						signalRoot: signal => deps.sendSignal!(pid, signal),
+					};
+				}
+			: undefined;
 	return {
 		fs: deps.fs,
 		now: deps.now,
 		pidAlive: deps.pidAlive,
-		processReference: deps.processReference,
+		processReference: cooperativeSignalReference ?? deps.processReference,
 		pidIncarnation: deps.pidIncarnation,
+		platform: deps.platform,
 		spawn: deps.spawn,
 		execPath: deps.execPath,
 		ownerPid: deps.pid,

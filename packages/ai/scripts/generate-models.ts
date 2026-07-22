@@ -71,6 +71,44 @@ function isRetiredBundledModel(model: Pick<Model, "provider" | "id">): boolean {
 	return RETIRED_BUNDLED_MODEL_KEYS.has(`${model.provider}/${model.id}`);
 }
 
+/**
+ * Inject dedicated image generation models into providers that support them.
+ * gpt-image-2 is registered under openai and openai-codex so the image
+ * generation tool can route through a dedicated model instead of the active
+ * chat model. These entries are image-only and should be excluded from the
+ * chat model browser UI.
+ */
+function injectImageGenerationModels(models: Model[]): void {
+	const imageModelBase = {
+		id: "gpt-image-2",
+		name: "GPT Image 2",
+		reasoning: false,
+		input: ["text"] as const,
+		output: ["text", "image"] as const,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	};
+	const hasOpenAI = models.some(m => m.provider === "openai" && m.id === "gpt-image-2");
+	if (!hasOpenAI) {
+		models.push({
+			...imageModelBase,
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "",
+		} as Model);
+	}
+	const hasCodex = models.some(m => m.provider === "openai-codex" && m.id === "gpt-image-2");
+	if (!hasCodex) {
+		models.push({
+			...imageModelBase,
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "",
+		} as Model);
+	}
+}
+
 async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscoveryConfig): Promise<string | undefined> {
 	for (const envVar of catalog.envVars) {
 		const value = $env[envVar as keyof typeof $env];
@@ -419,6 +457,7 @@ async function generateModels() {
 	allModels = applyClaudeOpusVisionCorrections(allModels);
 	applyGeneratedModelPolicies(allModels);
 	linkOpenAIPromotionTargets(allModels);
+	injectImageGenerationModels(allModels);
 
 	// Group by provider and sort each provider's models
 	const providers: Record<string, Record<string, Model>> = {};

@@ -21,6 +21,19 @@ function tempRoot(prefix = "gjc-resident-life-"): string {
 	return dir;
 }
 
+function failedNativeRename(): native.NativeNoReplaceResult {
+	return {
+		ok: false,
+		code: "io_error",
+		mutationState: "not_committed",
+		durabilityState: "not_attempted",
+		reason: "io_failure",
+		primitive: "unknown",
+		phase: "rename",
+		diagnostic: { schemaVersion: 1, collectionState: "unavailable" },
+	};
+}
+
 function assistant(text: string): AssistantMessage {
 	return {
 		role: "assistant" as const,
@@ -126,10 +139,10 @@ describe("resident cache prune retention, lifecycle cleanup, and JSONL parity", 
 		fs.writeFileSync(path.join(foreignArtifactsDir, "foreign.txt"), "foreign artifact");
 		await deletion.sm.setSessionFile(sessionFile);
 		expect(fs.existsSync(deletion.cacheDir)).toBe(false);
-		await deletion.sm.dropSession(deletion.sessionFile);
+		await expect(deletion.sm.dropSession(deletion.sessionFile)).rejects.toThrow("cleanup remains pending");
 		expect(fs.existsSync(deletion.artifactsDir)).toBe(false);
 		expect(fs.existsSync(deletion.cacheDir)).toBe(false);
-		expect(fs.existsSync(deletion.sessionFile)).toBe(false);
+		expect(fs.existsSync(deletion.sessionFile)).toBe(true);
 		expect(fs.existsSync(foreignSessionFile)).toBe(true);
 		expect(fs.existsSync(foreignArtifactsDir)).toBe(true);
 		expect(fs.existsSync(path.join(foreignArtifactsDir, "foreign.txt"))).toBe(true);
@@ -201,7 +214,7 @@ describe("resident cache prune retention, lifecycle cleanup, and JSONL parity", 
 		const newRoot = tempRoot("gjc-resident-failed-move-");
 		const realRename = native.renameNoReplacePath;
 		vi.spyOn(native, "renameNoReplacePath").mockImplementation((source, target) =>
-			String(source) === sessionFile ? { ok: false, code: "io_error" } : realRename(source, target),
+			String(source) === sessionFile ? failedNativeRename() : realRename(source, target),
 		);
 
 		await expect(sm.moveTo(newRoot)).rejects.toThrow("Atomic session rename failed: io_error");
@@ -224,7 +237,7 @@ describe("resident cache prune retention, lifecycle cleanup, and JSONL parity", 
 		const newRoot = tempRoot("gjc-resident-failed-artifact-move-");
 		const realRename = native.renameNoReplacePath;
 		vi.spyOn(native, "renameNoReplacePath").mockImplementation((source, target) =>
-			String(source) === oldArtifactDir ? { ok: false, code: "io_error" } : realRename(source, target),
+			String(source) === oldArtifactDir ? failedNativeRename() : realRename(source, target),
 		);
 
 		await expect(sm.moveTo(newRoot)).rejects.toThrow("Atomic session rename failed: io_error");

@@ -18,6 +18,7 @@
 - Lean notification verbosity no longer floods remote clients with intermediate tool-turn `turn_stream` frames. Under `/lean`, the latest assistant answer is deferred until `agent_end` (idle); ask lead-ins still flush immediately before inline buttons, and `/verbose` keeps per-turn streaming (including opt-in live frames) (#2863).
 - Ultragoal `complete-goals` no longer reports contradictory next actions when every incomplete story is `blocked` or `review_blocked`. Text and JSON now agree on `next-action=resolve-blockers` with blocked goal IDs/status; failed-only schedules surface `retry-failed`; `execute-goal` always includes a `goal_id` (#2903).
 - Bound each Python tool bridge bearer capability to one active session registration, reject non-canonical or empty bearer credentials before lookup, and rotate authority whenever a retained session replaces its kernel.
+- Deep Interview now scopes provider-facing `ask` metadata to the persisted workflow stage, including after durable session resume: Round 0 advertises only the locked `intent_contract` branch, later rounds advertise ordinary and `intent_review` branches, foreign workflow gates cannot seed recorder state, and wire-valid empty positive-round reviews reach canonical Zod diagnostics while malformed authority remains fail-closed.
 
 ## [0.11.7] - 2026-07-22
 ### Added

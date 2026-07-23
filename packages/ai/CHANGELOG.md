@@ -9,12 +9,15 @@
 - OAuth refresh peer-rotation recovery now runs before failure classification instead of only on the definitive-failure path, and the definitive matcher recognizes the "grant is invalid" phrasing. Providers whose invalid-grant response does not contain the literal `invalid_grant` (e.g. Kimi's 400 "The provided authorization grant is invalid") previously had rotation races misclassified as transient, temp-blocking a healthy credential for five minutes on every race; with Kimi's ~12-minute access tokens and multiple processes sharing the credential store this surfaced as repeated logouts. Genuine revocations are now disabled with a cause instead of looping temp-blocks.
 - Anthropic 400 `Invalid \`signature\` in \`thinking\` block` responses now trigger the one-shot thinking replay repair instead of failing the turn. The existing repair matcher only recognized the "latest assistant message ... cannot be modified" wording, so the signature-validation variant — which can cite a `thinking`/`redacted_thinking` block anywhere in the replayed history (e.g. after compaction/pruning rewrote an earlier turn) — was treated as a fatal request error. The retry now rebuilds the request with thinking blocks dropped from every replayed assistant message (`repairAllAssistantThinking`), while the latest-message mutation variant keeps the targeted latest-only repair.
 
+### Changed
+
+- Raw tool-argument rejection hooks can now select from bounded, authority-controlled correction codes. Unknown or extension-supplied values retain the byte-for-byte generic rejection instead of reaching model-visible validation errors.
+
 ## [0.11.7] - 2026-07-22
 
 ### Changed
 
 - Replaced the `alibaba-coding-plan` provider with first-class `alibaba-token-plan` support. The `/login` OAuth list, provider descriptor, model manager, models.dev descriptor, and bundled `models.json` now target the maintained Alibaba Token Plan endpoint (`https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`, env `ALIBABA_TOKEN_PLAN_API_KEY`) and validate logins against `deepseek-v4-pro`. The retired `alibaba-coding-plan` provider pointed at `coding-intl.dashscope.aliyuncs.com`, which rejected real token-plan keys with 401 and was the only Alibaba entry exposed in `/login`.
-- Raw tool-argument rejection hooks can now select from bounded, authority-controlled correction codes. Unknown or extension-supplied values retain the byte-for-byte generic rejection instead of reaching model-visible validation errors.
 
 ## [0.11.4] - 2026-07-20
 

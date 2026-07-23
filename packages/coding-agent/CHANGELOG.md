@@ -5,8 +5,6 @@
 
 - Keybinding configuration now keeps portable canonical text while runtime shortcut labels render platform-native, including concise MacBook glyphs in inline surfaces and glyph-plus-text accessibility labels in `/hotkeys` and `/help`; `/hotkeys` remains authoritative for effective remapped bindings.
 
-## [0.11.8] - 2026-07-23
-
 ### Added
 
 - Plans and delegated tasks carry an authoritative repository binding (`gjc.repository_binding.v1`). Ultragoal/ralplan stamp identity at creation; task lanes stamp omitted bindings from session cwd **before** agent discovery; ralplan stage writes and handoff re-entry enforce the seed binding; declared paths must stay under the bound root; task receipts include the resolved identity; linked isolation worktrees must match the source repository (#2901).

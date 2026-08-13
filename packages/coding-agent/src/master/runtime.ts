@@ -232,6 +232,21 @@ function sessionFromFactory(value: CreateAgentSessionResult | MasterRuntimeSessi
 	return value as MasterRuntimeSession;
 }
 
+/**
+ * A master turn's own outputs must never re-trigger turns. Status flips are
+ * emitted by every turn, and a presentation receipt arrives for every drained
+ * outbox row; treating either as a trigger closes a feedback loop that prompts
+ * the master model once per drained message, forever. Binding lifecycle
+ * transitions (active/blocked/recovered) remain triggers so dispatch wakes
+ * when a provider recovers.
+ */
+function isTurnTriggerEvent(event: MasterEventFrame): boolean {
+	if (event.type === "master_status") return false;
+	if (event.type === "channel_updated")
+		return (event.payload as { transition?: string }).transition !== "presentation_reconciled";
+	return true;
+}
+
 function hasPendingWork(queue: { tasks: Array<{ state: string }> } | undefined, activeWorkerCount = 0): boolean {
 	if (activeWorkerCount > 0) return true;
 	return (
@@ -410,6 +425,7 @@ export class MasterRuntime {
 		for (const event of events) {
 			this.#eventHighWater = Math.max(this.#eventHighWater, event.seq);
 			await this.#options.onEvent?.(event);
+			if (!isTurnTriggerEvent(event)) continue;
 			this.#enqueueTrigger(event);
 		}
 		await this.#providerHealth();

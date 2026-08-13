@@ -181,7 +181,11 @@ function providerChannelName(masterName: string, provider: MasterProvider): stri
 }
 
 function isPresentationRequiredEvent(event: PersistedMasterEvent): boolean {
-	return event.type !== "channel_updated";
+	// channel_updated is provider plumbing. master_status busy/idle flips are
+	// emitted by every master turn; presenting each one feeds a new outbox row
+	// back through the provider, whose reconciliation re-triggers a turn -- an
+	// unbounded status-churn flood into the provider channel.
+	return event.type !== "channel_updated" && event.type !== "master_status";
 }
 
 function presentationContent(event: PersistedMasterEvent): PresentationContent {

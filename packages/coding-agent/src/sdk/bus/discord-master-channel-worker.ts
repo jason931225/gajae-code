@@ -559,6 +559,10 @@ export class DiscordMasterChannelWorker {
 				};
 
 			if (effect.operation !== "replace") {
+				const probeAvailable =
+					this.#provider.findThreadByNonce !== undefined &&
+					this.#guildId !== undefined &&
+					this.#parentChannelId !== undefined;
 				const existing = await this.#findThread(effect);
 				if (existing) {
 					await this.#unarchiveIfRetained(existing);
@@ -570,7 +574,12 @@ export class DiscordMasterChannelWorker {
 						reconciled: true,
 					};
 				}
-				if (effect.operation === "reconcile")
+				// An authoritative nonce probe finding nothing proves the earlier create
+				// never landed, so fall through to the nonce-bound createThread (provider
+				// createThread reuses any existing starter message carrying the nonce
+				// marker, so same-nonce create is idempotent). Only an unavailable probe
+				// stays uncertain.
+				if (effect.operation === "reconcile" && !probeAvailable)
 					return {
 						effectKind: "provision_channel",
 						status: "unknown",

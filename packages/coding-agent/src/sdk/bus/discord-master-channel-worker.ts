@@ -458,9 +458,13 @@ export class DiscordMasterChannelWorker {
 	}
 
 	async #findThread(effect: DiscordProvisionEffect): Promise<DiscordThread | null> {
-		const finder = this.#provider.findThreadByNonce;
-		if (!finder || this.#guildId === undefined || this.#parentChannelId === undefined) return null;
-		const found = await finder({ guildId: this.#guildId, parentId: this.#parentChannelId, nonce: effect.nonce });
+		if (!this.#provider.findThreadByNonce || this.#guildId === undefined || this.#parentChannelId === undefined)
+			return null;
+		const found = await this.#provider.findThreadByNonce({
+			guildId: this.#guildId,
+			parentId: this.#parentChannelId,
+			nonce: effect.nonce,
+		});
 		return found;
 	}
 
@@ -474,10 +478,11 @@ export class DiscordMasterChannelWorker {
 	async #confirmedDeleted(effect: DiscordProvisionEffect): Promise<boolean> {
 		const previous = effect.previousRemoteChannelId;
 		if (!previous) return true;
-		const checker =
-			this.#provider.confirmThreadDeleted ?? this.#provider.isThreadDeleted ?? this.#provider.confirmedDeleted;
-		if (!checker) return false;
-		return await checker({ threadId: previous, effect });
+		if (this.#provider.confirmThreadDeleted)
+			return await this.#provider.confirmThreadDeleted({ threadId: previous, effect });
+		if (this.#provider.isThreadDeleted) return await this.#provider.isThreadDeleted({ threadId: previous, effect });
+		if (this.#provider.confirmedDeleted) return await this.#provider.confirmedDeleted({ threadId: previous, effect });
+		return false;
 	}
 
 	async #provision(effect: DiscordProvisionEffect): Promise<ProviderProvisionOutcome> {

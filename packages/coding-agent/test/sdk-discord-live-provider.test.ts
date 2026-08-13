@@ -158,6 +158,42 @@ describe("DiscordLiveProvider protocol", () => {
 		expect({ starterMessages, threadCreates }).toEqual({ starterMessages: 1, threadCreates: 1 });
 		expect(sockets).toEqual([]);
 	});
+	test("caps durable effect nonces to Discord's 25-character message nonce limit", async () => {
+		const durable = `nonce:${"ab".repeat(24)}`;
+		expect(durable).toHaveLength(54);
+		const requests: Array<{ path: string; init: RequestInit }> = [];
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async (input, init) => {
+				requests.push({ path: String(input), init: init ?? {} });
+				const path = String(input);
+				if (path.endsWith("/channels/thread/messages?limit=100")) {
+					const posted = requests.find(request => request.path.endsWith("/channels/thread/messages"));
+					const postedNonce = posted ? (JSON.parse(String(posted.init.body)) as { nonce?: string }).nonce : undefined;
+					return response([{ id: "mapped-message", nonce: postedNonce }]);
+				}
+				if (path.endsWith("/channels/thread/messages")) return response({ id: "mapped-message" });
+				return response({ id: "unused" });
+			},
+			WebSocketImpl: () => new FakeSocket(),
+		});
+
+		await live.postMessage({ threadId: "thread", content: "hello", nonce: durable });
+		const first = JSON.parse(String(requests[0]?.init.body)) as { nonce: string; enforce_nonce: boolean };
+		expect(first.nonce.length).toBeLessThanOrEqual(25);
+		expect(first.enforce_nonce).toBe(true);
+		expect(first.nonce).not.toBe(durable);
+
+		requests.length = 0;
+		await live.postMessage({ threadId: "thread", content: "again", nonce: durable });
+		const second = JSON.parse(String(requests[0]?.init.body)) as { nonce: string };
+		expect(second.nonce).toBe(first.nonce);
+
+		const found = await live.findMessageByNonce({ threadId: "thread", nonce: durable });
+		expect(found).toEqual({ id: "mapped-message" });
+	});
 
 	test("serializes Discord select controls and maps selected gateway values", async () => {
 		const requests: Array<{ path: string; init: RequestInit }> = [];

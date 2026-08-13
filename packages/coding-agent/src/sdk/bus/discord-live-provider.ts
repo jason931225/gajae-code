@@ -16,6 +16,10 @@ const INVALID_SESSION_RECONNECT_DELAY_MS = 1_000;
 const TERMINAL_GATEWAY_CLOSE_CODES: ReadonlySet<number> = new Set([4_004, 4_010, 4_011, 4_012, 4_013, 4_014]);
 
 const NONCE_SUFFIX = " -->";
+/** Discord caps message nonces at 25 characters. Durable effect nonces ('nonce:<48 hex>') exceed that, so map them deterministically; send and reconcile sides must use the same mapping. */
+function discordMessageNonce(nonce: string): string {
+	return nonce.length <= 25 ? nonce : nonce.replace(/^nonce:/, "").slice(0, 25);
+}
 
 export interface DiscordGatewaySocket {
 	readonly readyState: number;
@@ -180,7 +184,7 @@ export class DiscordLiveProvider implements DiscordProvider, DiscordDiagnosticPr
 			method: "POST",
 			body: JSON.stringify({
 				content: input.content,
-				...(input.nonce === undefined ? {} : { nonce: input.nonce, enforce_nonce: true }),
+				...(input.nonce === undefined ? {} : { nonce: discordMessageNonce(input.nonce), enforce_nonce: true }),
 				...(input.components === undefined
 					? {}
 					: {
@@ -228,11 +232,12 @@ export class DiscordLiveProvider implements DiscordProvider, DiscordDiagnosticPr
 	}
 
 	async findMessageByNonce(input: { threadId: string; nonce: string }): Promise<{ id: string } | null> {
+		const expected = discordMessageNonce(input.nonce);
 		const messages = await this.#request(`/channels/${input.threadId}/messages?limit=100`);
 		if (!Array.isArray(messages)) return null;
 		for (const message of messages) {
 			const record = this.#record(message);
-			if (record.nonce !== input.nonce) continue;
+			if (record.nonce !== expected) continue;
 			const id = this.#string(record, "id");
 			if (id) return { id };
 		}

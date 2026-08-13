@@ -142,4 +142,37 @@ describe("DiscordMasterChannelWorker provider this-binding", () => {
 		expect(client.results).toHaveLength(1);
 		expect(client.results[0]?.outcome).toEqual(frame.outcome);
 	});
+
+	test("reconcile provision creates when an authoritative nonce probe finds nothing", async () => {
+		const provider = new FakeBindingProvider();
+		const client = new FakeWorkerClient();
+		const worker = new DiscordMasterChannelWorker({
+			client,
+			provider,
+			guildId: "guild",
+			parentChannelId: "parent",
+			requestId: () => "req-reconcile",
+		});
+
+		const frame = await worker.handleEffect(
+			provisionLease({
+				effectId: "effect-3",
+				intentId: "intent-3",
+				leaseId: "lease-3",
+				nonce: "nonce-reconcile",
+				operation: "reconcile",
+			}),
+		);
+
+		expect(frame.outcome).toEqual({
+			effectKind: "provision_channel",
+			status: "succeeded",
+			remoteEffectId: "discord-thread:thread-1",
+			remoteChannelId: "thread-1",
+			reconciled: false,
+		});
+		expect(provider.calls).toEqual(["findThreadByNonce:nonce-reconcile", "createThread:nonce-reconcile"]);
+		expect(client.results).toHaveLength(1);
+		expect(client.results[0]?.outcome).toEqual(frame.outcome);
+	});
 });

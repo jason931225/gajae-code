@@ -151,9 +151,13 @@ function responseSessionId(response: Record<string, unknown>): string | null {
 }
 
 function promptWasAccepted(response: Record<string, unknown>): boolean {
-	for (const key of ["ok", "accepted", "delivered", "queued", "reconciled"]) {
+	for (const key of ["ok", "accepted", "reconciled"]) {
 		if (response[key] === false) return false;
 	}
+	// `queued: false` on a delivered turn.prompt response means "delivered
+	// directly, not queued" — a success shape, not a rejection. Only treat
+	// delivery as failed when it was neither delivered nor queued.
+	if (response.delivered === false && response.queued !== true) return false;
 	return (
 		response.turn_id !== undefined ||
 		response.turnId !== undefined ||
